@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+#yosys
+oss-cad-suite/
+
+*.json
+*.svg
+CLAUDE.md
+
+designs/cv32e40p
+designs/openc910
+
+*.v
+
