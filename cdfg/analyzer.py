@@ -18,21 +18,21 @@ class CDFGAnalyzer:
     def get_statistics(self) -> dict:
         """获取统计信息"""
         stats = {
-            'module_name': self.cdfg.module_name,
-            'total_nodes': len(self.cdfg.nodes),
-            'total_edges': len(self.cdfg.edges),
-            'node_types': defaultdict(int),
-            'edge_types': defaultdict(int),
-            'cell_types': defaultdict(int),
+            "module_name": self.cdfg.module_name,
+            "total_nodes": len(self.cdfg.nodes),
+            "total_edges": len(self.cdfg.edges),
+            "node_types": defaultdict(int),
+            "edge_types": defaultdict(int),
+            "cell_types": defaultdict(int),
         }
 
         for node in self.cdfg.nodes.values():
-            stats['node_types'][node.node_type.name] += 1
+            stats["node_types"][node.node_type.name] += 1
             if node.cell_type:
-                stats['cell_types'][node.cell_type] += 1
+                stats["cell_types"][node.cell_type] += 1
 
         for edge in self.cdfg.edges:
-            stats['edge_types'][edge.edge_type.name] += 1
+            stats["edge_types"][edge.edge_type.name] += 1
 
         return stats
 

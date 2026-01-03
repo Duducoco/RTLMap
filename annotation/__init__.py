@@ -10,11 +10,11 @@ from .annotator import CoverageAnnotator, AnnotationStats, annotate_cdfg_with_co
 
 __all__ = [
     # 解析器
-    'CoverageParser',
-    'BranchCoverage',
-    'BranchStatus',
+    "CoverageParser",
+    "BranchCoverage",
+    "BranchStatus",
     # 标注器
-    'CoverageAnnotator',
-    'AnnotationStats',
-    'annotate_cdfg_with_coverage',
+    "CoverageAnnotator",
+    "AnnotationStats",
+    "annotate_cdfg_with_coverage",
 ]

@@ -8,6 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+.vscode
+.serena
+.ruff_cache
+.*/
 
 #yosys
 oss-cad-suite/
@@ -19,5 +23,7 @@ CLAUDE.md
 designs/cv32e40p
 designs/openc910
 
+
 *.v
+*.sv
 

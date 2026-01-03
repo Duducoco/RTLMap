@@ -15,25 +15,30 @@ from .parser import CoverageParser, BranchCoverage
 @dataclass
 class AnnotationStats:
     """标注统计信息"""
-    total_mux_nodes: int = 0           # MUX 节点总数
-    annotated_mux_nodes: int = 0       # 已标注的 MUX 节点数
-    total_edges: int = 0               # 边总数
-    annotated_edges: int = 0           # 已标注的边数
-    covered_edges: int = 0             # 已覆盖的边数
-    uncovered_edges: int = 0           # 未覆盖的边数
-    control_edges: int = 0             # 控制边数
-    data_true_edges: int = 0           # data_true 边数
-    data_false_edges: int = 0          # data_false 边数
+
+    total_mux_nodes: int = 0  # MUX 节点总数
+    annotated_mux_nodes: int = 0  # 已标注的 MUX 节点数
+    total_edges: int = 0  # 边总数
+    annotated_edges: int = 0  # 已标注的边数
+    covered_edges: int = 0  # 已覆盖的边数
+    uncovered_edges: int = 0  # 未覆盖的边数
+    control_edges: int = 0  # 控制边数
+    data_true_edges: int = 0  # data_true 边数
+    data_false_edges: int = 0  # data_false 边数
     # 传播标注统计
-    propagated_edges: int = 0          # 通过传播标注的边数
-    always_executed_edges: int = 0     # 必然执行的边数（组合逻辑）
+    propagated_edges: int = 0  # 通过传播标注的边数
+    always_executed_edges: int = 0  # 必然执行的边数（组合逻辑）
 
 
 class CoverageAnnotator:
     """覆盖率标注器"""
 
-    def __init__(self, cdfg: CDFG, coverage_data: Dict[int, BranchCoverage],
-                 source_file: str = None):
+    def __init__(
+        self,
+        cdfg: CDFG,
+        coverage_data: Dict[int, BranchCoverage],
+        source_file: str = None,
+    ):
         """
         初始化标注器
 
@@ -56,7 +61,7 @@ class CoverageAnnotator:
 
     def _build_line_mapping(self):
         """建立行号到 MUX/时序节点的映射"""
-        # MUX 节点映射
+        # MUX 节点映射（按 source_line）
         for node_id, node in self.cdfg.nodes.items():
             if node.node_type == NodeType.MUX and node.source_line > 0:
                 # 如果指定了源文件，只映射匹配的节点
@@ -65,6 +70,17 @@ class CoverageAnnotator:
                         continue
                 self.line_to_mux_nodes[node.source_line].append(node_id)
                 self.stats.total_mux_nodes += 1
+
+        # MUX 节点映射（按 stmt_start_line，用于 CASE 语句）
+        # 当 src 属性包含复合位置时，stmt_start_line 记录了 case/if 语句的起始行
+        self.stmt_line_to_mux_nodes: Dict[int, List[str]] = defaultdict(list)
+        for node_id, node in self.cdfg.nodes.items():
+            if node.node_type == NodeType.MUX and node.stmt_start_line is not None:
+                # 如果指定了源文件，只映射匹配的节点
+                if self.source_file and node.source_file:
+                    if node.source_file != self.source_file:
+                        continue
+                self.stmt_line_to_mux_nodes[node.stmt_start_line].append(node_id)
 
         # 时序节点映射（用于复位分支）
         self.line_to_seq_nodes: Dict[int, List[str]] = defaultdict(list)
@@ -76,12 +92,20 @@ class CoverageAnnotator:
                         continue
                 self.line_to_seq_nodes[node.source_line].append(node_id)
 
-    def _find_mux_chain_for_coverage(self, coverage_line: int, total_branches: int) -> List[str]:
+    def _find_mux_chain_for_coverage(
+        self, coverage_line: int, total_branches: int
+    ) -> List[str]:
         """
         为覆盖率行找到对应的 MUX 链
 
         对于 if-else-if 链，覆盖率报告只记录起始行号（如 96），
         但 CDFG 中每个 else-if 对应不同行号（96, 97, 98...）。
+
+        对于 CASE 语句，覆盖率报告记录的是 case 语句本身的行号，
+        而 CDFG 中 MUX 节点记录的是各个 case 分支项的行号。
+        此时需要通过 stmt_start_line 映射来查找。
+
+        注意：覆盖率报告的行号可能比 Yosys 的行号少 1（从 always_comb begin 行开始计数）
 
         这个方法会找到从 coverage_line 开始的连续 MUX 链。
 
@@ -92,7 +116,20 @@ class CoverageAnnotator:
         Returns:
             MUX 节点 ID 列表
         """
-        # 首先检查是否在 coverage_line 附近有 MUX
+        # 首先尝试通过 stmt_start_line 查找（用于 CASE 语句）
+        # 这个映射存储了 case/if 语句起始行到 MUX 节点的映射
+        # 注意：覆盖率报告行号可能比 Yosys 行号少 1，所以同时尝试 coverage_line 和 coverage_line + 1
+        for offset in [0, 1]:
+            candidate_line = coverage_line + offset
+            if candidate_line in self.stmt_line_to_mux_nodes:
+                stmt_mux = self.stmt_line_to_mux_nodes[candidate_line]
+                if len(stmt_mux) >= total_branches - 1:
+                    return self._sort_mux_nodes_topologically(stmt_mux[: total_branches - 1])
+                elif stmt_mux:
+                    # 如果数量不足但有匹配，返回所有找到的
+                    return self._sort_mux_nodes_topologically(stmt_mux)
+
+        # 然后检查是否在 coverage_line 附近有 MUX（用于 IF 语句）
         nearby_mux = []
         for offset in range(-2, 3):
             candidate_line = coverage_line + offset
@@ -105,13 +142,15 @@ class CoverageAnnotator:
 
         # 如果附近有足够的 MUX
         if len(nearby_mux) >= total_branches - 1:
-            return self._sort_mux_nodes_topologically(nearby_mux[:total_branches - 1])
+            return self._sort_mux_nodes_topologically(nearby_mux[: total_branches - 1])
 
         # 对于 if-else-if 链，收集从 coverage_line 开始的连续行的 MUX
         all_mux_lines = sorted(self.line_to_mux_nodes.keys())
 
         # 找到最近的 MUX 起始行
-        start_line = min((l for l in all_mux_lines if l >= coverage_line - 2), default=None)
+        start_line = min(
+            (line for line in all_mux_lines if line >= coverage_line - 2), default=None
+        )
         if start_line is None:
             return []
 
@@ -139,10 +178,14 @@ class CoverageAnnotator:
         # 对于每个有覆盖数据的行
         for line_no, coverage in self.coverage_data.items():
             # 使用新的方法找到 MUX 链
-            mux_nodes = self._find_mux_chain_for_coverage(line_no, coverage.total_branches)
+            mux_nodes = self._find_mux_chain_for_coverage(
+                line_no, coverage.total_branches
+            )
 
             if mux_nodes:
-                print(f"行 {line_no}: 找到 {len(mux_nodes)} 个 MUX 节点，对应 {coverage.total_branches} 个分支")
+                print(
+                    f"行 {line_no}: 找到 {len(mux_nodes)} 个 MUX 节点，对应 {coverage.total_branches} 个分支"
+                )
                 # 标注每个 MUX 节点
                 self._annotate_mux_chain(mux_nodes, coverage)
             else:
@@ -150,10 +193,14 @@ class CoverageAnnotator:
                 # 复位逻辑 (if rst) 可能被综合成带异步复位的触发器
                 seq_nodes = self._find_sequential_nodes_for_coverage(line_no)
                 if seq_nodes:
-                    print(f"行 {line_no}: 找到 {len(seq_nodes)} 个时序节点（复位分支），对应 {coverage.total_branches} 个分支")
+                    print(
+                        f"行 {line_no}: 找到 {len(seq_nodes)} 个时序节点（复位分支），对应 {coverage.total_branches} 个分支"
+                    )
                     self._annotate_sequential_reset(seq_nodes, coverage)
                 else:
-                    print(f"警告: 行 {line_no} ({coverage.branch_type}) 没有找到对应的节点")
+                    print(
+                        f"警告: 行 {line_no} ({coverage.branch_type}) 没有找到对应的节点"
+                    )
 
         return self.stats
 
@@ -241,7 +288,7 @@ class CoverageAnnotator:
 
                 elif node.node_type == NodeType.MUX:
                     # MUX：检查 A 或 B 端口是否有已标注的输入
-                    data_inputs = [e for e in inputs if e.target_port in ('A', 'B')]
+                    data_inputs = [e for e in inputs if e.target_port in ("A", "B")]
                     any_data_covered = any(e.coverage_label == 1 for e in data_inputs)
                     any_data_labeled = any(e.coverage_label >= 0 for e in data_inputs)
                     if any_data_labeled:
@@ -260,9 +307,15 @@ class CoverageAnnotator:
 
                 elif node.node_type == NodeType.SEQUENTIAL:
                     # 时序节点：D/AD 端口已标注 或 CLK 端口已标注 → Q 输出已执行
-                    relevant_inputs = [e for e in inputs if e.target_port in ('D', 'AD', 'CLK')]
-                    any_input_covered = any(e.coverage_label == 1 for e in relevant_inputs)
-                    any_input_labeled = any(e.coverage_label >= 0 for e in relevant_inputs)
+                    relevant_inputs = [
+                        e for e in inputs if e.target_port in ("D", "AD", "CLK")
+                    ]
+                    any_input_covered = any(
+                        e.coverage_label == 1 for e in relevant_inputs
+                    )
+                    any_input_labeled = any(
+                        e.coverage_label >= 0 for e in relevant_inputs
+                    )
                     if any_input_labeled:
                         new_label = 1 if any_input_covered else 0
                         for edge in outputs:
@@ -321,7 +374,9 @@ class CoverageAnnotator:
                 return self.line_to_seq_nodes[candidate_line]
         return []
 
-    def _annotate_sequential_reset(self, seq_nodes: List[str], coverage: BranchCoverage):
+    def _annotate_sequential_reset(
+        self, seq_nodes: List[str], coverage: BranchCoverage
+    ):
         """
         标注时序元件的复位分支
 
@@ -356,12 +411,17 @@ class CoverageAnnotator:
                     branch_idx,
                     is_covered,
                     is_reset_branch,
-                    coverage.line_no
+                    coverage.line_no,
                 )
 
-    def _annotate_seq_edges(self, seq_node_id: str, branch_index: int,
-                           is_covered: bool, is_reset_branch: bool,
-                           coverage_line: int):
+    def _annotate_seq_edges(
+        self,
+        seq_node_id: str,
+        branch_index: int,
+        is_covered: bool,
+        is_reset_branch: bool,
+        coverage_line: int,
+    ):
         """
         标注单个时序元件的边
 
@@ -379,7 +439,7 @@ class CoverageAnnotator:
                 continue
 
             # ALOAD/ARST 端口 - 复位控制信号
-            if edge.target_port in ('ALOAD', 'ARST', 'SRST', 'RST'):
+            if edge.target_port in ("ALOAD", "ARST", "SRST", "RST"):
                 edge.source_line = coverage_line
                 edge.branch_index = branch_index
                 edge.coverage_label = coverage_label
@@ -392,7 +452,7 @@ class CoverageAnnotator:
                     self.stats.uncovered_edges += 1
 
             # AD 端口 - 复位值（复位分支）
-            elif edge.target_port == 'AD' and is_reset_branch:
+            elif edge.target_port == "AD" and is_reset_branch:
                 edge.source_line = coverage_line
                 edge.branch_index = branch_index
                 edge.coverage_label = coverage_label
@@ -405,7 +465,7 @@ class CoverageAnnotator:
                     self.stats.uncovered_edges += 1
 
             # D 端口 - 正常数据（非复位分支）
-            elif edge.target_port == 'D' and not is_reset_branch:
+            elif edge.target_port == "D" and not is_reset_branch:
                 edge.source_line = coverage_line
                 edge.branch_index = branch_index
                 edge.coverage_label = coverage_label
@@ -495,7 +555,7 @@ class CoverageAnnotator:
                         branch_idx,
                         branch_status.is_covered,
                         is_true_branch=True,
-                        coverage_line=coverage.line_no
+                        coverage_line=coverage.line_no,
                     )
                     # 当某个条件为真时，该条件之前的所有 MUX 的 A 端口也被执行
                     # 因为要到达 MUX[mux_idx]，必须经过 MUX[0] 到 MUX[mux_idx-1] 的 A 端口
@@ -505,7 +565,7 @@ class CoverageAnnotator:
                             branch_idx,
                             branch_status.is_covered,
                             is_true_branch=False,
-                            coverage_line=coverage.line_no
+                            coverage_line=coverage.line_no,
                         )
             else:
                 # 所有条件都为 0，这是 else 分支
@@ -516,12 +576,17 @@ class CoverageAnnotator:
                         branch_idx,
                         branch_status.is_covered,
                         is_true_branch=False,
-                        coverage_line=coverage.line_no
+                        coverage_line=coverage.line_no,
                     )
 
-    def _annotate_mux_edges(self, mux_node_id: str, branch_index: int,
-                            is_covered: bool, is_true_branch: bool,
-                            coverage_line: int):
+    def _annotate_mux_edges(
+        self,
+        mux_node_id: str,
+        branch_index: int,
+        is_covered: bool,
+        is_true_branch: bool,
+        coverage_line: int,
+    ):
         """
         标注单个 MUX 的边
 
@@ -539,7 +604,7 @@ class CoverageAnnotator:
                 continue
 
             # S 端口 - 控制信号
-            if edge.target_port == 'S':
+            if edge.target_port == "S":
                 # 使用或逻辑：如果已经是已覆盖(1)，不要被未覆盖(0)覆盖
                 if edge.coverage_label == -1:
                     # 首次标注
@@ -560,7 +625,7 @@ class CoverageAnnotator:
                     self.stats.uncovered_edges -= 1
 
             # A 端口 - false 分支
-            elif edge.target_port == 'A' and not is_true_branch:
+            elif edge.target_port == "A" and not is_true_branch:
                 if edge.coverage_label == -1:
                     edge.source_line = coverage_line
                     edge.branch_index = branch_index
@@ -578,7 +643,7 @@ class CoverageAnnotator:
                     self.stats.uncovered_edges -= 1
 
             # B 端口 - true 分支
-            elif edge.target_port == 'B' and is_true_branch:
+            elif edge.target_port == "B" and is_true_branch:
                 if edge.coverage_label == -1:
                     edge.source_line = coverage_line
                     edge.branch_index = branch_index
@@ -601,9 +666,9 @@ class CoverageAnnotator:
             self.stats.annotated_mux_nodes += 1
 
 
-def annotate_cdfg_with_coverage(cdfg: CDFG, html_path: str,
-                                 instance_tag: str = None,
-                                 propagate: bool = False) -> AnnotationStats:
+def annotate_cdfg_with_coverage(
+    cdfg: CDFG, html_path: str, instance_tag: str = None, propagate: bool = False
+) -> AnnotationStats:
     """
     便捷函数：用覆盖率数据标注 CDFG
 
@@ -620,7 +685,7 @@ def annotate_cdfg_with_coverage(cdfg: CDFG, html_path: str,
     parser = CoverageParser(html_path)
 
     if instance_tag is None:
-        instance_tag = parser.get_first_instance()
+        instance_tag = parser.get_last_instance()
 
     coverage_data = parser.parse_branch_coverage(instance_tag)
 
