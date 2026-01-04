@@ -30,6 +30,7 @@ class CDFGExporter:
                     "input_ports": n.input_ports,
                     "output_ports": n.output_ports,
                     "source_line": n.source_line,
+                    "stmt_start_line": n.stmt_start_line,
                     "source_file": n.source_file,
                 }
                 for n in self.cdfg.nodes.values()

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from collections import defaultdict
 
 from cdfg import CDFG, Edge, NodeType
-from .parser import CoverageParser, BranchCoverage
+from .parser import CoverageParser, BranchCoverage, ConditionCoverage
 
 
 @dataclass
@@ -28,16 +28,24 @@ class AnnotationStats:
     # 传播标注统计
     propagated_edges: int = 0  # 通过传播标注的边数
     always_executed_edges: int = 0  # 必然执行的边数（组合逻辑）
+    # 条件覆盖率统计
+    condition_annotated_mux: int = 0  # 通过条件覆盖率标注的 MUX 数
+    condition_annotated_edges: int = 0  # 通过条件覆盖率标注的边数
 
 
 class CoverageAnnotator:
     """覆盖率标注器"""
+
+    # 行号搜索范围配置
+    STMT_LINE_SEARCH_RANGE = range(-2, 6)  # stmt_start_line 搜索范围 [-2, +5]
+    SOURCE_LINE_SEARCH_RANGE = range(-5, 40)  # source_line 搜索范围 [-5, +39]
 
     def __init__(
         self,
         cdfg: CDFG,
         coverage_data: Dict[int, BranchCoverage],
         source_file: str = None,
+        condition_data: Dict[int, List[ConditionCoverage]] = None,
     ):
         """
         初始化标注器
@@ -46,14 +54,19 @@ class CoverageAnnotator:
             cdfg: CDFG 对象
             coverage_data: 行号 -> BranchCoverage 的映射
             source_file: 覆盖率报告对应的源文件名（用于过滤 MUX 节点）
+            condition_data: 行号 -> ConditionCoverage 列表的映射
         """
         self.cdfg = cdfg
         self.coverage_data = coverage_data
         self.source_file = source_file
+        self.condition_data = condition_data or {}
         self.stats = AnnotationStats()
 
         # 追踪已标注的 MUX 节点（避免重复计数）
         self._annotated_mux_set: set = set()
+
+        # 学习到的行号偏移量（VCS 与 Yosys 之间的偏移）
+        self._learned_offset: int = None
 
         # 建立行号到 MUX 节点的映射
         self.line_to_mux_nodes: Dict[int, List[str]] = defaultdict(list)
@@ -105,7 +118,8 @@ class CoverageAnnotator:
         而 CDFG 中 MUX 节点记录的是各个 case 分支项的行号。
         此时需要通过 stmt_start_line 映射来查找。
 
-        注意：覆盖率报告的行号可能比 Yosys 的行号少 1（从 always_comb begin 行开始计数）
+        注意：VCS 和 Yosys 之间可能存在较大的行号偏移（可达 30+ 行），
+        这是由于 include 文件、宏展开等处理方式不同导致的。
 
         这个方法会找到从 coverage_line 开始的连续 MUX 链。
 
@@ -116,43 +130,89 @@ class CoverageAnnotator:
         Returns:
             MUX 节点 ID 列表
         """
-        # 首先尝试通过 stmt_start_line 查找（用于 CASE 语句）
-        # 这个映射存储了 case/if 语句起始行到 MUX 节点的映射
-        # 注意：覆盖率报告行号可能比 Yosys 行号少 1，所以同时尝试 coverage_line 和 coverage_line + 1
-        for offset in [0, 1]:
+        # 如果已经学习到偏移量，优先使用学习到的偏移
+        if self._learned_offset is not None:
+            adjusted_line = coverage_line + self._learned_offset
+            result = self._search_mux_at_line(adjusted_line, total_branches)
+            if result:
+                return result
+
+        # 1. 首先尝试通过 stmt_start_line 查找（用于 CASE 语句）
+        for offset in self.STMT_LINE_SEARCH_RANGE:
             candidate_line = coverage_line + offset
             if candidate_line in self.stmt_line_to_mux_nodes:
                 stmt_mux = self.stmt_line_to_mux_nodes[candidate_line]
-                if len(stmt_mux) >= total_branches - 1:
-                    return self._sort_mux_nodes_topologically(stmt_mux[: total_branches - 1])
-                elif stmt_mux:
-                    # 如果数量不足但有匹配，返回所有找到的
-                    return self._sort_mux_nodes_topologically(stmt_mux)
+                if stmt_mux:
+                    # 学习偏移量
+                    if self._learned_offset is None and offset != 0:
+                        self._learned_offset = offset
+                        print(f"  学习到行号偏移: {offset}")
+                    if len(stmt_mux) >= total_branches - 1:
+                        return self._sort_mux_nodes_topologically(stmt_mux[: total_branches - 1])
+                    else:
+                        return self._sort_mux_nodes_topologically(stmt_mux)
 
-        # 然后检查是否在 coverage_line 附近有 MUX（用于 IF 语句）
-        nearby_mux = []
-        for offset in range(-2, 3):
+        # 2. 然后在扩大的范围内搜索 source_line（用于 IF 语句）
+        for offset in self.SOURCE_LINE_SEARCH_RANGE:
             candidate_line = coverage_line + offset
             if candidate_line in self.line_to_mux_nodes:
-                nearby_mux.extend(self.line_to_mux_nodes[candidate_line])
+                nearby_mux = self.line_to_mux_nodes[candidate_line]
+                if nearby_mux:
+                    # 学习偏移量
+                    if self._learned_offset is None and offset != 0:
+                        self._learned_offset = offset
+                        print(f"  学习到行号偏移: {offset}")
 
-        if not nearby_mux:
-            # 没有找到附近的 MUX，返回空列表（可能是时序节点的复位逻辑）
-            return []
+                    # 如果找到足够的 MUX，直接返回
+                    if len(nearby_mux) >= total_branches - 1:
+                        return self._sort_mux_nodes_topologically(nearby_mux[: total_branches - 1])
 
-        # 如果附近有足够的 MUX
-        if len(nearby_mux) >= total_branches - 1:
-            return self._sort_mux_nodes_topologically(nearby_mux[: total_branches - 1])
+                    # 尝试从这个位置开始收集更多 MUX
+                    return self._collect_mux_chain_from_line(candidate_line, total_branches)
 
-        # 对于 if-else-if 链，收集从 coverage_line 开始的连续行的 MUX
+        # 3. 如果仍未找到，尝试更宽松的匹配：查找所有 MUX 的 stmt_start_line
+        for offset in self.SOURCE_LINE_SEARCH_RANGE:
+            candidate_line = coverage_line + offset
+            # 检查是否有任何 MUX 的 stmt_start_line 匹配
+            matching_mux = []
+            for node_id, node in self.cdfg.nodes.items():
+                if node.node_type.name == 'MUX' and node.stmt_start_line == candidate_line:
+                    if self.source_file and node.source_file:
+                        if node.source_file != self.source_file:
+                            continue
+                    matching_mux.append(node_id)
+
+            if matching_mux:
+                if self._learned_offset is None and offset != 0:
+                    self._learned_offset = offset
+                    print(f"  学习到行号偏移: {offset}")
+                return self._sort_mux_nodes_topologically(matching_mux[:total_branches - 1] if len(matching_mux) >= total_branches - 1 else matching_mux)
+
+        return []
+
+    def _search_mux_at_line(self, line: int, total_branches: int) -> List[str]:
+        """在指定行搜索 MUX 节点"""
+        # 先检查 stmt_start_line
+        if line in self.stmt_line_to_mux_nodes:
+            stmt_mux = self.stmt_line_to_mux_nodes[line]
+            if stmt_mux:
+                if len(stmt_mux) >= total_branches - 1:
+                    return self._sort_mux_nodes_topologically(stmt_mux[: total_branches - 1])
+                return self._sort_mux_nodes_topologically(stmt_mux)
+
+        # 再检查 source_line
+        if line in self.line_to_mux_nodes:
+            nearby_mux = self.line_to_mux_nodes[line]
+            if nearby_mux:
+                if len(nearby_mux) >= total_branches - 1:
+                    return self._sort_mux_nodes_topologically(nearby_mux[: total_branches - 1])
+                return self._collect_mux_chain_from_line(line, total_branches)
+
+        return []
+
+    def _collect_mux_chain_from_line(self, start_line: int, total_branches: int) -> List[str]:
+        """从指定行开始收集 MUX 链"""
         all_mux_lines = sorted(self.line_to_mux_nodes.keys())
-
-        # 找到最近的 MUX 起始行
-        start_line = min(
-            (line for line in all_mux_lines if line >= coverage_line - 2), default=None
-        )
-        if start_line is None:
-            return []
 
         # 收集足够数量的 MUX
         mux_nodes = []
@@ -531,6 +591,16 @@ class CoverageAnnotator:
         # 分支覆盖数据中的每个分支对应一个条件组合
         # 分支 i 表示：条件 1..i-1 为假，条件 i 为真
 
+        # 建立条件编号到 MUX 索引的映射
+        # 条件编号可能不从 1 开始，也可能不连续（如 CASE 语句）
+        all_conditions = set()
+        for br in coverage.branches:
+            all_conditions.update(br.condition_values.keys())
+
+        # 按条件编号排序，建立映射
+        sorted_conditions = sorted(all_conditions)
+        cond_to_mux_idx = {cond: idx for idx, cond in enumerate(sorted_conditions)}
+
         for branch_idx, branch_status in enumerate(coverage.branches):
             # 找到这个分支对应的 MUX
             # 对于 if-else-if 链：
@@ -539,36 +609,47 @@ class CoverageAnnotator:
             # - ...
             # - 最后一个分支: 所有条件为 0 -> 最后一个 MUX 的 A 端口（else 分支）
 
-            # 找到第一个为 1 的条件
-            active_condition = None
+            # 对于复杂的 CASE 语句（嵌套多层 if-else）:
+            # condition_values 包含路径上所有条件的值
+            # 需要标注路径上所有为真的条件对应的 MUX
+
+            # 收集所有条件值
+            true_conditions = []
+            false_conditions = []
             for cond_idx, cond_val in sorted(branch_status.condition_values.items()):
                 if cond_val == 1:
-                    active_condition = cond_idx
-                    break
+                    true_conditions.append(cond_idx)
+                elif cond_val == 0:
+                    false_conditions.append(cond_idx)
+                # cond_val == -1 表示无关，跳过
 
-            if active_condition is not None:
-                # 这个分支对应第 active_condition 个 MUX 的 B 端口（true 分支）
-                mux_idx = active_condition - 1  # 条件从 1 开始编号
-                if mux_idx < len(mux_nodes):
-                    self._annotate_mux_edges(
-                        mux_nodes[mux_idx],
-                        branch_idx,
-                        branch_status.is_covered,
-                        is_true_branch=True,
-                        coverage_line=coverage.line_no,
-                    )
-                    # 当某个条件为真时，该条件之前的所有 MUX 的 A 端口也被执行
-                    # 因为要到达 MUX[mux_idx]，必须经过 MUX[0] 到 MUX[mux_idx-1] 的 A 端口
-                    for prev_idx in range(mux_idx):
+            if true_conditions:
+                # 标注所有为真的条件对应的 MUX 的 B 端口
+                for cond in true_conditions:
+                    # 使用映射表获取 MUX 索引
+                    mux_idx = cond_to_mux_idx.get(cond, cond - 1)
+                    if 0 <= mux_idx < len(mux_nodes):
                         self._annotate_mux_edges(
-                            mux_nodes[prev_idx],
+                            mux_nodes[mux_idx],
+                            branch_idx,
+                            branch_status.is_covered,
+                            is_true_branch=True,
+                            coverage_line=coverage.line_no,
+                        )
+
+                # 标注所有为假的条件对应的 MUX 的 A 端口
+                for cond in false_conditions:
+                    mux_idx = cond_to_mux_idx.get(cond, cond - 1)
+                    if 0 <= mux_idx < len(mux_nodes):
+                        self._annotate_mux_edges(
+                            mux_nodes[mux_idx],
                             branch_idx,
                             branch_status.is_covered,
                             is_true_branch=False,
                             coverage_line=coverage.line_no,
                         )
             else:
-                # 所有条件都为 0，这是 else 分支
+                # 所有条件都为 0 或无关，这是 else 分支
                 # 执行 else 分支时，整个链上所有 MUX 的 A 端口都被执行
                 for mux_node in mux_nodes:
                     self._annotate_mux_edges(
@@ -665,9 +746,186 @@ class CoverageAnnotator:
             self._annotated_mux_set.add(mux_node_id)
             self.stats.annotated_mux_nodes += 1
 
+    def annotate_condition_coverage(self) -> AnnotationStats:
+        """
+        标注条件覆盖率数据
+
+        条件覆盖率对应三元表达式和逻辑表达式，这些在 CDFG 中通常表示为 MUX 节点。
+        三元表达式 `cond ? a : b` 对应单个 MUX。
+        逻辑表达式 `a && b` 或 `a || b` 可能对应多个 MUX 的组合。
+
+        Returns:
+            更新后的标注统计信息
+        """
+        if not self.condition_data:
+            return self.stats
+
+        print(f"\n--- 条件覆盖率标注 ---")
+        print(f"共有 {len(self.condition_data)} 行的条件覆盖数据")
+
+        annotated_count = 0
+        for line_no, cond_list in self.condition_data.items():
+            # 跳过已被分支覆盖率标注过的行
+            if line_no in self.coverage_data:
+                continue
+
+            for cond_cov in cond_list:
+                # 只处理主表达式，跳过子表达式（避免重复标注）
+                if cond_cov.expression_type != "EXPRESSION":
+                    continue
+
+                # 查找对应的 MUX 节点
+                mux_nodes = self._find_mux_for_condition(line_no, cond_cov)
+                if not mux_nodes:
+                    continue
+
+                # 标注 MUX 节点
+                annotated = self._annotate_condition_mux(mux_nodes, cond_cov)
+                if annotated:
+                    annotated_count += 1
+                    print(f"  行 {line_no}: 标注 {len(mux_nodes)} 个 MUX (条件覆盖)")
+
+        print(f"条件覆盖率标注完成: {annotated_count} 个表达式")
+        return self.stats
+
+    def _find_mux_for_condition(
+        self, coverage_line: int, cond_cov: ConditionCoverage
+    ) -> List[str]:
+        """
+        为条件覆盖率找到对应的 MUX 节点
+
+        Args:
+            coverage_line: 覆盖率报告中的行号
+            cond_cov: 条件覆盖信息
+
+        Returns:
+            MUX 节点 ID 列表
+        """
+        # 使用学习到的偏移量
+        if self._learned_offset is not None:
+            adjusted_line = coverage_line + self._learned_offset
+            if adjusted_line in self.line_to_mux_nodes:
+                mux_list = self.line_to_mux_nodes[adjusted_line]
+                # 条件表达式通常只对应一个或少量 MUX
+                return mux_list[:cond_cov.num_conditions]
+
+        # 搜索 source_line
+        for offset in self.SOURCE_LINE_SEARCH_RANGE:
+            candidate_line = coverage_line + offset
+            if candidate_line in self.line_to_mux_nodes:
+                mux_list = self.line_to_mux_nodes[candidate_line]
+                if mux_list:
+                    # 学习偏移量
+                    if self._learned_offset is None and offset != 0:
+                        self._learned_offset = offset
+                        print(f"  学习到行号偏移: {offset}")
+                    return mux_list[:cond_cov.num_conditions]
+
+        return []
+
+    def _annotate_condition_mux(
+        self, mux_nodes: List[str], cond_cov: ConditionCoverage
+    ) -> bool:
+        """
+        标注条件覆盖率对应的 MUX 节点
+
+        Args:
+            mux_nodes: MUX 节点 ID 列表
+            cond_cov: 条件覆盖信息
+
+        Returns:
+            是否成功标注
+        """
+        if not mux_nodes:
+            return False
+
+        # 分析覆盖状态
+        # 对于条件覆盖率，我们关注整体表达式的 true/false 覆盖情况
+        true_covered = False
+        false_covered = False
+
+        for cond_status in cond_cov.conditions:
+            if cond_status.is_covered:
+                # 检查条件组合的结果
+                # 对于单条件：{1: 0} 表示 false, {1: 1} 表示 true
+                # 对于多条件：需要根据运算符判断（暂时简化处理）
+                if cond_cov.num_conditions == 1:
+                    val = cond_status.condition_values.get(1, 0)
+                    if val == 1:
+                        true_covered = True
+                    else:
+                        false_covered = True
+                else:
+                    # 多条件情况，检查是否有任一条件为真
+                    any_true = any(v == 1 for v in cond_status.condition_values.values())
+                    if any_true:
+                        true_covered = True
+                    else:
+                        false_covered = True
+
+        # 标注 MUX 节点的边
+        for mux_node_id in mux_nodes:
+            for edge in self.cdfg.edges:
+                if edge.target != mux_node_id:
+                    continue
+
+                # 跳过已标注的边
+                if edge.coverage_label >= 0:
+                    continue
+
+                # S 端口 - 控制信号
+                if edge.target_port == "S":
+                    # 控制信号已被评估（无论 true 还是 false）
+                    is_covered = true_covered or false_covered
+                    edge.source_line = cond_cov.line_no
+                    edge.coverage_label = 1 if is_covered else 0
+                    edge.coverage_type = "condition"
+                    self.stats.condition_annotated_edges += 1
+                    self.stats.annotated_edges += 1
+                    if is_covered:
+                        self.stats.covered_edges += 1
+                    else:
+                        self.stats.uncovered_edges += 1
+
+                # B 端口 - true 分支
+                elif edge.target_port == "B":
+                    edge.source_line = cond_cov.line_no
+                    edge.coverage_label = 1 if true_covered else 0
+                    edge.coverage_type = "condition_true"
+                    self.stats.condition_annotated_edges += 1
+                    self.stats.annotated_edges += 1
+                    if true_covered:
+                        self.stats.covered_edges += 1
+                    else:
+                        self.stats.uncovered_edges += 1
+
+                # A 端口 - false 分支
+                elif edge.target_port == "A":
+                    edge.source_line = cond_cov.line_no
+                    edge.coverage_label = 1 if false_covered else 0
+                    edge.coverage_type = "condition_false"
+                    self.stats.condition_annotated_edges += 1
+                    self.stats.annotated_edges += 1
+                    if false_covered:
+                        self.stats.covered_edges += 1
+                    else:
+                        self.stats.uncovered_edges += 1
+
+            # 统计 MUX 节点
+            if mux_node_id not in self._annotated_mux_set:
+                self._annotated_mux_set.add(mux_node_id)
+                self.stats.annotated_mux_nodes += 1
+                self.stats.condition_annotated_mux += 1
+
+        return True
+
 
 def annotate_cdfg_with_coverage(
-    cdfg: CDFG, html_path: str, instance_tag: str = None, propagate: bool = False
+    cdfg: CDFG,
+    html_path: str,
+    instance_tag: str = None,
+    propagate: bool = False,
+    use_condition_coverage: bool = True,
 ) -> AnnotationStats:
     """
     便捷函数：用覆盖率数据标注 CDFG
@@ -677,6 +935,7 @@ def annotate_cdfg_with_coverage(
         html_path: 覆盖率报告 HTML 文件路径
         instance_tag: 实例标签，None 则使用第一个实例
         propagate: 是否启用覆盖率传播（标注非分支边）
+        use_condition_coverage: 是否使用条件覆盖率（标注三元表达式等）
 
     Returns:
         标注统计信息
@@ -687,14 +946,26 @@ def annotate_cdfg_with_coverage(
     if instance_tag is None:
         instance_tag = parser.get_last_instance()
 
+    # 解析分支覆盖率
     coverage_data = parser.parse_branch_coverage(instance_tag)
+
+    # 解析条件覆盖率
+    condition_data = {}
+    if use_condition_coverage:
+        condition_data = parser.parse_condition_coverage(instance_tag)
 
     # 获取源文件名用于过滤 MUX 节点
     source_file = parser.get_source_file()
 
     # 执行标注
-    annotator = CoverageAnnotator(cdfg, coverage_data, source_file=source_file)
+    annotator = CoverageAnnotator(
+        cdfg, coverage_data, source_file=source_file, condition_data=condition_data
+    )
     stats = annotator.annotate()
+
+    # 标注条件覆盖率
+    if use_condition_coverage and condition_data:
+        stats = annotator.annotate_condition_coverage()
 
     # 可选：传播覆盖率到非分支边
     if propagate:
