@@ -14,7 +14,7 @@ from typing import Optional
 
 from cdfg import CDFGExtractor, CDFGExporter, CDFG
 from annotation import CoverageParser, annotate_cdfg_with_coverage, AnnotationStats
-
+from tools import YosysRunner
 
 @dataclass
 class DataAnnotatorConfig:
@@ -490,23 +490,24 @@ def main():
         epilog="""
 示例:
   # 指定设计 JSON 和覆盖率目录，自动匹配模块
-  uv run data_annotate.py --design_name cv32e40p --rtlil_json designs/cv32e40p/RTLIL_json/cv32e40p_core.json -c designs/cv32e40p/coverage_reports/coverage_report1
+  uv run data_annotate.py --design_name cv32e40p --module_name cv32e40p_core -c designs/cv32e40p/coverage_reports/coverage_report1
 
   # 仅提取 CDFG（不标注覆盖率）
-  uv run data_annotate.py --design_name cv32e40p --rtlil_json designs/cv32e40p/RTLIL_json/cv32e40p_core.json --no-coverage
+  uv run data_annotate.py --design_name cv32e40p --module_name cv32e40p_core --no-coverage
 
   # 生成 SVG 可视化
-  uv run data_annotate.py --design_name cv32e40p --rtlil_json designs/cv32e40p/RTLIL_json/cv32e40p_core.json -c designs/cv32e40p/coverage_reports/coverage_report1 --svg
+  uv run data_annotate.py --design_name cv32e40p --module_name cv32e40p_core -c designs/cv32e40p/coverage_reports/coverage_report1 --svg
 
   # 启用覆盖率传播（标注所有可达边）
-  uv run data_annotate.py --design_name cv32e40p --rtlil_json designs/cv32e40p/RTLIL_json/cv32e40p_core.json -c designs/cv32e40p/coverage_reports/coverage_report1 --propagate
+  uv run data_annotate.py --design_name cv32e40p --module_name cv32e40p_core -c designs/cv32e40p/coverage_reports/coverage_report1 --propagate
         """,
     )
-    parser.add_argument("--design_name", nargs="?", default=".", help="design_name")
-    parser.add_argument("--rtlil_json", help="Yosys 生成的 RTLIL JSON 文件")
+    parser.add_argument("--design_name", required=True, help="Design name")
+    parser.add_argument("--module_name", required=True, help="Module name")
     parser.add_argument(
         "-c",
         "--coverage-dir",
+        default="designs/cv32e40p/coverage_reports/coverage_report1",
         dest="coverage_dir",
         help="覆盖率报告目录（自动从 module2html.json 匹配文件）",
     )
@@ -537,17 +538,31 @@ def main():
 
     args = parser.parse_args()
 
+
+
     # 检查design_name与rtlil_json的一致性
     design_dir = Path('designs', args.design_name).absolute()
-    rtlil_json_path_rule = design_dir / 'RTLIL_json'
-    rtlil_json_path_dir = Path(args.rtlil_json).absolute().parent
-    print(rtlil_json_path_dir)
-    print(rtlil_json_path_rule)
-    assert rtlil_json_path_dir == rtlil_json_path_rule, "设计名称与 RTLIL JSON 文件路径不匹配，请检查输入参数。"
+    rtlil_json_path = design_dir / 'RTLIL_json' / f"{args.module_name}.json"
+    if not rtlil_json_path.exists():
+        # 调用yosys runner来进行生成
+        runner = YosysRunner()
+        filelist = design_dir / f"{args.design_name}.flist"
+        try:
+            runner.get_json(
+                top_module=args.module_name,
+                output_dir=rtlil_json_path.parent,
+                flist=filelist,
+                files=None,
+            )
+        except Exception as e:
+            print(f"Failed to run Yosys: {e}")
+    if not rtlil_json_path.exists():
+        print("没有找到rtlil文件")
+        exit()
 
     # 创建配置
     config = DataAnnotatorConfig(
-        design_json=args.rtlil_json,
+        design_json=rtlil_json_path,
         coverage_dir=args.coverage_dir,
         output=args.output,
         instance=args.instance,

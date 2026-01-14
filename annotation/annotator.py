@@ -237,23 +237,30 @@ class CoverageAnnotator:
         # 1. 首先尝试找到连续的 MUX 链（if-else-if 结构）
         for offset in range(-5, 40):  # 扩大搜索范围
             candidate_line = coverage_line + offset
-            
+
             # 收集从 candidate_line 开始的连续 MUX
             collected = self._collect_continuous_mux_chain(candidate_line, expected_mux_count)
-            
+
             if len(collected) >= expected_mux_count:
                 # 找到足够的 MUX
+                # 添加合理性检查：如果找到的 MUX 数量远超期望，可能是匹配错误
+                if expected_mux_count > 0 and len(collected) > expected_mux_count * 3:
+                    # 跳过这个匹配，可能是错误的偏移量
+                    continue
+
                 if self._learned_offset is None and offset != 0:
                     self._learned_offset = offset
                     print(f"  学习到行号偏移: {offset}")
                 # 返回所有收集到的 MUX，而不是只取 expected_mux_count 个
                 # 因为 Yosys 可能为数据路径复制生成额外的 MUX
                 return self._sort_mux_nodes_for_annotation(collected)
-            
+
             # 记录最佳匹配（即使不够）
+            # 但要确保匹配数量合理
             if len(collected) > best_match_score:
-                best_match = collected
-                best_match_score = len(collected)
+                if expected_mux_count == 0 or len(collected) <= expected_mux_count * 3:
+                    best_match = collected
+                    best_match_score = len(collected)
         
         # 2. 如果找不到连续的链，尝试通过 stmt_start_line 查找
         for offset in self.STMT_LINE_SEARCH_RANGE:
@@ -352,37 +359,56 @@ class CoverageAnnotator:
     ) -> List[str]:
         """
         为 IF 语句收集所有相关的 MUX 节点
-        
+
         通过解析源码中的 if/else/begin/end 关键字来确定精确范围，
         然后收集该范围内的所有 MUX 节点。
-        
+
         Args:
             coverage_line: 覆盖率报告中的行号（if 语句的行号）
             expected_mux_count: 期望的 MUX 数量（仅用于参考）
-            
+
         Returns:
             MUX 节点 ID 列表（按拓扑顺序排序）
         """
         all_mux_lines = sorted(self.line_to_mux_nodes.keys())
         if not all_mux_lines:
             return []
-        
+
         # 尝试从源文件中找到 if 语句的范围
         if_range = self._find_if_range_from_source(coverage_line)
-        
+
         if if_range:
             if_start, if_end = if_range
             print(f"  从源码解析到 if 范围: {if_start}-{if_end}")
-            
+
             # 收集范围内的所有 MUX
             collected = []
             for line in all_mux_lines:
                 if line >= if_start and line <= if_end:
                     collected.extend(self.line_to_mux_nodes[line])
-            
+
             if collected:
+                # 验证收集到的 MUX 数量是否合理
+                # 如果收集到的 MUX 数量远超期望（超过 3 倍），可能是匹配错误
+                if expected_mux_count > 0 and len(collected) > expected_mux_count * 3:
+                    print(f"  警告: 收集到 {len(collected)} 个 MUX，但期望 {expected_mux_count} 个，可能是行号匹配错误")
+                    # 检查是否有更精确的匹配
+                    # 尝试在更小的范围内查找
+                    narrow_collected = []
+                    for line in all_mux_lines:
+                        # 只收集与期望行号接近的 MUX（在 10 行范围内）
+                        if line >= if_start and line <= if_start + 10:
+                            narrow_collected.extend(self.line_to_mux_nodes[line])
+
+                    if narrow_collected and len(narrow_collected) <= expected_mux_count * 2:
+                        print(f"  使用精确范围匹配: 收集到 {len(narrow_collected)} 个 MUX")
+                        return self._sort_mux_nodes_for_annotation(narrow_collected)
+
+                    # 如果仍然不匹配，返回空列表
+                    return []
+
                 return self._sort_mux_nodes_for_annotation(collected)
-        
+
         # 如果无法从源码解析，返回空列表，让调用者回退到启发式方法
         return []
     
@@ -720,68 +746,157 @@ class CoverageAnnotator:
     def _find_if_end(self, lines: List[str], if_line: int) -> int:
         """
         从 if 语句开始向下搜索 if 块的结束
-        
-        处理嵌套的 if-else-if 结构。
-        
+
+        处理嵌套的 if-else-if 结构，包括没有 begin/end 的链式 if-else-if。
+
         Args:
             lines: 源文件行列表
             if_line: if 语句的行索引（0-based）
-            
+
         Returns:
             if 块结束的行号（1-based），如果找不到则返回 None
         """
         import re
-        
+
         # 检查 if 语句是否包含 begin
         if_line_content = lines[if_line].strip().lower()
         has_begin = 'begin' in if_line_content
-        
-        # 如果没有 begin，可能是单行 if 或三元表达式
+
+        # 如果没有 begin，可能是单行 if、三元表达式，或 if-else-if 链
         if not has_begin:
             # 检查下一行是否有 begin
             if if_line + 1 < len(lines):
                 next_line = lines[if_line + 1].strip().lower()
                 if 'begin' in next_line:
                     has_begin = True
+                elif 'else' in next_line:
+                    # 这是一个 if-else-if 链（没有 begin/end）
+                    # 继续搜索直到找到最后的 else 分支或非 else-if 行
+                    return self._find_if_else_chain_end(lines, if_line)
                 else:
-                    # 单行 if 或三元表达式，返回当前行
+                    # 检查是否是单行 if 后面跟着 else if
+                    # 例如: if (cond) val = x; else if (cond2) val = y;
+                    # 在同一行上可能有 else if
+                    if 'else' in if_line_content.split('//')[-1]:  # 排除注释
+                        # 当前行就有 else，检查是否是 if-else-if 链的一部分
+                        return self._find_if_else_chain_end(lines, if_line)
+                    # 真正的单行 if
                     return if_line + 1
-        
+
         if not has_begin:
+            # 最后检查是否可能是 if-else-if 链的开始
+            # 向下看几行，看是否有 else if
+            for i in range(if_line + 1, min(if_line + 5, len(lines))):
+                check_line = lines[i].strip().lower()
+                if re.search(r'\belse\s+if\b', check_line):
+                    # 这是 if-else-if 链
+                    return self._find_if_else_chain_end(lines, if_line)
+                elif check_line and not check_line.startswith('//'):
+                    # 遇到非空非注释行，且不是 else if，说明是单行 if
+                    break
             return if_line + 1
-        
+
         # 有 begin，需要找到对应的 end
         nesting_level = 1
         in_else_branch = False
-        
+
         for i in range(if_line + 1, len(lines)):
             line_content = lines[i].strip().lower()
-            
+
             # 跳过注释
             if line_content.startswith('//'):
                 continue
-            
+
             # 检查 begin（增加嵌套层级）
             # 注意：begin 可能在 if/else/case 等语句的同一行
             begin_count = len(re.findall(r'\bbegin\b', line_content))
-            
+
             # 检查 end（减少嵌套层级）
             # 注意：end 可能后跟 else
             end_count = len(re.findall(r'\bend\b', line_content))
-            
+
             # 更新嵌套层级
             nesting_level += begin_count - end_count
-            
+
             # 检查是否是 else 分支
             if 'else' in line_content:
                 in_else_branch = True
-            
+
             # 当嵌套层级回到 0 时，找到了 if 块的结束
             if nesting_level <= 0:
                 return i + 1  # 转换为 1-based 行号
-        
+
         # 如果没有找到，返回文件末尾
         return len(lines)
+
+    def _find_if_else_chain_end(self, lines: List[str], if_line: int) -> int:
+        """
+        查找 if-else-if 链的结束位置（没有 begin/end 块的情况）
+
+        这种结构通常出现在优先级编码器中：
+        if (cond1) val = x;
+        else if (cond2) val = y;
+        else if (cond3) val = z;
+        else val = default;
+
+        Args:
+            lines: 源文件行列表
+            if_line: if 语句的行索引（0-based）
+
+        Returns:
+            if-else-if 链结束的行号（1-based）
+        """
+        import re
+
+        last_valid_line = if_line
+
+        for i in range(if_line, len(lines)):
+            line_content = lines[i].strip().lower()
+
+            # 跳过空行和纯注释行
+            if not line_content or line_content.startswith('//'):
+                continue
+
+            # 去掉行内注释
+            if '//' in line_content:
+                line_content = line_content.split('//')[0].strip()
+
+            # 检查是否是 if/else if/else 行
+            is_if_else = (
+                re.search(r'\bif\s*\(', line_content) or
+                re.search(r'\belse\s+if\s*\(', line_content) or
+                re.search(r'\belse\b', line_content)
+            )
+
+            if is_if_else:
+                last_valid_line = i
+                continue
+
+            # 检查是否是赋值语句（if 分支的执行语句）
+            # 通常是 xxx = yyy; 形式
+            if '=' in line_content and ';' in line_content:
+                last_valid_line = i
+                continue
+
+            # 检查是否到达了 end 或其他块结束标记
+            if re.search(r'\bend\b', line_content):
+                last_valid_line = i
+                break
+
+            # 如果遇到其他语句（不是 if/else/赋值），链结束
+            # 但要排除缩进的赋值语句
+            if line_content and not line_content.startswith('//'):
+                # 检查这一行是否是前一行语句的延续
+                prev_line = lines[i - 1].strip() if i > 0 else ''
+                if not prev_line.endswith(';') and ';' in line_content:
+                    # 这是前一行语句的延续
+                    last_valid_line = i
+                    continue
+
+                # 否则链结束
+                break
+
+        return last_valid_line + 1  # 转换为 1-based 行号
     
     def _get_source_file_path(self) -> str:
         """
