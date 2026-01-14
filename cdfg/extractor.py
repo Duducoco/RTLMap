@@ -4,6 +4,7 @@ CDFG 提取器 - 从 RTLIL JSON 提取控制数据流图
 """
 
 import json
+from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 from collections import defaultdict
 
@@ -14,14 +15,14 @@ from .classifier import CellClassifier
 class CDFGExtractor:
     """CDFG 提取器"""
 
-    def __init__(self, json_data: Union[str, dict]):
+    def __init__(self, json_data: Union[str, Path, dict]):
         """
         初始化提取器
 
         Args:
-            json_data: JSON 文件路径或已解析的字典
+            json_data: JSON 文件路径（字符串或 Path 对象）或已解析的字典
         """
-        if isinstance(json_data, str):
+        if isinstance(json_data, (str, Path)):
             with open(json_data, "r", encoding="utf-8") as f:
                 self.design = json.load(f)
         else:

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from collections import defaultdict
 
 from cdfg import CDFG, Edge, NodeType
-from .parser import CoverageParser, BranchCoverage, ConditionCoverage
+from .parser import CoverageParser, BranchCoverage
 
 
 @dataclass
@@ -28,9 +28,6 @@ class AnnotationStats:
     # 传播标注统计
     propagated_edges: int = 0  # 通过传播标注的边数
     always_executed_edges: int = 0  # 必然执行的边数（组合逻辑）
-    # 条件覆盖率统计
-    condition_annotated_mux: int = 0  # 通过条件覆盖率标注的 MUX 数
-    condition_annotated_edges: int = 0  # 通过条件覆盖率标注的边数
 
 
 class CoverageAnnotator:
@@ -39,13 +36,16 @@ class CoverageAnnotator:
     # 行号搜索范围配置
     STMT_LINE_SEARCH_RANGE = range(-2, 6)  # stmt_start_line 搜索范围 [-2, +5]
     SOURCE_LINE_SEARCH_RANGE = range(-5, 40)  # source_line 搜索范围 [-5, +39]
+    
+    # 偏移量搜索配置
+    DEFAULT_OFFSET_SEARCH_RANGE = (-5, 40)  # 默认搜索范围
+    LEARNED_OFFSET_TOLERANCE = 5  # 学习到偏移量后的容差范围
 
     def __init__(
         self,
         cdfg: CDFG,
         coverage_data: Dict[int, BranchCoverage],
         source_file: str = None,
-        condition_data: Dict[int, List[ConditionCoverage]] = None,
     ):
         """
         初始化标注器
@@ -54,12 +54,10 @@ class CoverageAnnotator:
             cdfg: CDFG 对象
             coverage_data: 行号 -> BranchCoverage 的映射
             source_file: 覆盖率报告对应的源文件名（用于过滤 MUX 节点）
-            condition_data: 行号 -> ConditionCoverage 列表的映射
         """
         self.cdfg = cdfg
         self.coverage_data = coverage_data
         self.source_file = source_file
-        self.condition_data = condition_data or {}
         self.stats = AnnotationStats()
 
         # 追踪已标注的 MUX 节点（避免重复计数）
@@ -104,9 +102,86 @@ class CoverageAnnotator:
                     if node.source_file != self.source_file:
                         continue
                 self.line_to_seq_nodes[node.source_line].append(node_id)
+    
+    def _get_offset_search_order(self, search_range: tuple = None) -> List[int]:
+        """
+        获取优化后的偏移量搜索顺序
+        
+        如果已经学习到偏移量，优先搜索该偏移量附近的范围；
+        否则使用默认的搜索范围。
+        
+        Args:
+            search_range: 搜索范围元组 (min_offset, max_offset)，默认使用 DEFAULT_OFFSET_SEARCH_RANGE
+            
+        Returns:
+            偏移量列表，按优先级排序
+        """
+        if search_range is None:
+            search_range = self.DEFAULT_OFFSET_SEARCH_RANGE
+        
+        min_offset, max_offset = search_range
+        
+        if self._learned_offset is not None:
+            # 已学习到偏移量，优先搜索该偏移量附近
+            # 1. 首先尝试学习到的偏移量
+            # 2. 然后尝试容差范围内的偏移量
+            # 3. 最后尝试其他偏移量
+            
+            learned = self._learned_offset
+            tolerance = self.LEARNED_OFFSET_TOLERANCE
+            
+            # 优先级1：学习到的偏移量
+            priority_offsets = [learned]
+            
+            # 优先级2：容差范围内的偏移量（按距离排序）
+            for delta in range(1, tolerance + 1):
+                if min_offset <= learned - delta <= max_offset:
+                    priority_offsets.append(learned - delta)
+                if min_offset <= learned + delta <= max_offset:
+                    priority_offsets.append(learned + delta)
+            
+            # 优先级3：其他偏移量
+            other_offsets = [
+                o for o in range(min_offset, max_offset + 1)
+                if o not in priority_offsets
+            ]
+            
+            return priority_offsets + other_offsets
+        else:
+            # 未学习到偏移量，使用默认顺序
+            # 优先尝试 0 偏移，然后按距离递增
+            offsets = [0]
+            for delta in range(1, max(abs(min_offset), abs(max_offset)) + 1):
+                if min_offset <= -delta:
+                    offsets.append(-delta)
+                if delta <= max_offset:
+                    offsets.append(delta)
+            
+            # 过滤掉超出范围的偏移量
+            return [o for o in offsets if min_offset <= o <= max_offset]
+    
+    def _update_learned_offset(self, offset: int):
+        """
+        更新学习到的偏移量
+        
+        如果是首次学习，直接设置；
+        如果已有偏移量，验证新偏移量是否在容差范围内。
+        
+        Args:
+            offset: 新发现的偏移量
+        """
+        if self._learned_offset is None:
+            if offset != 0:
+                self._learned_offset = offset
+                print(f"  学习到行号偏移: {offset}")
+        else:
+            # 已有偏移量，检查新偏移量是否在容差范围内
+            diff = abs(offset - self._learned_offset)
+            if diff > self.LEARNED_OFFSET_TOLERANCE:
+                print(f"  警告: 新偏移量 {offset} 与已学习偏移量 {self._learned_offset} 差异较大")
 
     def _find_mux_chain_for_coverage(
-        self, coverage_line: int, total_branches: int
+        self, coverage_line: int, total_branches: int, branch_type: str = "IF"
     ) -> List[str]:
         """
         为覆盖率行找到对应的 MUX 链
@@ -116,115 +191,702 @@ class CoverageAnnotator:
 
         对于 CASE 语句，覆盖率报告记录的是 case 语句本身的行号，
         而 CDFG 中 MUX 节点记录的是各个 case 分支项的行号。
-        此时需要通过 stmt_start_line 映射来查找。
+        VCS 会将 CASE 语句内部的所有 if-else 合并到一个覆盖率条目中。
+
+        对于三元表达式，覆盖率报告记录的是表达式所在的行号，
+        需要解析 ? : 语法来确定范围。
 
         注意：VCS 和 Yosys 之间可能存在较大的行号偏移（可达 30+ 行），
         这是由于 include 文件、宏展开等处理方式不同导致的。
 
-        这个方法会找到从 coverage_line 开始的连续 MUX 链。
-
         Args:
             coverage_line: 覆盖率报告中的行号
             total_branches: 总分支数（用于确定链的长度）
+            branch_type: 分支类型 ("IF", "CASE" 或 "TERNARY")
 
         Returns:
             MUX 节点 ID 列表
         """
-        # 如果已经学习到偏移量，优先使用学习到的偏移
-        if self._learned_offset is not None:
-            adjusted_line = coverage_line + self._learned_offset
-            result = self._search_mux_at_line(adjusted_line, total_branches)
-            if result:
-                return result
-
-        # 1. 首先尝试通过 stmt_start_line 查找（用于 CASE 语句）
+        expected_mux_count = total_branches - 1
+        best_match = []
+        best_match_score = 0
+        
+        # 收集所有 MUX 的行号
+        all_mux_lines = sorted(self.line_to_mux_nodes.keys())
+        if not all_mux_lines:
+            return []
+        
+        # 根据分支类型使用不同的收集策略
+        if branch_type == "CASE":
+            # CASE 语句：使用 case/endcase 范围解析
+            collected = self._collect_case_mux_nodes(coverage_line, expected_mux_count)
+            if collected:
+                return collected
+        elif branch_type == "IF":
+            # IF 语句：使用 if/begin/end 范围解析
+            collected = self._collect_if_mux_nodes(coverage_line, expected_mux_count)
+            if collected:
+                return collected
+        elif branch_type == "TERNARY":
+            # 三元表达式：使用 ? : 范围解析
+            collected = self._collect_ternary_mux_nodes(coverage_line, expected_mux_count)
+            if collected:
+                return collected
+        
+        # 如果精确范围解析失败，回退到启发式方法
+        # 1. 首先尝试找到连续的 MUX 链（if-else-if 结构）
+        for offset in range(-5, 40):  # 扩大搜索范围
+            candidate_line = coverage_line + offset
+            
+            # 收集从 candidate_line 开始的连续 MUX
+            collected = self._collect_continuous_mux_chain(candidate_line, expected_mux_count)
+            
+            if len(collected) >= expected_mux_count:
+                # 找到足够的 MUX
+                if self._learned_offset is None and offset != 0:
+                    self._learned_offset = offset
+                    print(f"  学习到行号偏移: {offset}")
+                # 返回所有收集到的 MUX，而不是只取 expected_mux_count 个
+                # 因为 Yosys 可能为数据路径复制生成额外的 MUX
+                return self._sort_mux_nodes_for_annotation(collected)
+            
+            # 记录最佳匹配（即使不够）
+            if len(collected) > best_match_score:
+                best_match = collected
+                best_match_score = len(collected)
+        
+        # 2. 如果找不到连续的链，尝试通过 stmt_start_line 查找
         for offset in self.STMT_LINE_SEARCH_RANGE:
             candidate_line = coverage_line + offset
             if candidate_line in self.stmt_line_to_mux_nodes:
                 stmt_mux = self.stmt_line_to_mux_nodes[candidate_line]
-                if stmt_mux:
-                    # 学习偏移量
+                if len(stmt_mux) >= expected_mux_count:
                     if self._learned_offset is None and offset != 0:
                         self._learned_offset = offset
                         print(f"  学习到行号偏移: {offset}")
-                    if len(stmt_mux) >= total_branches - 1:
-                        return self._sort_mux_nodes_topologically(stmt_mux[: total_branches - 1])
-                    else:
-                        return self._sort_mux_nodes_topologically(stmt_mux)
-
-        # 2. 然后在扩大的范围内搜索 source_line（用于 IF 语句）
-        for offset in self.SOURCE_LINE_SEARCH_RANGE:
-            candidate_line = coverage_line + offset
-            if candidate_line in self.line_to_mux_nodes:
-                nearby_mux = self.line_to_mux_nodes[candidate_line]
-                if nearby_mux:
-                    # 学习偏移量
-                    if self._learned_offset is None and offset != 0:
-                        self._learned_offset = offset
-                        print(f"  学习到行号偏移: {offset}")
-
-                    # 如果找到足够的 MUX，直接返回
-                    if len(nearby_mux) >= total_branches - 1:
-                        return self._sort_mux_nodes_topologically(nearby_mux[: total_branches - 1])
-
-                    # 尝试从这个位置开始收集更多 MUX
-                    return self._collect_mux_chain_from_line(candidate_line, total_branches)
-
-        # 3. 如果仍未找到，尝试更宽松的匹配：查找所有 MUX 的 stmt_start_line
-        for offset in self.SOURCE_LINE_SEARCH_RANGE:
-            candidate_line = coverage_line + offset
-            # 检查是否有任何 MUX 的 stmt_start_line 匹配
-            matching_mux = []
-            for node_id, node in self.cdfg.nodes.items():
-                if node.node_type.name == 'MUX' and node.stmt_start_line == candidate_line:
-                    if self.source_file and node.source_file:
-                        if node.source_file != self.source_file:
-                            continue
-                    matching_mux.append(node_id)
-
-            if matching_mux:
-                if self._learned_offset is None and offset != 0:
-                    self._learned_offset = offset
-                    print(f"  学习到行号偏移: {offset}")
-                return self._sort_mux_nodes_topologically(matching_mux[:total_branches - 1] if len(matching_mux) >= total_branches - 1 else matching_mux)
-
+                    return self._sort_mux_nodes_for_annotation(stmt_mux[:expected_mux_count])
+                if len(stmt_mux) > best_match_score:
+                    best_match = stmt_mux
+                    best_match_score = len(stmt_mux)
+        
+        # 3. 返回最佳匹配（即使不完整）
+        if best_match:
+            print(f"  警告：期望 {expected_mux_count} 个 MUX，但只找到 {len(best_match)} 个")
+            return self._sort_mux_nodes_for_annotation(best_match)
+        
         return []
+    
+    def _collect_case_mux_nodes(
+        self, coverage_line: int, expected_mux_count: int
+    ) -> List[str]:
+        """
+        为 CASE 语句收集所有相关的 MUX 节点
+        
+        VCS 将 CASE 语句和其内部的所有 if-else 合并成一个覆盖率条目。
+        需要收集从 case 语句开始到 endcase 之间的所有 MUX。
+        
+        对于 CASE 语句，CDFG 中可能有比条件数更多的 MUX，因为：
+        1. 每个 case 分支内的 if-else 会生成 MUX
+        2. 数据路径复制会产生多个 MUX
+        
+        我们需要收集所有相关的 MUX，而不是只取 expected_mux_count 个。
+        
+        Args:
+            coverage_line: 覆盖率报告中的行号（case 语句的行号）
+            expected_mux_count: 期望的 MUX 数量（仅用于参考）
+            
+        Returns:
+            MUX 节点 ID 列表（按行号排序）
+        """
+        all_mux_lines = sorted(self.line_to_mux_nodes.keys())
+        if not all_mux_lines:
+            return []
+        
+        # 尝试从源文件中找到 case/endcase 的范围
+        case_range = self._find_case_range_from_source(coverage_line)
+        
+        if case_range:
+            case_start, case_end = case_range
+            print(f"  从源码解析到 case 范围: {case_start}-{case_end}")
+            
+            # 收集范围内的所有 MUX
+            collected = []
+            for line in all_mux_lines:
+                if line >= case_start and line <= case_end:
+                    collected.extend(self.line_to_mux_nodes[line])
+            
+            if collected:
+                return self._sort_mux_nodes_for_annotation(collected)
+        
+        # 如果无法从源码解析，使用启发式方法
+        best_collected = []
+        best_offset = 0
+        
+        for offset in range(-5, 20):
+            case_start_line = coverage_line + offset
+            
+            # 收集从 case_start_line 开始的一定范围内的所有 MUX
+            # CASE 语句通常跨越较大的行号范围（可能 100+ 行）
+            collected = []
+            for line in all_mux_lines:
+                if line >= case_start_line and line <= case_start_line + 150:
+                    collected.extend(self.line_to_mux_nodes[line])
+            
+            if len(collected) > len(best_collected):
+                best_collected = collected
+                best_offset = offset
+        
+        # 返回所有收集到的 MUX（不限制数量）
+        if best_collected:
+            if self._learned_offset is None and best_offset != 0:
+                self._learned_offset = best_offset
+                print(f"  学习到行号偏移: {best_offset}")
+            
+            # 按拓扑顺序排序并返回所有 MUX
+            return self._sort_mux_nodes_for_annotation(best_collected)
+        
+        return []
+    
+    def _collect_if_mux_nodes(
+        self, coverage_line: int, expected_mux_count: int
+    ) -> List[str]:
+        """
+        为 IF 语句收集所有相关的 MUX 节点
+        
+        通过解析源码中的 if/else/begin/end 关键字来确定精确范围，
+        然后收集该范围内的所有 MUX 节点。
+        
+        Args:
+            coverage_line: 覆盖率报告中的行号（if 语句的行号）
+            expected_mux_count: 期望的 MUX 数量（仅用于参考）
+            
+        Returns:
+            MUX 节点 ID 列表（按拓扑顺序排序）
+        """
+        all_mux_lines = sorted(self.line_to_mux_nodes.keys())
+        if not all_mux_lines:
+            return []
+        
+        # 尝试从源文件中找到 if 语句的范围
+        if_range = self._find_if_range_from_source(coverage_line)
+        
+        if if_range:
+            if_start, if_end = if_range
+            print(f"  从源码解析到 if 范围: {if_start}-{if_end}")
+            
+            # 收集范围内的所有 MUX
+            collected = []
+            for line in all_mux_lines:
+                if line >= if_start and line <= if_end:
+                    collected.extend(self.line_to_mux_nodes[line])
+            
+            if collected:
+                return self._sort_mux_nodes_for_annotation(collected)
+        
+        # 如果无法从源码解析，返回空列表，让调用者回退到启发式方法
+        return []
+    
+    def _collect_ternary_mux_nodes(
+        self, coverage_line: int, expected_mux_count: int
+    ) -> List[str]:
+        """
+        为三元表达式收集所有相关的 MUX 节点
+        
+        三元表达式 (cond ? true_val : false_val) 通常在单行或跨越少数几行。
+        通过解析源码中的 ? : 语法来确定范围。
+        
+        对于嵌套的三元表达式，需要找到所有相关的 MUX。
+        
+        Args:
+            coverage_line: 覆盖率报告中的行号（三元表达式的行号）
+            expected_mux_count: 期望的 MUX 数量（仅用于参考）
+            
+        Returns:
+            MUX 节点 ID 列表（按拓扑顺序排序）
+        """
+        all_mux_lines = sorted(self.line_to_mux_nodes.keys())
+        if not all_mux_lines:
+            return []
+        
+        # 尝试从源文件中找到三元表达式的范围
+        ternary_range = self._find_ternary_range_from_source(coverage_line)
+        
+        if ternary_range:
+            ternary_start, ternary_end = ternary_range
+            print(f"  从源码解析到三元表达式范围: {ternary_start}-{ternary_end}")
+            
+            # 收集范围内的所有 MUX
+            collected = []
+            for line in all_mux_lines:
+                if line >= ternary_start and line <= ternary_end:
+                    collected.extend(self.line_to_mux_nodes[line])
+            
+            if collected:
+                return self._sort_mux_nodes_for_annotation(collected)
+        
+        # 如果无法从源码解析，返回空列表，让调用者回退到启发式方法
+        return []
+    
+    def _find_ternary_range_from_source(self, coverage_line: int) -> tuple:
+        """
+        从源文件中找到三元表达式的范围
+        
+        通过解析源码中的 ? : 语法来确定范围。
+        处理嵌套的三元表达式和跨行的情况。
+        
+        Args:
+            coverage_line: 覆盖率报告中的行号
+            
+        Returns:
+            (ternary_start, ternary_end) 元组，如果找不到则返回 None
+        """
+        # 获取源文件路径
+        source_file_path = self._get_source_file_path()
+        if not source_file_path:
+            return None
+        
+        try:
+            with open(source_file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except Exception as e:
+            print(f"  警告: 无法读取源文件 {source_file_path}: {e}")
+            return None
+        
+        # 使用优化后的偏移量搜索顺序
+        for offset in self._get_offset_search_order((-5, 20)):
+            search_line = coverage_line + offset - 1  # 转换为 0-based 索引
+            
+            if search_line < 0 or search_line >= len(lines):
+                continue
+            
+            line_content = lines[search_line]
+            
+            # 检查是否包含三元表达式的 ? 操作符
+            # 注意：需要排除注释中的 ?
+            if '?' in line_content and ':' in line_content:
+                # 简单检查：确保 ? 不在注释中
+                comment_pos = line_content.find('//')
+                question_pos = line_content.find('?')
+                
+                if comment_pos == -1 or question_pos < comment_pos:
+                    ternary_start = search_line + 1  # 转换回 1-based 行号
+                    
+                    # 找到三元表达式的结束位置
+                    ternary_end = self._find_ternary_end(lines, search_line)
+                    
+                    if ternary_end:
+                        # 学习偏移量
+                        self._update_learned_offset(offset)
+                        
+                        return (ternary_start, ternary_end)
+        
+        return None
+    
+    def _find_ternary_end(self, lines: List[str], start_line: int) -> int:
+        """
+        从三元表达式开始位置找到其结束位置
+        
+        处理嵌套的三元表达式和跨行的情况。
+        
+        嵌套三元表达式示例：
+        1. 简单嵌套：a ? b : (c ? d : e)
+        2. 多层嵌套：a ? (b ? c : d) : (e ? f : g)
+        3. 跨行嵌套：
+           sel1 ? val1 :
+           sel2 ? val2 :
+                  val3
+        
+        Args:
+            lines: 源文件行列表
+            start_line: 三元表达式起始行索引（0-based）
+            
+        Returns:
+            三元表达式结束的行号（1-based），如果找不到则返回 None
+        """
+        # 三元表达式可能跨越多行
+        # 需要匹配括号和 ? : 的配对
+        
+        # 策略：
+        # 1. 跟踪括号深度 () 和 []
+        # 2. 对于 ?，增加待匹配的冒号计数
+        # 3. 对于 :，需要区分三元表达式的冒号和位选择的冒号
+        #    - 位选择的冒号在 [] 内部
+        #    - 三元表达式的冒号在 [] 外部
+        # 4. 当所有 ? 都找到匹配的 : 时，表达式结束
+        
+        paren_depth = 0
+        bracket_depth = 0
+        ternary_depth = 0  # 未匹配的 ? 数量（嵌套深度）
+        
+        for i in range(start_line, min(start_line + 30, len(lines))):
+            line_content = lines[i]
+            
+            # 跳过注释部分
+            comment_pos = line_content.find('//')
+            if comment_pos != -1:
+                line_content = line_content[:comment_pos]
+            
+            # 处理字符串字面量（简单处理：跳过引号内的内容）
+            in_string = False
+            j = 0
+            while j < len(line_content):
+                char = line_content[j]
+                
+                # 处理字符串
+                if char == '"' and (j == 0 or line_content[j-1] != '\\'):
+                    in_string = not in_string
+                    j += 1
+                    continue
+                
+                if in_string:
+                    j += 1
+                    continue
+                
+                if char == '(':
+                    paren_depth += 1
+                elif char == ')':
+                    paren_depth -= 1
+                elif char == '[':
+                    bracket_depth += 1
+                elif char == ']':
+                    bracket_depth -= 1
+                elif char == '?':
+                    # 新的三元表达式开始
+                    ternary_depth += 1
+                elif char == ':':
+                    # 区分三元表达式的冒号和位选择的冒号
+                    # 位选择的冒号在 [] 内部，如 data[7:0]
+                    if bracket_depth == 0:
+                        # 这是三元表达式的冒号
+                        if ternary_depth > 0:
+                            ternary_depth -= 1
+                    # 如果 bracket_depth > 0，这是位选择的冒号，忽略
+                elif char == ';':
+                    # 分号表示语句结束
+                    return i + 1  # 转换为 1-based 行号
+                elif char == ',':
+                    # 逗号可能表示表达式结束（在函数参数或数组初始化中）
+                    # 只有当所有三元表达式都已匹配时才结束
+                    if ternary_depth == 0 and paren_depth <= 0:
+                        return i + 1
+                
+                j += 1
+            
+            # 检查是否找到了完整的三元表达式
+            # 所有 ? 都找到了匹配的 :，且括号平衡
+            if ternary_depth == 0 and paren_depth <= 0 and i > start_line:
+                # 确保至少处理了一个 ?
+                return i + 1  # 转换为 1-based 行号
+        
+        # 如果没有找到明确的结束，返回起始行后的几行
+        return min(start_line + 10, len(lines))
+    
+    def _find_case_range_from_source(self, coverage_line: int) -> tuple:
+        """
+        从源文件中找到 case 语句的范围
+        
+        通过解析源码中的 case 和 endcase 关键字来确定范围。
+        
+        Args:
+            coverage_line: 覆盖率报告中的行号
+            
+        Returns:
+            (case_start, case_end) 元组，如果找不到则返回 None
+        """
+        # 获取源文件路径
+        source_file_path = self._get_source_file_path()
+        if not source_file_path:
+            return None
+        
+        try:
+            with open(source_file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except Exception as e:
+            print(f"  警告: 无法读取源文件 {source_file_path}: {e}")
+            return None
+        
+        # 使用优化后的偏移量搜索顺序
+        for offset in self._get_offset_search_order((-5, 20)):
+            search_line = coverage_line + offset - 1  # 转换为 0-based 索引
+            
+            if search_line < 0 or search_line >= len(lines):
+                continue
+            
+            line_content = lines[search_line].strip().lower()
+            
+            # 检查是否是 case 语句
+            if 'case' in line_content and 'endcase' not in line_content:
+                case_start = search_line + 1  # 转换回 1-based 行号
+                
+                # 向下搜索 endcase
+                endcase_line = self._find_endcase(lines, search_line)
+                if endcase_line:
+                    case_end = endcase_line
+                    
+                    # 学习偏移量
+                    self._update_learned_offset(offset)
+                    
+                    return (case_start, case_end)
+        
+        return None
+    
+    def _find_endcase(self, lines: List[str], case_line: int) -> int:
+        """
+        从 case 语句开始向下搜索 endcase
+        
+        处理嵌套的 case 语句。
+        
+        Args:
+            lines: 源文件行列表
+            case_line: case 语句的行索引（0-based）
+            
+        Returns:
+            endcase 的行号（1-based），如果找不到则返回 None
+        """
+        nesting_level = 1
+        
+        for i in range(case_line + 1, len(lines)):
+            line_content = lines[i].strip().lower()
+            
+            # 跳过注释
+            if line_content.startswith('//'):
+                continue
+            
+            # 检查嵌套的 case
+            if 'case' in line_content and 'endcase' not in line_content:
+                # 确保是 case 关键字而不是变量名的一部分
+                import re
+                if re.search(r'\bcase[xz]?\s*\(', line_content):
+                    nesting_level += 1
+            
+            # 检查 endcase
+            if 'endcase' in line_content:
+                nesting_level -= 1
+                if nesting_level == 0:
+                    return i + 1  # 转换为 1-based 行号
+        
+        return None
+    
+    def _find_if_range_from_source(self, coverage_line: int) -> tuple:
+        """
+        从源文件中找到 if 语句的范围
+        
+        通过解析源码中的 if/else/end 关键字来确定范围。
+        
+        Args:
+            coverage_line: 覆盖率报告中的行号
+            
+        Returns:
+            (if_start, if_end) 元组，如果找不到则返回 None
+        """
+        import re
+        
+        # 获取源文件路径
+        source_file_path = self._get_source_file_path()
+        if not source_file_path:
+            return None
+        
+        try:
+            with open(source_file_path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except Exception as e:
+            print(f"  警告: 无法读取源文件 {source_file_path}: {e}")
+            return None
+        
+        # 使用优化后的偏移量搜索顺序
+        for offset in self._get_offset_search_order((-5, 20)):
+            search_line = coverage_line + offset - 1  # 转换为 0-based 索引
+            
+            if search_line < 0 or search_line >= len(lines):
+                continue
+            
+            line_content = lines[search_line].strip().lower()
+            
+            # 检查是否是 if 语句（排除 else if）
+            # 匹配 "if (" 或 "if(" 但不匹配 "else if"
+            if re.search(r'(?<!else\s)\bif\s*\(', line_content):
+                if_start = search_line + 1  # 转换回 1-based 行号
+                
+                # 向下搜索 if 语句的结束
+                if_end = self._find_if_end(lines, search_line)
+                if if_end:
+                    # 学习偏移量
+                    self._update_learned_offset(offset)
+                    
+                    return (if_start, if_end)
+        
+        return None
+    
+    def _find_if_end(self, lines: List[str], if_line: int) -> int:
+        """
+        从 if 语句开始向下搜索 if 块的结束
+        
+        处理嵌套的 if-else-if 结构。
+        
+        Args:
+            lines: 源文件行列表
+            if_line: if 语句的行索引（0-based）
+            
+        Returns:
+            if 块结束的行号（1-based），如果找不到则返回 None
+        """
+        import re
+        
+        # 检查 if 语句是否包含 begin
+        if_line_content = lines[if_line].strip().lower()
+        has_begin = 'begin' in if_line_content
+        
+        # 如果没有 begin，可能是单行 if 或三元表达式
+        if not has_begin:
+            # 检查下一行是否有 begin
+            if if_line + 1 < len(lines):
+                next_line = lines[if_line + 1].strip().lower()
+                if 'begin' in next_line:
+                    has_begin = True
+                else:
+                    # 单行 if 或三元表达式，返回当前行
+                    return if_line + 1
+        
+        if not has_begin:
+            return if_line + 1
+        
+        # 有 begin，需要找到对应的 end
+        nesting_level = 1
+        in_else_branch = False
+        
+        for i in range(if_line + 1, len(lines)):
+            line_content = lines[i].strip().lower()
+            
+            # 跳过注释
+            if line_content.startswith('//'):
+                continue
+            
+            # 检查 begin（增加嵌套层级）
+            # 注意：begin 可能在 if/else/case 等语句的同一行
+            begin_count = len(re.findall(r'\bbegin\b', line_content))
+            
+            # 检查 end（减少嵌套层级）
+            # 注意：end 可能后跟 else
+            end_count = len(re.findall(r'\bend\b', line_content))
+            
+            # 更新嵌套层级
+            nesting_level += begin_count - end_count
+            
+            # 检查是否是 else 分支
+            if 'else' in line_content:
+                in_else_branch = True
+            
+            # 当嵌套层级回到 0 时，找到了 if 块的结束
+            if nesting_level <= 0:
+                return i + 1  # 转换为 1-based 行号
+        
+        # 如果没有找到，返回文件末尾
+        return len(lines)
+    
+    def _get_source_file_path(self) -> str:
+        """
+        获取源文件的完整路径
+        
+        Returns:
+            源文件路径，如果找不到则返回 None
+        """
+        if not self.source_file:
+            return None
+        
+        # 尝试从 CDFG 节点中获取源文件路径
+        for node in self.cdfg.nodes.values():
+            if node.source_file == self.source_file:
+                # 尝试构建完整路径
+                # 假设源文件在 designs/<design_name>/source/rtl/ 目录下
+                import os
+                
+                # 尝试几种可能的路径
+                possible_paths = [
+                    # 直接使用源文件名
+                    self.source_file,
+                    # 在当前目录下查找
+                    os.path.join("designs", "cv32e40p", "source", "rtl", self.source_file),
+                ]
+                
+                for path in possible_paths:
+                    if os.path.exists(path):
+                        return path
+                
+                break
+        
+        return None
+    
+    def _collect_continuous_mux_chain(self, start_line: int, expected_count: int) -> List[str]:
+        """
+        从指定行开始收集连续的 MUX 链
+        
+        对于 if-else-if 结构，收集所有相关的 MUX，而不是只取期望数量。
+        因为 Yosys 可能为数据路径复制生成额外的 MUX。
+        
+        Args:
+            start_line: 起始行号
+            expected_count: 期望的 MUX 数量（仅用于参考）
+            
+        Returns:
+            MUX 节点 ID 列表
+        """
+        all_mux_lines = sorted(self.line_to_mux_nodes.keys())
+        collected = []
+        
+        # 允许行号有小的跳跃（最多跳过10行，以覆盖嵌套的 if 语句）
+        current_line = start_line
+        max_gap = 10
+        
+        for line in all_mux_lines:
+            if line >= current_line and line <= current_line + max_gap:
+                collected.extend(self.line_to_mux_nodes[line])
+                current_line = line + 1
+                # 不再限制数量，收集所有连续的 MUX
+        
+        return collected
+    
+    def _sort_mux_nodes_for_annotation(self, mux_nodes: List[str]) -> List[str]:
+        """
+        为标注排序 MUX 节点
+        
+        对于 if-else-if 链，需要按逻辑顺序（从外到内）排列
+        以便条件编号与 MUX 正确对应
+        
+        Args:
+            mux_nodes: MUX 节点 ID 列表
+            
+        Returns:
+            排序后的 MUX 节点 ID 列表
+        """
+        if len(mux_nodes) <= 1:
+            return mux_nodes
+        
+        # 先进行拓扑排序
+        sorted_nodes = self._sort_mux_nodes_topologically(mux_nodes)
+        
+        # 然后反转，使其按逻辑顺序（从外到内）
+        # 这样条件1对应最外层的MUX（索引0）
+        return sorted_nodes[::-1]
 
     def _search_mux_at_line(self, line: int, total_branches: int) -> List[str]:
         """在指定行搜索 MUX 节点"""
+        expected_mux_count = total_branches - 1
+        
         # 先检查 stmt_start_line
         if line in self.stmt_line_to_mux_nodes:
             stmt_mux = self.stmt_line_to_mux_nodes[line]
             if stmt_mux:
-                if len(stmt_mux) >= total_branches - 1:
-                    return self._sort_mux_nodes_topologically(stmt_mux[: total_branches - 1])
-                return self._sort_mux_nodes_topologically(stmt_mux)
+                if len(stmt_mux) >= expected_mux_count:
+                    return self._sort_mux_nodes_for_annotation(stmt_mux[:expected_mux_count])
+                return self._sort_mux_nodes_for_annotation(stmt_mux)
 
-        # 再检查 source_line
-        if line in self.line_to_mux_nodes:
-            nearby_mux = self.line_to_mux_nodes[line]
-            if nearby_mux:
-                if len(nearby_mux) >= total_branches - 1:
-                    return self._sort_mux_nodes_topologically(nearby_mux[: total_branches - 1])
-                return self._collect_mux_chain_from_line(line, total_branches)
+        # 尝试收集连续的 MUX 链
+        collected = self._collect_continuous_mux_chain(line, expected_mux_count)
+        if collected:
+            return self._sort_mux_nodes_for_annotation(collected[:expected_mux_count])
 
         return []
 
-    def _collect_mux_chain_from_line(self, start_line: int, total_branches: int) -> List[str]:
-        """从指定行开始收集 MUX 链"""
-        all_mux_lines = sorted(self.line_to_mux_nodes.keys())
-
-        # 收集足够数量的 MUX
-        mux_nodes = []
-        expected_mux_count = total_branches - 1
-
-        for line in all_mux_lines:
-            if line >= start_line:
-                mux_nodes.extend(self.line_to_mux_nodes[line])
-                if len(mux_nodes) >= expected_mux_count:
-                    break
-
-        return self._sort_mux_nodes_topologically(mux_nodes[:expected_mux_count])
 
     def annotate(self) -> AnnotationStats:
         """
@@ -237,9 +899,9 @@ class CoverageAnnotator:
 
         # 对于每个有覆盖数据的行
         for line_no, coverage in self.coverage_data.items():
-            # 使用新的方法找到 MUX 链
+            # 使用新的方法找到 MUX 链，传递分支类型
             mux_nodes = self._find_mux_chain_for_coverage(
-                line_no, coverage.total_branches
+                line_no, coverage.total_branches, coverage.branch_type
             )
 
             if mux_nodes:
@@ -582,7 +1244,7 @@ class CoverageAnnotator:
         标注 MUX 链
 
         Args:
-            mux_nodes: MUX 节点 ID 列表（已排序）
+            mux_nodes: MUX 节点 ID 列表（已按逻辑顺序排序）
             coverage: 分支覆盖数据
         """
         # 对于简单的 if-else（2个分支），只有一个 MUX
@@ -600,6 +1262,10 @@ class CoverageAnnotator:
         # 按条件编号排序，建立映射
         sorted_conditions = sorted(all_conditions)
         cond_to_mux_idx = {cond: idx for idx, cond in enumerate(sorted_conditions)}
+
+        # 调试信息
+        if len(mux_nodes) < len(sorted_conditions):
+            print(f"  注意：MUX 数量 ({len(mux_nodes)}) 少于条件数量 ({len(sorted_conditions)})")
 
         for branch_idx, branch_status in enumerate(coverage.branches):
             # 找到这个分支对应的 MUX
@@ -685,8 +1351,9 @@ class CoverageAnnotator:
                 continue
 
             # S 端口 - 控制信号
-            if edge.target_port == "S":
-                # 使用或逻辑：如果已经是已覆盖(1)，不要被未覆盖(0)覆盖
+            # 控制边的覆盖状态反映"这个条件的真分支是否被执行过"
+            # 只有当 is_true_branch=True 时才更新 S 端口的覆盖状态
+            if edge.target_port == "S" and is_true_branch:
                 if edge.coverage_label == -1:
                     # 首次标注
                     edge.source_line = coverage_line
@@ -746,178 +1413,6 @@ class CoverageAnnotator:
             self._annotated_mux_set.add(mux_node_id)
             self.stats.annotated_mux_nodes += 1
 
-    def annotate_condition_coverage(self) -> AnnotationStats:
-        """
-        标注条件覆盖率数据
-
-        条件覆盖率对应三元表达式和逻辑表达式，这些在 CDFG 中通常表示为 MUX 节点。
-        三元表达式 `cond ? a : b` 对应单个 MUX。
-        逻辑表达式 `a && b` 或 `a || b` 可能对应多个 MUX 的组合。
-
-        Returns:
-            更新后的标注统计信息
-        """
-        if not self.condition_data:
-            return self.stats
-
-        print(f"\n--- 条件覆盖率标注 ---")
-        print(f"共有 {len(self.condition_data)} 行的条件覆盖数据")
-
-        annotated_count = 0
-        for line_no, cond_list in self.condition_data.items():
-            # 跳过已被分支覆盖率标注过的行
-            if line_no in self.coverage_data:
-                continue
-
-            for cond_cov in cond_list:
-                # 只处理主表达式，跳过子表达式（避免重复标注）
-                if cond_cov.expression_type != "EXPRESSION":
-                    continue
-
-                # 查找对应的 MUX 节点
-                mux_nodes = self._find_mux_for_condition(line_no, cond_cov)
-                if not mux_nodes:
-                    continue
-
-                # 标注 MUX 节点
-                annotated = self._annotate_condition_mux(mux_nodes, cond_cov)
-                if annotated:
-                    annotated_count += 1
-                    print(f"  行 {line_no}: 标注 {len(mux_nodes)} 个 MUX (条件覆盖)")
-
-        print(f"条件覆盖率标注完成: {annotated_count} 个表达式")
-        return self.stats
-
-    def _find_mux_for_condition(
-        self, coverage_line: int, cond_cov: ConditionCoverage
-    ) -> List[str]:
-        """
-        为条件覆盖率找到对应的 MUX 节点
-
-        Args:
-            coverage_line: 覆盖率报告中的行号
-            cond_cov: 条件覆盖信息
-
-        Returns:
-            MUX 节点 ID 列表
-        """
-        # 使用学习到的偏移量
-        if self._learned_offset is not None:
-            adjusted_line = coverage_line + self._learned_offset
-            if adjusted_line in self.line_to_mux_nodes:
-                mux_list = self.line_to_mux_nodes[adjusted_line]
-                # 条件表达式通常只对应一个或少量 MUX
-                return mux_list[:cond_cov.num_conditions]
-
-        # 搜索 source_line
-        for offset in self.SOURCE_LINE_SEARCH_RANGE:
-            candidate_line = coverage_line + offset
-            if candidate_line in self.line_to_mux_nodes:
-                mux_list = self.line_to_mux_nodes[candidate_line]
-                if mux_list:
-                    # 学习偏移量
-                    if self._learned_offset is None and offset != 0:
-                        self._learned_offset = offset
-                        print(f"  学习到行号偏移: {offset}")
-                    return mux_list[:cond_cov.num_conditions]
-
-        return []
-
-    def _annotate_condition_mux(
-        self, mux_nodes: List[str], cond_cov: ConditionCoverage
-    ) -> bool:
-        """
-        标注条件覆盖率对应的 MUX 节点
-
-        Args:
-            mux_nodes: MUX 节点 ID 列表
-            cond_cov: 条件覆盖信息
-
-        Returns:
-            是否成功标注
-        """
-        if not mux_nodes:
-            return False
-
-        # 分析覆盖状态
-        # 对于条件覆盖率，我们关注整体表达式的 true/false 覆盖情况
-        true_covered = False
-        false_covered = False
-
-        for cond_status in cond_cov.conditions:
-            if cond_status.is_covered:
-                # 检查条件组合的结果
-                # 对于单条件：{1: 0} 表示 false, {1: 1} 表示 true
-                # 对于多条件：需要根据运算符判断（暂时简化处理）
-                if cond_cov.num_conditions == 1:
-                    val = cond_status.condition_values.get(1, 0)
-                    if val == 1:
-                        true_covered = True
-                    else:
-                        false_covered = True
-                else:
-                    # 多条件情况，检查是否有任一条件为真
-                    any_true = any(v == 1 for v in cond_status.condition_values.values())
-                    if any_true:
-                        true_covered = True
-                    else:
-                        false_covered = True
-
-        # 标注 MUX 节点的边
-        for mux_node_id in mux_nodes:
-            for edge in self.cdfg.edges:
-                if edge.target != mux_node_id:
-                    continue
-
-                # 跳过已标注的边
-                if edge.coverage_label >= 0:
-                    continue
-
-                # S 端口 - 控制信号
-                if edge.target_port == "S":
-                    # 控制信号已被评估（无论 true 还是 false）
-                    is_covered = true_covered or false_covered
-                    edge.source_line = cond_cov.line_no
-                    edge.coverage_label = 1 if is_covered else 0
-                    edge.coverage_type = "condition"
-                    self.stats.condition_annotated_edges += 1
-                    self.stats.annotated_edges += 1
-                    if is_covered:
-                        self.stats.covered_edges += 1
-                    else:
-                        self.stats.uncovered_edges += 1
-
-                # B 端口 - true 分支
-                elif edge.target_port == "B":
-                    edge.source_line = cond_cov.line_no
-                    edge.coverage_label = 1 if true_covered else 0
-                    edge.coverage_type = "condition_true"
-                    self.stats.condition_annotated_edges += 1
-                    self.stats.annotated_edges += 1
-                    if true_covered:
-                        self.stats.covered_edges += 1
-                    else:
-                        self.stats.uncovered_edges += 1
-
-                # A 端口 - false 分支
-                elif edge.target_port == "A":
-                    edge.source_line = cond_cov.line_no
-                    edge.coverage_label = 1 if false_covered else 0
-                    edge.coverage_type = "condition_false"
-                    self.stats.condition_annotated_edges += 1
-                    self.stats.annotated_edges += 1
-                    if false_covered:
-                        self.stats.covered_edges += 1
-                    else:
-                        self.stats.uncovered_edges += 1
-
-            # 统计 MUX 节点
-            if mux_node_id not in self._annotated_mux_set:
-                self._annotated_mux_set.add(mux_node_id)
-                self.stats.annotated_mux_nodes += 1
-                self.stats.condition_annotated_mux += 1
-
-        return True
 
 
 def annotate_cdfg_with_coverage(
@@ -925,7 +1420,6 @@ def annotate_cdfg_with_coverage(
     html_path: str,
     instance_tag: str = None,
     propagate: bool = False,
-    use_condition_coverage: bool = True,
 ) -> AnnotationStats:
     """
     便捷函数：用覆盖率数据标注 CDFG
@@ -935,7 +1429,6 @@ def annotate_cdfg_with_coverage(
         html_path: 覆盖率报告 HTML 文件路径
         instance_tag: 实例标签，None 则使用第一个实例
         propagate: 是否启用覆盖率传播（标注非分支边）
-        use_condition_coverage: 是否使用条件覆盖率（标注三元表达式等）
 
     Returns:
         标注统计信息
@@ -949,23 +1442,14 @@ def annotate_cdfg_with_coverage(
     # 解析分支覆盖率
     coverage_data = parser.parse_branch_coverage(instance_tag)
 
-    # 解析条件覆盖率
-    condition_data = {}
-    if use_condition_coverage:
-        condition_data = parser.parse_condition_coverage(instance_tag)
-
     # 获取源文件名用于过滤 MUX 节点
     source_file = parser.get_source_file()
 
     # 执行标注
     annotator = CoverageAnnotator(
-        cdfg, coverage_data, source_file=source_file, condition_data=condition_data
+        cdfg, coverage_data, source_file=source_file
     )
     stats = annotator.annotate()
-
-    # 标注条件覆盖率
-    if use_condition_coverage and condition_data:
-        stats = annotator.annotate_condition_coverage()
 
     # 可选：传播覆盖率到非分支边
     if propagate:

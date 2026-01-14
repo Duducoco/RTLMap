@@ -9,8 +9,6 @@ from .parser import (
     CoverageParser,
     BranchCoverage,
     BranchStatus,
-    ConditionCoverage,
-    ConditionStatus,
 )
 from .annotator import CoverageAnnotator, AnnotationStats, annotate_cdfg_with_coverage
 
@@ -19,8 +17,6 @@ __all__ = [
     "CoverageParser",
     "BranchCoverage",
     "BranchStatus",
-    "ConditionCoverage",
-    "ConditionStatus",
     # 标注器
     "CoverageAnnotator",
     "AnnotationStats",

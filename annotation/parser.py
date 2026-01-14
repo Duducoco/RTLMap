@@ -32,33 +32,6 @@ class BranchCoverage:
     branches: List[BranchStatus] = field(default_factory=list)  # 每个分支的详细状态
 
 
-@dataclass
-class ConditionStatus:
-    """单个条件组合的覆盖状态"""
-
-    condition_values: Dict[int, int] = field(
-        default_factory=dict
-    )  # 条件编号 -> 值 (0/1)
-    is_covered: bool = False
-
-
-@dataclass
-class ConditionCoverage:
-    """单行代码的条件覆盖信息
-
-    条件覆盖率记录表达式中各子条件的组合情况：
-    - 三元表达式: cond ? a : b
-    - 逻辑与: a && b
-    - 逻辑或: a || b
-
-    每个表达式可能有多个条件，每个条件组合有覆盖/未覆盖状态。
-    """
-
-    line_no: int  # 行号
-    expression: str  # 表达式文本
-    expression_type: str  # 表达式类型: "EXPRESSION" 或 "SUB-EXPRESSION"
-    num_conditions: int  # 条件数量
-    conditions: List[ConditionStatus] = field(default_factory=list)  # 各条件组合的状态
 
 
 class CoverageParser:
@@ -281,125 +254,76 @@ class CoverageParser:
             return full_path.replace("\\", "/").split("/")[-1]
         return None
 
-    def parse_condition_coverage(
-        self, instance_tag: str = None
-    ) -> Dict[int, List[ConditionCoverage]]:
-        """
-        解析条件覆盖数据
 
-        条件覆盖率记录表达式中各子条件的覆盖情况，包括：
-        - 三元表达式: (cond) ? a : b
-        - 逻辑表达式: a && b, a || b
 
-        Args:
-            instance_tag: 要解析的实例标签，None 则解析模块级数据
+def main():
+    """命令行入口，用于调试和测试覆盖率解析"""
+    import argparse
 
-        Returns:
-            行号 -> ConditionCoverage 列表的映射（同一行可能有多个表达式）
-        """
-        # 找到 Cond 部分
-        if instance_tag:
-            anchor_pattern = f'<a name="{instance_tag}_Cond"></a>'
-            next_anchor_pattern = r'<a name="inst_tag_\d+_\w+"></a>|<hr>'
+    parser = argparse.ArgumentParser(
+        description="解析 VCS/URG 覆盖率 HTML 报告"
+    )
+    parser.add_argument("html_path", help="覆盖率 HTML 文件路径")
+    parser.add_argument("--instance", "-i", help="实例标签 (如 inst_tag_58)")
+    parser.add_argument("--branch", "-b", action="store_true", help="只解析分支覆盖")
+
+    args = parser.parse_args()
+
+    # 如果没有指定类型，则解析所有
+    parse_all = not args.branch
+
+    try:
+        cov_parser = CoverageParser(args.html_path)
+    except FileNotFoundError as e:
+        print(f"错误: {e}")
+        return 1
+
+    # 基本信息
+    print("=" * 60)
+    print(f"文件: {cov_parser.html_path}")
+    print(f"模块: {cov_parser.get_module_name()}")
+    print(f"源文件: {cov_parser.get_source_file()}")
+
+    # 可用实例
+    instances = cov_parser.get_available_instances()
+    if instances:
+        instances.sort(key=lambda x: int(re.search(r"\d+", x).group()))
+        print(f"可用实例 ({len(instances)}): {', '.join(instances[:5])}" +
+              (f" ... (共 {len(instances)} 个)" if len(instances) > 5 else ""))
+        print(f"最后实例: {cov_parser.get_last_instance()}")
+
+    instance_tag = args.instance
+    if instance_tag:
+        print(f"\n使用实例: {instance_tag}")
+
+    # 分支覆盖
+    if parse_all or args.branch:
+        print("\n" + "=" * 60)
+        print("分支覆盖 (Branch Coverage)")
+        print("=" * 60)
+
+        branch_cov = cov_parser.parse_branch_coverage(instance_tag)
+        if not branch_cov:
+            print("  (无分支覆盖数据)")
         else:
-            anchor_pattern = '<a name="Cond"></a>'
-            next_anchor_pattern = r'<a name="Toggle"></a>|<a name="inst_tag_\d+"></a>'
+            for line_no in sorted(branch_cov.keys()):
+                bc = branch_cov[line_no]
+                status = "✓" if bc.covered_branches == bc.total_branches else "✗"
+                print(f"\n行 {line_no} [{bc.branch_type}] {status} "
+                      f"{bc.covered_branches}/{bc.total_branches} ({bc.percent:.1f}%)")
 
-        start_match = re.search(re.escape(anchor_pattern), self.html_content)
-        if not start_match:
-            return {}
+                for idx, branch in enumerate(bc.branches):
+                    cov_mark = "✓" if branch.is_covered else "✗"
+                    cond_str = ", ".join(
+                        f"C{k}={'T' if v == 1 else 'F' if v == 0 else '-'}"
+                        for k, v in sorted(branch.condition_values.items())
+                    )
+                    print(f"  分支 {idx + 1}: [{cov_mark}] {cond_str}")
 
-        start_pos = start_match.end()
-        remaining = self.html_content[start_pos:]
-        end_match = re.search(next_anchor_pattern, remaining)
-        if end_match:
-            cond_section = remaining[: end_match.start()]
-        else:
-            cond_section = remaining
 
-        return self._parse_condition_section(cond_section)
+    print("\n" + "=" * 60)
+    return 0
 
-    def _parse_condition_section(
-        self, section_html: str
-    ) -> Dict[int, List[ConditionCoverage]]:
-        """解析 Condition Coverage 部分的 HTML"""
-        result: Dict[int, List[ConditionCoverage]] = {}
 
-        # 解析每个表达式块
-        # 格式:
-        # <pre class="code"> LINE       290
-        #  EXPRESSION ((a == b) || (c == d))
-        #              ----1----    ----2---
-        # </pre>
-        # <table ...>
-        #   <tr><th>-1-</th><th>-2-</th><th>Status</th></tr>
-        #   <tr class="uGreen"><td>0</td><td>0</td><td>Covered</td></tr>
-        #   ...
-        # </table>
-
-        # 按 <pre class="code"> 分割
-        blocks = re.split(r'<pre class="code">', section_html)
-
-        for block in blocks[1:]:  # 跳过第一个（在首个 pre 之前的内容）
-            # 提取行号和表达式类型
-            header_match = re.search(
-                r'LINE\s+(\d+)\s+(EXPRESSION|SUB-EXPRESSION)\s+(.+?)</pre>',
-                block,
-                re.DOTALL
-            )
-            if not header_match:
-                continue
-
-            line_no = int(header_match.group(1))
-            expr_type = header_match.group(2)
-            expr_text = header_match.group(3).strip()
-
-            # 清理表达式文本（移除 HTML 标签）
-            expr_text = re.sub(r'<[^>]+>', '', expr_text)
-            expr_text = re.sub(r'\s+', ' ', expr_text).strip()
-            # 只保留第一行（表达式本身）
-            expr_text = expr_text.split('\n')[0].strip()
-
-            # 提取条件数量（从表头中的 -1-, -2- 等）
-            th_matches = re.findall(r'<th>-(\d+)-</th>', block)
-            num_conditions = len(th_matches) if th_matches else 1
-
-            # 解析覆盖状态表
-            conditions = []
-            row_matches = re.findall(
-                r'<tr class="(uGreen|uRed)">(.*?)</tr>',
-                block,
-                re.DOTALL
-            )
-
-            for row_class, row_content in row_matches:
-                is_covered = row_class == "uGreen"
-
-                # 提取条件值
-                # 格式: <td>0</td><td>1</td><td class="lf">Covered</td>
-                td_values = re.findall(r'<td[^>]*>(\d)</td>', row_content)
-
-                condition_values = {}
-                for idx, val in enumerate(td_values):
-                    condition_values[idx + 1] = int(val)
-
-                if condition_values:
-                    conditions.append(ConditionStatus(
-                        condition_values=condition_values,
-                        is_covered=is_covered
-                    ))
-
-            if conditions:
-                cond_cov = ConditionCoverage(
-                    line_no=line_no,
-                    expression=expr_text,
-                    expression_type=expr_type,
-                    num_conditions=num_conditions,
-                    conditions=conditions
-                )
-
-                if line_no not in result:
-                    result[line_no] = []
-                result[line_no].append(cond_cov)
-
-        return result
+if __name__ == "__main__":
+    exit(main())

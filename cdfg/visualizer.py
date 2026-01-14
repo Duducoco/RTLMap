@@ -247,6 +247,7 @@ class CDFGVisualizer:
             label = self._create_edge_label(
                 edge, show_ports, show_widths, show_coverage
             )
+            tooltip = self._create_edge_tooltip(edge, show_coverage)
 
             if show_coverage:
                 # 使用覆盖率样式
@@ -257,7 +258,7 @@ class CDFGVisualizer:
                     edge.edge_type, self.EDGE_STYLES[EdgeType.DATA]
                 ).copy()
 
-            dot.edge(safe_source, safe_target, label=label, **style)
+            dot.edge(safe_source, safe_target, label=label, tooltip=tooltip, **style)
 
     def _render_separated(
         self,
@@ -295,6 +296,7 @@ class CDFGVisualizer:
             label = self._create_edge_label(
                 edge, show_ports, show_widths, show_coverage
             )
+            tooltip = self._create_edge_tooltip(edge, show_coverage)
 
             if show_coverage:
                 # 使用覆盖率样式
@@ -305,7 +307,7 @@ class CDFGVisualizer:
                     edge.edge_type, self.EDGE_STYLES[EdgeType.DATA]
                 ).copy()
 
-            dot.edge(safe_source, safe_target, label=label, **style)
+            dot.edge(safe_source, safe_target, label=label, tooltip=tooltip, **style)
 
     def _create_node_label(self, node: Node, show_widths: bool) -> str:
         """创建节点标签"""
@@ -352,6 +354,60 @@ class CDFGVisualizer:
             parts.append(f"({ctype_short})")
 
         return " ".join(parts) if parts else ""
+
+    def _create_edge_tooltip(self, edge: Edge, show_coverage: bool = False) -> str:
+        """
+        创建边的悬停提示信息
+        
+        Args:
+            edge: 边对象
+            show_coverage: 是否显示覆盖率信息
+            
+        Returns:
+            tooltip 字符串
+        """
+        lines = []
+        
+        # 端口信息
+        if edge.source_port:
+            lines.append(f"源端口: {edge.source_port}")
+        if edge.target_port:
+            lines.append(f"目标端口: {edge.target_port}")
+        
+        # 位宽
+        if edge.width > 1:
+            lines.append(f"位宽: {edge.width}")
+        
+        # 边类型
+        lines.append(f"边类型: {edge.edge_type.name}")
+        
+        # 覆盖率信息
+        if show_coverage:
+            if edge.coverage_label == 1:
+                status = "已覆盖"
+            elif edge.coverage_label == 0:
+                status = "未覆盖"
+            else:
+                status = "未标注"
+            lines.append(f"覆盖状态: {status}")
+            
+            if edge.coverage_type:
+                ctype_full = {
+                    "always": "必然执行",
+                    "control": "控制边",
+                    "data_true": "真分支数据",
+                    "data_false": "假分支数据",
+                    "propagated": "传播标注",
+                }.get(edge.coverage_type, edge.coverage_type)
+                lines.append(f"覆盖类型: {ctype_full}")
+            
+            if edge.branch_index >= 0:
+                lines.append(f"分支索引: {edge.branch_index}")
+            
+            if edge.source_line > 0:
+                lines.append(f"源码行号: {edge.source_line}")
+        
+        return "\\n".join(lines) if lines else ""
 
     def to_dot_string(self) -> str:
         """返回 DOT 格式字符串"""
