@@ -30,6 +30,7 @@ class BranchCoverage:
     covered_branches: int  # 已覆盖分支数
     percent: float  # 覆盖率百分比
     branches: List[BranchStatus] = field(default_factory=list)  # 每个分支的详细状态
+    instance_index: int = 0  # 同行多实例时的实例索引（用于 generate 展开）
 
 
 
@@ -53,7 +54,7 @@ class CoverageParser:
 
     def parse_branch_coverage(
         self, instance_tag: str = None
-    ) -> Dict[int, BranchCoverage]:
+    ) -> List[BranchCoverage]:
         """
         解析分支覆盖数据
 
@@ -61,7 +62,7 @@ class CoverageParser:
             instance_tag: 要解析的实例标签（如 "inst_tag_58"），None 则解析模块级数据
 
         Returns:
-            行号 -> BranchCoverage 的映射字典
+            BranchCoverage 列表，支持同一行号有多个实例（如 generate 展开）
         """
         # 找到对应的 Branch 部分
         if instance_tag:
@@ -92,9 +93,15 @@ class CoverageParser:
 
         return self._parse_branch_section(branch_section)
 
-    def _parse_branch_section(self, section_html: str) -> Dict[int, BranchCoverage]:
-        """解析 Branch 部分的 HTML"""
-        result = {}
+    def _parse_branch_section(self, section_html: str) -> List[BranchCoverage]:
+        """解析 Branch 部分的 HTML
+
+        支持同一行号有多个实例（如 generate 展开），每个实例创建独立的 BranchCoverage 对象。
+        """
+        result: List[BranchCoverage] = []
+
+        # 用于跟踪同一行号的实例索引
+        line_instance_count: Dict[int, int] = {}
 
         # 1. 解析摘要表格，获取每行的基本信息
         # 匹配 IF 或 CASE 行: <td>IF</td><td class="rt">60</td><td class="rt">2</td>...
@@ -107,14 +114,19 @@ class CoverageParser:
             covered = int(match.group(4))
             percent = float(match.group(5))
 
-            result[line_no] = BranchCoverage(
+            # 计算这是该行号的第几个实例
+            instance_idx = line_instance_count.get(line_no, 0)
+            line_instance_count[line_no] = instance_idx + 1
+
+            result.append(BranchCoverage(
                 line_no=line_no,
                 branch_type=branch_type,
                 total_branches=total,
                 covered_branches=covered,
                 percent=percent,
                 branches=[],
-            )
+                instance_index=instance_idx,
+            ))
 
         # 2. 解析每个分支的详细状态
         # 找到所有 "Branches:" 后的表格
@@ -122,31 +134,12 @@ class CoverageParser:
             r"<span class=repname>Branches:</span>", section_html
         )
 
-        current_line_no = None
+        # 按顺序遍历，每个 Branches 段落对应 result 中的一个 BranchCoverage
         for i, section in enumerate(
-            branches_sections[1:], 1
-        ):  # 跳过第一个（摘要部分前的内容）
-            # 找到这个 Branches 对应的行号
-            # 往前找最近的行号信息
-            prev_section = branches_sections[i - 1] if i > 0 else ""
-            # 查找 pre class="code" 中的行号
-            code_match = re.search(
-                r'<pre class="code">.*?(\d+)\s+(?:if|else if|case|assign)',
-                prev_section,
-                re.DOTALL | re.IGNORECASE,
-            )
-            if code_match:
-                current_line_no = int(code_match.group(1))
-
-            if current_line_no is None or current_line_no not in result:
-                # 尝试从摘要表中按顺序获取
-                if i <= len(result):
-                    sorted_lines = sorted(result.keys())
-                    if i <= len(sorted_lines):
-                        current_line_no = sorted_lines[i - 1]
-
-            if current_line_no is None or current_line_no not in result:
-                continue
+            branches_sections[1:], 0
+        ):  # 从 0 开始索引，跳过第一个（摘要部分前的内容）
+            if i >= len(result):
+                break  # 没有更多的 BranchCoverage 需要填充
 
             # 解析分支状态表
             # 匹配: <tr class="uGreen"> 或 <tr class="uRed">
@@ -193,7 +186,7 @@ class CoverageParser:
                                 condition_values[cond_num] = 1  # n 表示条件 n 为真
 
                 if condition_values:  # 只有当有条件值时才添加
-                    result[current_line_no].branches.append(
+                    result[i].branches.append(
                         BranchStatus(
                             condition_values=condition_values, is_covered=is_covered
                         )
@@ -302,23 +295,31 @@ def main():
         print("分支覆盖 (Branch Coverage)")
         print("=" * 60)
 
-        branch_cov = cov_parser.parse_branch_coverage(instance_tag)
-        if not branch_cov:
+        branch_cov_list = cov_parser.parse_branch_coverage(instance_tag)
+        if not branch_cov_list:
             print("  (无分支覆盖数据)")
         else:
-            for line_no in sorted(branch_cov.keys()):
-                bc = branch_cov[line_no]
-                status = "✓" if bc.covered_branches == bc.total_branches else "✗"
-                print(f"\n行 {line_no} [{bc.branch_type}] {status} "
-                      f"{bc.covered_branches}/{bc.total_branches} ({bc.percent:.1f}%)")
+            # 按行号分组显示
+            from collections import defaultdict
+            by_line: Dict[int, List[BranchCoverage]] = defaultdict(list)
+            for bc in branch_cov_list:
+                by_line[bc.line_no].append(bc)
 
-                for idx, branch in enumerate(bc.branches):
-                    cov_mark = "✓" if branch.is_covered else "✗"
-                    cond_str = ", ".join(
-                        f"C{k}={'T' if v == 1 else 'F' if v == 0 else '-'}"
-                        for k, v in sorted(branch.condition_values.items())
-                    )
-                    print(f"  分支 {idx + 1}: [{cov_mark}] {cond_str}")
+            for line_no in sorted(by_line.keys()):
+                coverages = by_line[line_no]
+                for bc in coverages:
+                    instance_str = f" [实例 {bc.instance_index}]" if len(coverages) > 1 else ""
+                    status = "✓" if bc.covered_branches == bc.total_branches else "✗"
+                    print(f"\n行 {line_no}{instance_str} [{bc.branch_type}] {status} "
+                          f"{bc.covered_branches}/{bc.total_branches} ({bc.percent:.1f}%)")
+
+                    for idx, branch in enumerate(bc.branches):
+                        cov_mark = "✓" if branch.is_covered else "✗"
+                        cond_str = ", ".join(
+                            f"C{k}={'T' if v == 1 else 'F' if v == 0 else '-'}"
+                            for k, v in sorted(branch.condition_values.items())
+                        )
+                        print(f"  分支 {idx + 1}: [{cov_mark}] {cond_str}")
 
 
     print("\n" + "=" * 60)

@@ -94,54 +94,130 @@ class DataAnnotator:
         )
         return cls(config)
 
+    def _build_source_to_html_cache(
+        self, design_dir: Path, coverage_dir: Path
+    ) -> dict[str, str]:
+        """
+        构建或加载 源文件名 -> HTML文件名 的缓存
+
+        缓存文件 source2html.json 保存在设计目录下（与 module2html.json 同级），格式：
+        {
+            "_meta": {"html_count": 33, "generated_at": "2024-01-16T12:00:00"},
+            "cv32e40p_sleep_unit.sv": "mod17.html",
+            "cv32e40p_sim_clock_gate.sv": "mod3.html",
+            ...
+        }
+
+        缓存失效条件：HTML 文件数量变化
+
+        Args:
+            design_dir: 设计目录（与 module2html.json 同级）
+            coverage_dir: 覆盖率报告目录
+
+        Returns:
+            源文件名 -> HTML文件名 的映射字典
+        """
+        cache_file = design_dir / "source2html.json"
+        html_files = list(coverage_dir.glob("mod*.html"))
+        current_html_count = len(html_files)
+
+        # 尝试加载缓存
+        if cache_file.exists():
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    cached_data = json.load(f)
+
+                # 检查缓存是否有效（HTML 文件数量一致）
+                meta = cached_data.get("_meta", {})
+                if meta.get("html_count") == current_html_count:
+                    # 移除 _meta 键，返回纯映射
+                    cached_data.pop("_meta", None)
+                    if self.config.verbose:
+                        print(f"使用缓存的源文件映射 ({len(cached_data)} 条)")
+                    return cached_data
+                else:
+                    if self.config.verbose:
+                        print(f"缓存失效: HTML 文件数量变化 ({meta.get('html_count')} -> {current_html_count})")
+            except (json.JSONDecodeError, KeyError):
+                pass  # 缓存损坏，重新生成
+
+        # 遍历 HTML 文件，解析源文件名
+        source_to_html: dict[str, str] = {}
+        for html_path in html_files:
+            try:
+                parser = CoverageParser(str(html_path))
+                source_file = parser.get_source_file()
+                if source_file and source_file not in source_to_html:
+                    # 只保存文件名，不保存完整路径
+                    source_to_html[source_file] = html_path.name
+            except Exception:
+                continue
+
+        # 保存缓存
+        cache_data = {
+            "_meta": {
+                "html_count": current_html_count,
+                "generated_at": __import__("datetime").datetime.now().isoformat(),
+            },
+            **source_to_html,
+        }
+        try:
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(cache_data, f, indent=2, ensure_ascii=False)
+            if self.config.verbose:
+                print(f"已生成源文件映射缓存: {cache_file}")
+        except Exception as e:
+            if self.config.verbose:
+                print(f"警告: 无法保存缓存文件: {e}")
+
+        return source_to_html
+
     def _find_coverage_files(
         self, design_dir: Path, coverage_dir: Path
     ) -> list:
         """
-        根据 module2html.json 映射和 CDFG 中的源文件自动查找覆盖率文件
+        根据覆盖率报告中的源文件信息和 CDFG 中的源文件自动查找覆盖率文件
+
+        使用 source2html.json 缓存加速查找，避免每次都解析所有 HTML 文件。
 
         Args:
-            design_dir: 设计目录（包含 module2html.json）
+            design_dir: 设计目录
             coverage_dir: 覆盖率报告目录
 
         Returns:
             覆盖率文件路径列表
         """
-        # 读取 module2html.json
-        mapping_file = design_dir / "module2html.json"
-        if not mapping_file.exists():
-            print(f"警告: 未找到映射文件 {mapping_file}")
-            return []
-
-        with open(mapping_file, "r", encoding="utf-8") as f:
-            module2html = json.load(f)
-
-        # 收集 CDFG 中所有源文件对应的模块名
-        source_files = set()
+        # 收集 CDFG 中所有源文件名
+        cdfg_source_files = set()
         for node in self.cdfg.nodes.values():
             if node.source_file:
-                # 从文件名推断模块名（去掉 .sv 后缀）
-                module_name = node.source_file.replace(".sv", "").replace(".v", "")
-                source_files.add(module_name)
+                cdfg_source_files.add(node.source_file)
 
-        print(f"\nCDFG 中包含 {len(source_files)} 个源文件的节点")
+        print(f"\nCDFG 中包含 {len(cdfg_source_files)} 个源文件的节点")
 
-        # 查找对应的覆盖率文件
+        # 获取源文件到 HTML 的映射（优先使用缓存）
+        source_to_html = self._build_source_to_html_cache(design_dir, coverage_dir)
+
+        if self.config.verbose:
+            print(f"覆盖率目录中找到 {len(source_to_html)} 个有效的源文件映射")
+
+        # 匹配 CDFG 源文件与覆盖率报告
         coverage_files = []
-        matched_modules = []
+        matched_sources = []
 
-        for module_name, html_file in module2html.items():
-            # 检查模块名是否匹配 CDFG 中的源文件
-            # 支持精确匹配和模糊匹配（模块名可能是层次化的如 cv32e40p_wrapper.core_i.xxx）
-            base_module = module_name.split(".")[-1] if "." in module_name else module_name
-
-            if base_module in source_files or module_name in source_files:
-                html_path = coverage_dir / html_file
+        for source_file in cdfg_source_files:
+            if source_file in source_to_html:
+                # 将相对文件名转换为完整路径
+                html_path = coverage_dir / source_to_html[source_file]
                 if html_path.exists():
                     coverage_files.append(str(html_path))
-                    matched_modules.append(module_name)
+                    matched_sources.append(source_file)
 
         print(f"匹配到 {len(coverage_files)} 个覆盖率报告文件")
+
+        if self.config.verbose and matched_sources:
+            for src in matched_sources:
+                print(f"  {src} -> {source_to_html[src]}")
 
         return coverage_files
 

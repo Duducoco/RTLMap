@@ -6,16 +6,55 @@ from typing import List, Optional, Union
 
 # Define paths for default usage
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
-DEFAULT_OSS_CAD_SUITE_PATH = PROJECT_ROOT / "oss-cad-suite"
-
 
 class YosysRunner:
     def __init__(self, oss_cad_suite_path: Optional[Path] = None):
-        self.oss_cad_suite_path = oss_cad_suite_path or DEFAULT_OSS_CAD_SUITE_PATH
-        self.yosys_exe = self.oss_cad_suite_path / "bin" / "yosys.exe"
+        # 获取环境变量中的YOSYS_HOME路径
+        yosys_home = os.environ.get("YOSYS_HOME")
+        if oss_cad_suite_path:
+            self.oss_cad_suite_path = oss_cad_suite_path
+        elif yosys_home:
+            self.oss_cad_suite_path = Path(yosys_home)
+        else:
+            raise EnvironmentError("YOSYS_HOME environment variable is not set and no path was provided.")
+        
+        self.yosys_exe = self.oss_cad_suite_path / "bin" / "yosys"
+
         self.env = self._setup_environment()
 
     def _setup_environment(self) -> dict:
+        """Select environment setup based on platform."""
+        import platform
+        if platform.system() == "Windows":
+            return self._setup_environment_win()
+        else:
+            return self._setup_environment_linux()
+
+    def _setup_environment_linux(self) -> dict:
+        env = os.environ.copy()
+
+        # VIRTUAL_ENV - oss-cad-suite root directory
+        release_topdir_abs = str(self.oss_cad_suite_path)
+        env["VIRTUAL_ENV"] = release_topdir_abs
+
+        # PATH - add bin and py3bin directories
+        bin_path = str(self.oss_cad_suite_path / "bin")
+        py3bin_path = str(self.oss_cad_suite_path / "py3bin")
+        env["PATH"] = f"{bin_path}:{py3bin_path}:{env.get('PATH', '')}"
+
+        # Unset PYTHONHOME if set (important for Python compatibility)
+        if "PYTHONHOME" in env:
+            del env["PYTHONHOME"]
+
+        # VERILATOR_ROOT
+        env["VERILATOR_ROOT"] = str(self.oss_cad_suite_path / "share" / "verilator")
+
+        # GHDL_PREFIX
+        env["GHDL_PREFIX"] = str(self.oss_cad_suite_path / "lib" / "ghdl")
+
+        return env
+
+    def _setup_environment_win(self) -> dict:
         env = os.environ.copy()
 
         # YOSYSHQ_ROOT
@@ -68,7 +107,8 @@ class YosysRunner:
             commands: List of Yosys commands to execute.
             output_file: Optional path to write the log output to.
         """
-        # Join commands with semicolons
+        # Join commands with 
+        
         command_str = "; ".join(commands)
 
         print(f"Executing Yosys commands: {command_str}")
@@ -145,6 +185,10 @@ class YosysRunner:
 
 
 if __name__ == "__main__":
+    abc = YosysRunner()
+    abc.run(["help"])
+    exit()
+
     parser = argparse.ArgumentParser(description="Run Yosys synthesis")
 
     # Create a mutually exclusive group for input files

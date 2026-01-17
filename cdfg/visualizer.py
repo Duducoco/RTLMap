@@ -16,40 +16,40 @@ class CDFGVisualizer:
     NODE_STYLES = {
         NodeType.INPUT: {
             "shape": "ellipse",
-            "fillcolor": "lightgreen",
+            "fillcolor": "#90EE90",  # lightgreen
             "style": "filled",
         },
         NodeType.OUTPUT: {
             "shape": "ellipse",
-            "fillcolor": "lightcoral",
+            "fillcolor": "#F08080",  # lightcoral
             "style": "filled",
         },
         NodeType.CONSTANT: {
             "shape": "diamond",
-            "fillcolor": "lightyellow",
+            "fillcolor": "#FFFFE0",  # lightyellow
             "style": "filled",
         },
         NodeType.SEQUENTIAL: {
             "shape": "box",
-            "fillcolor": "lightblue",
+            "fillcolor": "#ADD8E6",  # lightblue
             "style": "filled,bold",
         },
-        NodeType.MUX: {"shape": "trapezium", "fillcolor": "wheat", "style": "filled"},
-        NodeType.ARITHMETIC: {"shape": "box", "fillcolor": "white", "style": "filled"},
-        NodeType.LOGIC: {"shape": "box", "fillcolor": "lavender", "style": "filled"},
-        NodeType.COMPARE: {"shape": "box", "fillcolor": "mistyrose", "style": "filled"},
+        NodeType.MUX: {"shape": "trapezium", "fillcolor": "#F5DEB3", "style": "filled"},  # wheat
+        NodeType.ARITHMETIC: {"shape": "box", "fillcolor": "#FFFFFF", "style": "filled"},  # white
+        NodeType.LOGIC: {"shape": "box", "fillcolor": "#E6E6FA", "style": "filled"},  # lavender
+        NodeType.COMPARE: {"shape": "box", "fillcolor": "#FFE4E1", "style": "filled"},  # mistyrose
         NodeType.MEMORY: {
             "shape": "box3d",
-            "fillcolor": "lightgray",
+            "fillcolor": "#D3D3D3",  # lightgray
             "style": "filled",
         },
-        NodeType.SHIFT: {"shape": "box", "fillcolor": "honeydew", "style": "filled"},
+        NodeType.SHIFT: {"shape": "box", "fillcolor": "#F0FFF0", "style": "filled"},  # honeydew
         NodeType.COMBINATIONAL: {
             "shape": "box",
-            "fillcolor": "white",
+            "fillcolor": "#FFFFFF",  # white
             "style": "filled",
         },
-        NodeType.UNKNOWN: {"shape": "box", "fillcolor": "white", "style": "filled"},
+        NodeType.UNKNOWN: {"shape": "box", "fillcolor": "#FFFFFF", "style": "filled"},  # white
     }
 
     # 边样式配置
@@ -186,8 +186,19 @@ class CDFGVisualizer:
         if show_coverage:
             self._add_coverage_legend(dot)
 
-        output_path = dot.render(output_file, cleanup=True)
-        return output_path
+        try:
+            output_path = dot.render(output_file, cleanup=True)
+            return output_path
+        except Exception as e:
+            # sfdp 引擎可能因缺少三角化库而失败，回退到 fdp
+            if engine == "sfdp" and "triangulation" in str(e):
+                print(f"[WARN] sfdp 引擎不可用，回退到 fdp 引擎")
+                dot.engine = "fdp"
+                # fdp 需要禁用 overlap 移除以避免同样问题
+                dot.attr(overlap="scale")
+                output_path = dot.render(output_file, cleanup=True)
+                return output_path
+            raise
 
     def _add_coverage_legend(self, dot: graphviz.Digraph):
         """添加覆盖率图例"""
