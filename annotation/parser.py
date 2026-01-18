@@ -16,8 +16,11 @@ class BranchStatus:
 
     condition_values: Dict[int, int] = field(
         default_factory=dict
-    )  # 条件编号 -> 值 (0/1), -1 表示 "-"
+    )  # 条件编号 -> 值 (0/1/-1), -1 表示 "-", 2 表示 CASE 标签被选中
     is_covered: bool = False
+    case_labels: Dict[int, str] = field(
+        default_factory=dict
+    )  # 条件编号 -> CASE 标签名（如 "IDLE", "DIVIDE"）
 
 
 @dataclass
@@ -152,23 +155,68 @@ class CoverageParser:
 
                 # 提取条件值
                 # 格式1 (IF语句): <td align=center>1</td> 或 <td align=center nowrap>-</td>
-                # 格式2 (CASE语句): <td nowrap>(1.RESET )->(2)->...</td><td>Covered</td>
+                # 格式2 (CASE语句): <td nowrap>IDLE</td> 或 <td nowrap>DIVIDE</td>
+                # 格式3 (旧版CASE): <td nowrap>(1.RESET )->(2)->...</td><td>Covered</td>
+                #
+                # 更宽泛的正则表达式：捕获所有 td 内容（除了空标签）
                 td_values = re.findall(
-                    r"<td[^>]*>([01-]|Covered|Not Covered)</td>", row_content
+                    r"<td[^>]*>([^<]+)</td>", row_content
                 )
 
                 condition_values = {}
-                for idx, val in enumerate(td_values):
-                    if val == "1":
-                        condition_values[idx + 1] = 1
-                    elif val == "0":
-                        condition_values[idx + 1] = 0
-                    elif val == "-":
-                        condition_values[idx + 1] = -1
-                    # 跳过 "Covered" / "Not Covered"
+                case_labels = {}
 
-                # 如果没有找到简单的条件值，尝试解析 CASE 格式
-                # CASE 格式: (1.STATE_NAME)->(2)->(!3)->...
+                # 首先检查是否是复杂路径格式：(1.STATE)->(2)->(!3)->...
+                # 这种格式会被提取为单个 td，需要特殊处理
+                path_match = re.search(r'<td[^>]*>\((\d+\.[^)]+)\)->', row_content)
+                if path_match:
+                    # 复杂路径格式
+                    # 匹配整个 td 内容
+                    full_path_match = re.search(r'<td[^>]*>(\([^<]+)</td>', row_content)
+                    if full_path_match:
+                        path_str = full_path_match.group(1)
+                        # 解析路径中的条件: (1.STATE)->(2)->(!3)->(4.-)
+                        # 数字表示条件编号，! 表示取反，- 表示无关
+                        cond_matches = re.findall(r'\((!?)(\d+)(?:\.([^)]*))?\)', path_str)
+                        for cond_match in cond_matches:
+                            negated = cond_match[0] == '!'  # 是否取反
+                            cond_num = int(cond_match[1])   # 条件编号
+                            label = cond_match[2] if len(cond_match) > 2 else None  # 标签名
+
+                            if label == '-':
+                                # 无关条件
+                                condition_values[cond_num] = -1
+                            elif label:
+                                # CASE 标签（如 "RESET", "DECODE"）
+                                condition_values[cond_num] = 2
+                                case_labels[cond_num] = label.strip()
+                            elif negated:
+                                # !n 表示条件 n 为假
+                                condition_values[cond_num] = 0
+                            else:
+                                # n 表示条件 n 为真
+                                condition_values[cond_num] = 1
+                else:
+                    # 简单表格格式
+                    for idx, val in enumerate(td_values):
+                        val = val.strip()
+                        if val == "1":
+                            condition_values[idx + 1] = 1
+                        elif val == "0":
+                            condition_values[idx + 1] = 0
+                        elif val == "-":
+                            condition_values[idx + 1] = -1
+                        elif val in ("Covered", "Not Covered", ""):
+                            # 跳过覆盖状态标签和空值
+                            pass
+                        else:
+                            # CASE 标签值（如 "IDLE", "DIVIDE", "default"）
+                            # 使用特殊值 2 表示 CASE 分支被选中
+                            condition_values[idx + 1] = 2
+                            case_labels[idx + 1] = val
+
+                # 如果没有找到简单的条件值，尝试解析旧版 CASE 格式
+                # 旧版 CASE 格式: (1.STATE_NAME)->(2)->(!3)->...
                 if not condition_values:
                     # 匹配整个分支路径字符串
                     path_match = re.search(r'<td[^>]*>\(([^<]+)\)</td>', row_content)
@@ -176,19 +224,29 @@ class CoverageParser:
                         path_str = path_match.group(1)
                         # 解析路径中的条件: (1.STATE)->(2)->(!3)->(4.-)
                         # 数字表示条件编号，! 表示取反，- 表示无关
-                        cond_matches = re.findall(r'\((!?\d+)(?:\.[^)]+)?\)', path_str)
-                        for cond in cond_matches:
-                            if cond.startswith('!'):
-                                cond_num = int(cond[1:])
+                        cond_matches = re.findall(r'\((!?\d+)(?:\.([^)]+))?\)', path_str)
+                        for cond_match in cond_matches:
+                            cond_num_str = cond_match[0]  # 条件编号（可能带 !）
+                            label = cond_match[1] if len(cond_match) > 1 else None  # 标签名
+
+                            if cond_num_str.startswith('!'):
+                                cond_num = int(cond_num_str[1:])
                                 condition_values[cond_num] = 0  # !n 表示条件 n 为假
                             else:
-                                cond_num = int(cond)
-                                condition_values[cond_num] = 1  # n 表示条件 n 为真
+                                cond_num = int(cond_num_str)
+                                # 检查是否有标签（非 "-" 的标签表示 CASE 选择）
+                                if label and label != "-":
+                                    condition_values[cond_num] = 2  # CASE 标签被选中
+                                    case_labels[cond_num] = label
+                                else:
+                                    condition_values[cond_num] = 1  # n 表示条件 n 为真
 
                 if condition_values:  # 只有当有条件值时才添加
                     result[i].branches.append(
                         BranchStatus(
-                            condition_values=condition_values, is_covered=is_covered
+                            condition_values=condition_values,
+                            is_covered=is_covered,
+                            case_labels=case_labels
                         )
                     )
 
