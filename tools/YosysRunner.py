@@ -185,8 +185,8 @@ class YosysRunner:
 
 
 if __name__ == "__main__":
-    abc = YosysRunner()
-    abc.run(["help"])
+    runner = YosysRunner()
+    runner.run(["help"])
     exit()
 
     parser = argparse.ArgumentParser(description="Run Yosys synthesis")

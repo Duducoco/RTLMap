@@ -109,3 +109,4 @@ uv run python data_annotate.py --design_name cv32e40p --module_name cv32e40p_id_
 echo "=========================================="
 echo "测试完成!"
 echo "=========================================="
+uv run python data_annotate.py --design_name cv32e40p --module_name cv32e40p_register_file_ff -v
