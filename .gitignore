@@ -27,4 +27,6 @@ designs/openc910
 *.v
 *.sv
 *.sh
+*.S
+*.s
 
