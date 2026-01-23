@@ -150,8 +150,12 @@ class DualGraphLightningModule(L.LightningModule):
                 'hp/val_accuracy': 0.0,
                 'hp/val_f1': 0.0,
             }
-            # 记录超参数与指标关联
-            self.logger.log_hyperparams(self.hparams, metrics_to_track)
+            # 记录超参数与指标关联（仅 TensorBoard 支持）
+            try:
+                self.logger.log_hyperparams(self.hparams, metrics_to_track)
+            except TypeError:
+                # CSVLogger 等不支持 metrics 参数
+                self.logger.log_hyperparams(self.hparams)
 
     def on_validation_epoch_end(self):
         """验证 epoch 结束时更新超参数指标"""

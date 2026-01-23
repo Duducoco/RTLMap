@@ -3,18 +3,14 @@
 
 from typing import List, Optional, Tuple
 import lightning as L
-from lightning.pytorch.callbacks import (
-    ModelCheckpoint,
-    EarlyStopping,
-    LearningRateMonitor,
-    RichProgressBar
-)
+from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.loggers import TensorBoardLogger, CSVLogger
 
 from models.data_types import DualGraphData, ModelConfig
 from .config import TrainerConfig
 from .datamodule import DualGraphDataModule
 from .module import DualGraphLightningModule
+from .callbacks import CallbackFactory
 
 
 def train_model(
@@ -24,7 +20,8 @@ def train_model(
     val_data: Optional[List[DualGraphData]] = None,
     test_data: Optional[List[DualGraphData]] = None,
     logger_type: str = "tensorboard",
-    experiment_name: str = "dual_graph_gnn"
+    experiment_name: str = "dual_graph_gnn",
+    extra_callbacks: Optional[List[Callback]] = None
 ) -> Tuple[DualGraphLightningModule, L.Trainer]:
     """
     便捷训练函数
@@ -37,6 +34,7 @@ def train_model(
         test_data: 测试数据（可选）
         logger_type: 日志类型（tensorboard / csv）
         experiment_name: 实验名称
+        extra_callbacks: 额外的自定义 callbacks（可选）
 
     Returns:
         (module, trainer): 训练后的模块和 Trainer
@@ -74,34 +72,13 @@ def train_model(
             name=experiment_name
         )
 
-    # Callbacks
-    callbacks = [
-        LearningRateMonitor(logging_interval='step'),
-        RichProgressBar()
-    ]
-
-    # ModelCheckpoint
-    if val_data:
-        callbacks.append(
-            ModelCheckpoint(
-                dirpath=f"{trainer_config.checkpoint_dir}/{experiment_name}",
-                filename="{epoch:02d}-{val/total_loss:.4f}",
-                monitor=trainer_config.checkpoint_monitor,
-                mode="min",
-                save_top_k=trainer_config.save_top_k,
-                save_last=True
-            )
-        )
-
-        # EarlyStopping
-        callbacks.append(
-            EarlyStopping(
-                monitor=trainer_config.early_stopping_monitor,
-                mode=trainer_config.early_stopping_mode,
-                patience=trainer_config.early_stopping_patience,
-                verbose=True
-            )
-        )
+    # 创建 Callbacks
+    callbacks = CallbackFactory.create_default_callbacks(
+        config=trainer_config,
+        experiment_name=experiment_name,
+        has_validation=val_data is not None,
+        extra_callbacks=extra_callbacks
+    )
 
     # 创建 Trainer
     trainer = L.Trainer(

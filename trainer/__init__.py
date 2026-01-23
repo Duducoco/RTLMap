@@ -6,12 +6,14 @@ PyTorch Lightning 训练模块
 - DualGraphLightningModule: 模型训练封装
 - DualGraphDataModule: 数据加载封装
 - TrainerConfig: 训练配置
+- CallbackFactory: Callback 工厂类
 - train_model: 便捷训练函数
 """
 
 from .config import TrainerConfig
 from .datamodule import DualGraphDataModule, DualGraphDataset
 from .module import DualGraphLightningModule
+from .callbacks import CallbackFactory
 from .utils import train_model
 
 __all__ = [
@@ -22,6 +24,8 @@ __all__ = [
     "DualGraphDataset",
     # 模型
     "DualGraphLightningModule",
+    # Callbacks
+    "CallbackFactory",
     # 工具
     "train_model",
 ]
