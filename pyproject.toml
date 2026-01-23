@@ -3,7 +3,7 @@ name = "rtlmap"
 version = "0.1.0"
 description = "RTL 控制数据流图 (CDFG) 提取与覆盖率标注工具，用于 GNN 硬件验证训练数据生成"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.13,<3.14"
 license = {text = "MIT"}
 keywords = ["rtl", "cdfg", "coverage", "hardware-verification", "gnn", "yosys"]
 authors = [
@@ -20,12 +20,15 @@ classifiers = [
 ]
 dependencies = [
     "graphviz>=0.21",
+    "torch==2.6.0+cu124",
+    "torchvision==0.21.0+cu124",
+    "torchaudio==2.6.0+cu124",
+    "torch_geometric==2.7.0"
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/RTLMap"
-Repository = "https://github.com/your-org/RTLMap"
-Issues = "https://github.com/your-org/RTLMap/issues"
-
-[project.scripts]
-rtlmap = "data_annotate:main"
+Homepage = "https://github.com/Duducoco/RTLMap"
+Repository = "https://github.com/Duducoco/RTLMap"
+Issues = "https://github.com/Duducoco/RTLMap/issues"
+[tool.uv]
+find-links = ["https://mirrors.aliyun.com/pytorch-wheels/cu124"]
