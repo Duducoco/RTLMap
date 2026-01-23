@@ -25,7 +25,21 @@ class DualGraphLightningModule(L.LightningModule):
         scheduler_type: str = "cosine"
     ):
         super().__init__()
-        self.save_hyperparameters()
+        # 保存超参数（包括 ModelConfig 的所有字段）
+        self.save_hyperparameters(ignore=['model_config'])
+        # 手动保存 ModelConfig 的字段到 hparams
+        self.hparams.update({
+            'rtl_node_dim': model_config.rtl_node_dim,
+            'asm_node_dim': model_config.asm_node_dim,
+            'hidden_dim': model_config.hidden_dim,
+            'num_gnn_layers': model_config.num_gnn_layers,
+            'num_heads': model_config.num_heads,
+            'dropout': model_config.dropout,
+            'num_edge_classes': model_config.num_edge_classes,
+            'num_graph_targets': model_config.num_graph_targets,
+            'num_edge_types': model_config.num_edge_types,
+            'encoder_type': model_config.encoder_type,
+        })
 
         # 模型
         self.model = create_model(model_config)
@@ -84,13 +98,14 @@ class DualGraphLightningModule(L.LightningModule):
         }
 
         # 边分类指标（仅对有效边）
-        if data.rtl_edge_labels is not None:
-            valid_mask = data.rtl_edge_labels != -1
+        edge_labels = getattr(data, 'edge_labels', None)
+        if edge_labels is not None:
+            valid_mask = edge_labels != -1
             num_valid = valid_mask.sum().item()
 
             if num_valid > 0:
                 valid_logits = output.edge_logits[valid_mask]
-                valid_labels = data.rtl_edge_labels[valid_mask]
+                valid_labels = edge_labels[valid_mask]
                 valid_preds = valid_logits.argmax(dim=-1)
 
                 # 准确率
@@ -118,13 +133,42 @@ class DualGraphLightningModule(L.LightningModule):
                 metrics[f'{stage}/f1'] = f1
 
         # 图回归指标
-        if data.graph_label is not None and output.graph_pred is not None:
-            mse = F.mse_loss(output.graph_pred, data.graph_label)
-            mae = F.l1_loss(output.graph_pred, data.graph_label)
+        if data.y is not None and output.graph_pred is not None:
+            mse = F.mse_loss(output.graph_pred, data.y)
+            mae = F.l1_loss(output.graph_pred, data.y)
             metrics[f'{stage}/graph_mse'] = mse
             metrics[f'{stage}/graph_mae'] = mae
 
         return metrics
+
+    def on_fit_start(self):
+        """训练开始时记录超参数（用于 TensorBoard HPARAMS 面板）"""
+        if self.logger is not None:
+            # 定义要跟踪的指标（用于超参数对比）
+            metrics_to_track = {
+                'hp/val_loss': 0.0,
+                'hp/val_accuracy': 0.0,
+                'hp/val_f1': 0.0,
+            }
+            # 记录超参数与指标关联
+            self.logger.log_hyperparams(self.hparams, metrics_to_track)
+
+    def on_validation_epoch_end(self):
+        """验证 epoch 结束时更新超参数指标"""
+        # 获取当前 epoch 的验证指标
+        val_loss = self.trainer.callback_metrics.get('val/total_loss')
+        val_acc = self.trainer.callback_metrics.get('val/edge_accuracy')
+        val_f1 = self.trainer.callback_metrics.get('val/f1')
+
+        # 记录到 hp/ 命名空间（用于 HPARAMS 面板对比）
+        if val_loss is not None:
+            self.log('hp/val_loss', val_loss, sync_dist=True)
+        if val_acc is not None:
+            self.log('hp/val_accuracy', val_acc, sync_dist=True)
+        if val_f1 is not None:
+            self.log('hp/val_f1', val_f1, sync_dist=True)
+
+        self._val_outputs.clear()
 
     def training_step(self, batch: DualGraphData, batch_idx: int) -> torch.Tensor:
         """训练步骤"""
@@ -142,10 +186,6 @@ class DualGraphLightningModule(L.LightningModule):
 
         # 记录指标
         self.log_dict(metrics, on_step=False, on_epoch=True, prog_bar=True, batch_size=1)
-
-    def on_validation_epoch_end(self):
-        """验证 epoch 结束"""
-        self._val_outputs.clear()
 
     def test_step(self, batch: DualGraphData, batch_idx: int):
         """测试步骤"""

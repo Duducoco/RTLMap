@@ -2,65 +2,66 @@
 """双图神经网络数据类型"""
 
 import torch
+from torch_geometric.data import Data
 from dataclasses import dataclass
 from typing import Optional, List
 
 
-@dataclass
-class DualGraphData:
-    """双图数据"""
-    # RTL 图
-    rtl_x: torch.Tensor                           # [N1, D] 节点特征
-    rtl_edge_index: torch.Tensor                  # [2, E1] 边索引
-    rtl_edge_type: Optional[torch.Tensor] = None  # [E1] 边类型 {0: DATA, 1: CONTROL, 2: CLOCK, 3: RESET, 4: ENABLE}
-    rtl_batch: Optional[torch.Tensor] = None      # [N1] batch 索引
+class DualGraphData(Data):
+    """
+    双图数据 - 继承自 PyG Data 类
 
-    # ASM 图
-    asm_x: torch.Tensor = None
-    asm_edge_index: torch.Tensor = None
-    asm_edge_type: Optional[torch.Tensor] = None  # [E2] 边类型
-    asm_batch: Optional[torch.Tensor] = None
+    属性：
+    - 主图（RTL）: x, edge_index, edge_type, edge_labels, edge_attr, node_type
+    - 辅助图（ASM）: asm_x, asm_edge_index, asm_edge_type, asm_edge_attr, asm_node_type
+    - 标签: y (图级标签), edge_labels (边标签)
+    - Batching: batch (主图), asm_x_batch (辅助图，需 follow_batch=['asm_x'])
 
-    # 标签
-    rtl_edge_labels: Optional[torch.Tensor] = None  # [E1] 边标签 {-1, 0, 1}
-    graph_label: Optional[torch.Tensor] = None      # [B, 1] 图级标签
+    边类型枚举：
+    - 0: DATA
+    - 1: CONTROL
+    - 2: CLOCK
+    - 3: RESET
+    - 4: ENABLE
 
-    # 可选扩展字段
-    rtl_edge_attr: Optional[torch.Tensor] = None    # [E1, D_e] 边特征（可选）
-    rtl_node_type: Optional[torch.Tensor] = None    # [N1] 节点类型（可选）
-    asm_edge_attr: Optional[torch.Tensor] = None    # [E2, D_e] 边特征（可选）
-    asm_node_type: Optional[torch.Tensor] = None    # [N2] 节点类型（可选）
-    node_mapping: Optional[torch.Tensor] = None     # 跨图节点映射（可选）
+    边标签：
+    - -1: 未标注（训练时 mask）
+    - 0: 未覆盖
+    - 1: 已覆盖
+    """
 
-    def to(self, device) -> "DualGraphData":
-        def mv(t):
-            return t.to(device) if t is not None else None
-        return DualGraphData(
-            rtl_x=mv(self.rtl_x), rtl_edge_index=mv(self.rtl_edge_index),
-            rtl_edge_type=mv(self.rtl_edge_type), rtl_batch=mv(self.rtl_batch),
-            asm_x=mv(self.asm_x), asm_edge_index=mv(self.asm_edge_index),
-            asm_edge_type=mv(self.asm_edge_type), asm_batch=mv(self.asm_batch),
-            rtl_edge_labels=mv(self.rtl_edge_labels), graph_label=mv(self.graph_label),
-            rtl_edge_attr=mv(self.rtl_edge_attr), rtl_node_type=mv(self.rtl_node_type),
-            asm_edge_attr=mv(self.asm_edge_attr), asm_node_type=mv(self.asm_node_type),
-            node_mapping=mv(self.node_mapping)
-        )
+    def __inc__(self, key: str, value, *args, **kwargs):
+        """定义 batching 时的节点索引增量"""
+        if key == 'asm_edge_index':
+            return self.asm_x.size(0) if self.asm_x is not None else 0
+        return super().__inc__(key, value, *args, **kwargs)
+
+    def __cat_dim__(self, key: str, value, *args, **kwargs):
+        """定义 batching 时的拼接维度"""
+        if key in ['edge_type', 'edge_labels', 'asm_edge_type', 'node_type', 'asm_node_type']:
+            return 0
+        return super().__cat_dim__(key, value, *args, **kwargs)
 
     @property
-    def num_rtl_nodes(self) -> int:
-        return self.rtl_x.size(0)
+    def num_nodes(self) -> int:
+        """主图节点数"""
+        return self.x.size(0) if self.x is not None else 0
 
     @property
     def num_asm_nodes(self) -> int:
+        """辅助图节点数"""
         return self.asm_x.size(0) if self.asm_x is not None else 0
 
     @property
-    def num_rtl_edges(self) -> int:
-        return self.rtl_edge_index.size(1)
+    def num_edges(self) -> int:
+        """主图边数"""
+        return self.edge_index.size(1) if self.edge_index is not None else 0
 
     @property
     def num_asm_edges(self) -> int:
-        return self.asm_edge_index.size(1) if self.asm_edge_index is not None else 0
+        """辅助图边数"""
+        asm_ei = getattr(self, 'asm_edge_index', None)
+        return asm_ei.size(1) if asm_ei is not None else 0
 
 
 @dataclass

@@ -151,25 +151,27 @@ class DualGraphFusionModel(nn.Module):
 
         Args:
             data: 双图数据，包含 RTL 和 ASM 图
+                - 主图（RTL）: x, edge_index, edge_type, batch
+                - 辅助图（ASM）: asm_x, asm_edge_index, asm_edge_type, asm_x_batch
 
         Returns:
             ModelOutput: 边分类 logits 和图级预测（均基于 RTL）
         """
         # 编码阶段：双图交互
         rtl_node, rtl_graph, asm_node, asm_graph, cross_attn = self.encoder(
-            rtl_x=data.rtl_x,
-            rtl_edge_index=data.rtl_edge_index,
-            asm_x=data.asm_x,
-            asm_edge_index=data.asm_edge_index,
-            rtl_batch=data.rtl_batch,
-            asm_batch=data.asm_batch,
-            rtl_edge_type=data.rtl_edge_type,
-            asm_edge_type=data.asm_edge_type
+            rtl_x=data.x,
+            rtl_edge_index=data.edge_index,
+            asm_x=getattr(data, 'asm_x', None),
+            asm_edge_index=getattr(data, 'asm_edge_index', None),
+            rtl_batch=getattr(data, 'batch', None),
+            asm_batch=getattr(data, 'asm_x_batch', None),
+            rtl_edge_type=getattr(data, 'edge_type', None),
+            asm_edge_type=getattr(data, 'asm_edge_type', None)
         )
 
         # 预测阶段：仅使用 RTL
         edge_logits = self.edge_classifier(
-            rtl_node, data.rtl_edge_index, data.rtl_edge_type
+            rtl_node, data.edge_index, getattr(data, 'edge_type', None)
         )
         graph_pred = self.graph_regressor(rtl_graph)  # 仅 RTL 图嵌入
 
@@ -206,15 +208,16 @@ class DualGraphFusionModel(nn.Module):
         losses = {}
 
         # 边分类损失（mask 掉 label=-1 的边，仅对 label∈{0,1} 计算损失）
-        if data.rtl_edge_labels is not None:
+        edge_labels = getattr(data, 'edge_labels', None)
+        if edge_labels is not None:
             # mask: True 表示有效边（label != -1）
-            valid_mask = data.rtl_edge_labels != -1
+            valid_mask = edge_labels != -1
             num_valid = valid_mask.sum().item()
 
             if num_valid > 0:
                 # 筛选有效边
                 valid_logits = output.edge_logits[valid_mask]  # [num_valid, 2]
-                valid_labels = data.rtl_edge_labels[valid_mask]  # [num_valid], 值为 {0, 1}
+                valid_labels = edge_labels[valid_mask]  # [num_valid], 值为 {0, 1}
 
                 # 二分类：{0: 未覆盖, 1: 已覆盖}
                 edge_loss = F.cross_entropy(
@@ -232,8 +235,8 @@ class DualGraphFusionModel(nn.Module):
             losses['num_valid_edges'] = 0
 
         # 图回归损失
-        if data.graph_label is not None:
-            graph_loss = F.smooth_l1_loss(output.graph_pred, data.graph_label)
+        if data.y is not None:
+            graph_loss = F.smooth_l1_loss(output.graph_pred, data.y)
             losses['graph_loss'] = graph_loss * graph_loss_weight
         else:
             losses['graph_loss'] = torch.tensor(0., device=device)

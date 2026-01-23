@@ -1,118 +1,66 @@
 #!/usr/bin/env python3
 """数据加载模块"""
 
-import torch
-from torch.utils.data import Dataset, DataLoader
-from typing import List, Optional
+from torch_geometric.data import Dataset
+from torch_geometric.loader import DataLoader as PyGDataLoader
+from typing import List, Optional, Callable
 import lightning as L
 
 from models.data_types import DualGraphData
 
 
 class DualGraphDataset(Dataset):
-    """双图数据集封装"""
-
-    def __init__(self, data_list: List[DualGraphData]):
-        self.data_list = data_list
-
-    def __len__(self) -> int:
-        return len(self.data_list)
-
-    def __getitem__(self, idx: int) -> DualGraphData:
-        return self.data_list[idx]
-
-
-def collate_dual_graph(batch: List[DualGraphData]) -> DualGraphData:
     """
-    将多个 DualGraphData 合并为一个 batch
+    双图数据集 - 继承自 PyG Dataset
 
-    处理逻辑：
-    1. 拼接节点特征，生成 batch 索引
-    2. 拼接边索引，偏移节点 ID
-    3. 拼接边标签、边类型等
+    用于存储 DualGraphData 列表，支持 PyG 的 transform。
+
+    Args:
+        data_list: DualGraphData 对象列表
+        transform: 每次获取数据时应用的变换
+
+    Example:
+        >>> data_list = [DualGraphData(...), DualGraphData(...)]
+        >>> dataset = DualGraphDataset(data_list)
+        >>> len(dataset)
+        2
+        >>> dataset[0]
+        DualGraphData(...)
     """
-    # RTL 图
-    rtl_x_list = []
-    rtl_edge_index_list = []
-    rtl_edge_type_list = []
-    rtl_edge_labels_list = []
-    rtl_batch_list = []
-    rtl_node_offset = 0
 
-    # ASM 图
-    asm_x_list = []
-    asm_edge_index_list = []
-    asm_edge_type_list = []
-    asm_batch_list = []
-    asm_node_offset = 0
+    def __init__(
+        self,
+        data_list: List[DualGraphData],
+        transform: Optional[Callable] = None
+    ):
+        self._data_list = list(data_list)
+        super().__init__(root=None, transform=transform)
 
-    # 图级标签
-    graph_label_list = []
+    @property
+    def raw_file_names(self) -> List[str]:
+        """无原始文件"""
+        return []
 
-    for i, data in enumerate(batch):
-        # RTL 节点
-        num_rtl_nodes = data.rtl_x.size(0)
-        rtl_x_list.append(data.rtl_x)
-        rtl_batch_list.append(torch.full((num_rtl_nodes,), i, dtype=torch.long))
+    @property
+    def processed_file_names(self) -> List[str]:
+        """无处理文件"""
+        return []
 
-        # RTL 边（偏移节点索引）
-        rtl_edge_index_list.append(data.rtl_edge_index + rtl_node_offset)
-        if data.rtl_edge_type is not None:
-            rtl_edge_type_list.append(data.rtl_edge_type)
-        if data.rtl_edge_labels is not None:
-            rtl_edge_labels_list.append(data.rtl_edge_labels)
+    def download(self):
+        """无需下载"""
+        pass
 
-        rtl_node_offset += num_rtl_nodes
+    def process(self):
+        """无需处理"""
+        pass
 
-        # ASM 节点（可能为空）
-        if data.asm_x is not None:
-            num_asm_nodes = data.asm_x.size(0)
-            asm_x_list.append(data.asm_x)
-            asm_batch_list.append(torch.full((num_asm_nodes,), i, dtype=torch.long))
+    def len(self) -> int:
+        """返回数据集大小"""
+        return len(self._data_list)
 
-            # ASM 边
-            if data.asm_edge_index is not None:
-                asm_edge_index_list.append(data.asm_edge_index + asm_node_offset)
-            if data.asm_edge_type is not None:
-                asm_edge_type_list.append(data.asm_edge_type)
-
-            asm_node_offset += num_asm_nodes
-
-        # 图级标签
-        if data.graph_label is not None:
-            graph_label_list.append(data.graph_label)
-
-    # 拼接 RTL
-    rtl_x = torch.cat(rtl_x_list, dim=0)
-    rtl_edge_index = torch.cat(rtl_edge_index_list, dim=1)
-    rtl_batch = torch.cat(rtl_batch_list, dim=0)
-    rtl_edge_type = torch.cat(rtl_edge_type_list, dim=0) if rtl_edge_type_list else None
-    rtl_edge_labels = torch.cat(rtl_edge_labels_list, dim=0) if rtl_edge_labels_list else None
-
-    # 拼接 ASM
-    if asm_x_list:
-        asm_x = torch.cat(asm_x_list, dim=0)
-        asm_batch = torch.cat(asm_batch_list, dim=0)
-        asm_edge_index = torch.cat(asm_edge_index_list, dim=1) if asm_edge_index_list else None
-        asm_edge_type = torch.cat(asm_edge_type_list, dim=0) if asm_edge_type_list else None
-    else:
-        asm_x = asm_batch = asm_edge_index = asm_edge_type = None
-
-    # 图级标签
-    graph_label = torch.cat(graph_label_list, dim=0) if graph_label_list else None
-
-    return DualGraphData(
-        rtl_x=rtl_x,
-        rtl_edge_index=rtl_edge_index,
-        rtl_edge_type=rtl_edge_type,
-        rtl_batch=rtl_batch,
-        asm_x=asm_x,
-        asm_edge_index=asm_edge_index,
-        asm_edge_type=asm_edge_type,
-        asm_batch=asm_batch,
-        rtl_edge_labels=rtl_edge_labels,
-        graph_label=graph_label
-    )
+    def get(self, idx: int) -> DualGraphData:
+        """获取指定索引的数据"""
+        return self._data_list[idx]
 
 
 class DualGraphDataModule(L.LightningDataModule):
@@ -124,7 +72,8 @@ class DualGraphDataModule(L.LightningDataModule):
         val_data: Optional[List[DualGraphData]] = None,
         test_data: Optional[List[DualGraphData]] = None,
         batch_size: int = 32,
-        num_workers: int = 4
+        num_workers: int = 4,
+        transform: Optional[Callable] = None
     ):
         super().__init__()
         self.train_data = train_data
@@ -132,6 +81,7 @@ class DualGraphDataModule(L.LightningDataModule):
         self.test_data = test_data
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.transform = transform
 
         self.train_dataset = None
         self.val_dataset = None
@@ -140,46 +90,44 @@ class DualGraphDataModule(L.LightningDataModule):
     def setup(self, stage: Optional[str] = None):
         """初始化数据集"""
         if stage == "fit" or stage is None:
-            self.train_dataset = DualGraphDataset(self.train_data)
+            self.train_dataset = DualGraphDataset(
+                self.train_data,
+                transform=self.transform
+            )
             if self.val_data:
-                self.val_dataset = DualGraphDataset(self.val_data)
+                self.val_dataset = DualGraphDataset(
+                    self.val_data,
+                    transform=self.transform
+                )
 
         if stage == "test" or stage is None:
             if self.test_data:
-                self.test_dataset = DualGraphDataset(self.test_data)
+                self.test_dataset = DualGraphDataset(
+                    self.test_data,
+                    transform=self.transform
+                )
 
-    def train_dataloader(self) -> DataLoader:
-        return DataLoader(
-            self.train_dataset,
+    def _create_loader(self, dataset, shuffle: bool) -> PyGDataLoader:
+        """创建 PyG DataLoader"""
+        return PyGDataLoader(
+            dataset,
             batch_size=self.batch_size,
-            shuffle=True,
+            shuffle=shuffle,
             num_workers=self.num_workers,
-            collate_fn=collate_dual_graph,
+            follow_batch=['asm_x'],  # 为 ASM 图生成 batch 索引
             pin_memory=True,
             persistent_workers=self.num_workers > 0
         )
 
-    def val_dataloader(self) -> Optional[DataLoader]:
+    def train_dataloader(self) -> PyGDataLoader:
+        return self._create_loader(self.train_dataset, shuffle=True)
+
+    def val_dataloader(self) -> Optional[PyGDataLoader]:
         if self.val_dataset is None:
             return None
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            collate_fn=collate_dual_graph,
-            pin_memory=True,
-            persistent_workers=self.num_workers > 0
-        )
+        return self._create_loader(self.val_dataset, shuffle=False)
 
-    def test_dataloader(self) -> Optional[DataLoader]:
+    def test_dataloader(self) -> Optional[PyGDataLoader]:
         if self.test_dataset is None:
             return None
-        return DataLoader(
-            self.test_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            collate_fn=collate_dual_graph,
-            pin_memory=True
-        )
+        return self._create_loader(self.test_dataset, shuffle=False)

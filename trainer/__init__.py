@@ -10,7 +10,7 @@ PyTorch Lightning 训练模块
 """
 
 from .config import TrainerConfig
-from .datamodule import DualGraphDataModule, DualGraphDataset, collate_dual_graph
+from .datamodule import DualGraphDataModule, DualGraphDataset
 from .module import DualGraphLightningModule
 from .utils import train_model
 
@@ -20,7 +20,6 @@ __all__ = [
     # 数据
     "DualGraphDataModule",
     "DualGraphDataset",
-    "collate_dual_graph",
     # 模型
     "DualGraphLightningModule",
     # 工具
