@@ -23,10 +23,15 @@ CLAUDE.md
 designs/cv32e40p
 designs/openc910
 
-
+???
 *.v
 *.sv
 *.sh
 *.S
 *.s
+
+# 测试和设计文档
+trainer/test_trainer.py
+models/test_model.py
+models/模型设计.md
 
