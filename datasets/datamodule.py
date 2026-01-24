@@ -1,27 +1,45 @@
 #!/usr/bin/env python3
 """数据加载模块"""
 
+import os
+import os.path as osp
+import torch
 from torch_geometric.data import Dataset
 from torch_geometric.loader import DataLoader as PyGDataLoader
 from typing import List, Optional, Callable
 import lightning as L
 
-from models.data_types import DualGraphData
+from .data_types import DualGraphData
 
 
 class DualGraphDataset(Dataset):
     """
     双图数据集 - 继承自 PyG Dataset
 
-    用于存储 DualGraphData 列表，支持 PyG 的 transform。
+    支持磁盘持久化，数据按索引存储在 processed_dir 中。
 
     Args:
-        data_list: DualGraphData 对象列表
+        root: 数据集根目录，包含 raw/ 和 processed/ 子目录
+        data_list: DualGraphData 对象列表（首次运行时提供）
         transform: 每次获取数据时应用的变换
+        pre_transform: 处理前应用的变换（保存到磁盘）
+        pre_filter: 处理前的过滤函数
+
+    目录结构:
+        root/
+        ├── raw/              # 原始文件（可选）
+        └── processed/        # 处理后的 .pt 文件
+            ├── data_0.pt
+            ├── data_1.pt
+            └── ...
 
     Example:
+        >>> # 首次创建数据集（处理并保存）
         >>> data_list = [DualGraphData(...), DualGraphData(...)]
-        >>> dataset = DualGraphDataset(data_list)
+        >>> dataset = DualGraphDataset(root='./data', data_list=data_list)
+
+        >>> # 后续加载（从磁盘读取）
+        >>> dataset = DualGraphDataset(root='./data')
         >>> len(dataset)
         2
         >>> dataset[0]
@@ -30,37 +48,96 @@ class DualGraphDataset(Dataset):
 
     def __init__(
         self,
-        data_list: List[DualGraphData],
-        transform: Optional[Callable] = None
+        root: str,
+        data_list: Optional[List[DualGraphData]] = None,
+        transform: Optional[Callable] = None,
+        pre_transform: Optional[Callable] = None,
+        pre_filter: Optional[Callable] = None,
     ):
-        self._data_list = list(data_list)
-        super().__init__(root=None, transform=transform)
+        self._data_list = data_list
+        self._num_samples: Optional[int] = None
+        super().__init__(root, transform, pre_transform, pre_filter)
 
     @property
     def raw_file_names(self) -> List[str]:
-        """无原始文件"""
+        """原始文件列表（无需原始文件，直接从 data_list 处理）"""
         return []
 
     @property
     def processed_file_names(self) -> List[str]:
-        """无处理文件"""
+        """处理后的文件列表"""
+        # 动态读取 processed_dir 中的文件
+        if self._num_samples is not None:
+            return [f"data_{i}.pt" for i in range(self._num_samples)]
+
+        # 检查已存在的文件
+        if osp.exists(self.processed_dir):
+            files = sorted(
+                [
+                    f
+                    for f in os.listdir(self.processed_dir)
+                    if f.startswith("data_") and f.endswith(".pt")
+                ]
+            )
+            if files:
+                self._num_samples = len(files)
+                return files
+
+        # 如果提供了 data_list，返回预期文件名
+        if self._data_list is not None:
+            self._num_samples = len(self._data_list)
+            return [f"data_{i}.pt" for i in range(self._num_samples)]
+
         return []
 
     def download(self):
-        """无需下载"""
+        """无需下载（数据通过 data_list 参数提供）"""
         pass
 
     def process(self):
-        """无需处理"""
-        pass
+        """处理并保存数据到磁盘"""
+        if self._data_list is None:
+            return
+
+        for idx, data in enumerate(self._data_list):
+            # 应用预过滤
+            if self.pre_filter is not None and not self.pre_filter(data):
+                continue
+
+            # 应用预变换
+            if self.pre_transform is not None:
+                data = self.pre_transform(data)
+
+            # 保存到磁盘
+            torch.save(data, osp.join(self.processed_dir, f"data_{idx}.pt"))
+
+        self._num_samples = len(self._data_list)
+        # 清理内存中的数据列表
+        self._data_list = None
 
     def len(self) -> int:
         """返回数据集大小"""
-        return len(self._data_list)
+        if self._num_samples is not None:
+            return self._num_samples
+
+        # 从磁盘统计文件数量
+        if osp.exists(self.processed_dir):
+            files = [
+                f
+                for f in os.listdir(self.processed_dir)
+                if f.startswith("data_") and f.endswith(".pt")
+            ]
+            self._num_samples = len(files)
+            return self._num_samples
+
+        return 0
 
     def get(self, idx: int) -> DualGraphData:
-        """获取指定索引的数据"""
-        return self._data_list[idx]
+        """从磁盘加载指定索引的数据"""
+        data = torch.load(
+            osp.join(self.processed_dir, f"data_{idx}.pt"), weights_only=False
+        )
+        return data
 
 
 class DualGraphDataModule(L.LightningDataModule):
@@ -68,14 +145,26 @@ class DualGraphDataModule(L.LightningDataModule):
 
     def __init__(
         self,
-        train_data: List[DualGraphData],
+        root: str,
+        train_data: Optional[List[DualGraphData]] = None,
         val_data: Optional[List[DualGraphData]] = None,
         test_data: Optional[List[DualGraphData]] = None,
         batch_size: int = 32,
         num_workers: int = 4,
-        transform: Optional[Callable] = None
+        transform: Optional[Callable] = None,
     ):
+        """
+        Args:
+            root: 数据集根目录
+            train_data: 训练数据列表（首次运行时提供）
+            val_data: 验证数据列表（首次运行时提供）
+            test_data: 测试数据列表（首次运行时提供）
+            batch_size: 批大小
+            num_workers: 数据加载线程数
+            transform: 数据变换
+        """
         super().__init__()
+        self.root = root
         self.train_data = train_data
         self.val_data = val_data
         self.test_data = test_data
@@ -91,20 +180,23 @@ class DualGraphDataModule(L.LightningDataModule):
         """初始化数据集"""
         if stage == "fit" or stage is None:
             self.train_dataset = DualGraphDataset(
-                self.train_data,
-                transform=self.transform
+                root=osp.join(self.root, "train"),
+                data_list=self.train_data,
+                transform=self.transform,
             )
-            if self.val_data:
+            if self.val_data is not None or osp.exists(osp.join(self.root, "val", "processed")):
                 self.val_dataset = DualGraphDataset(
-                    self.val_data,
-                    transform=self.transform
+                    root=osp.join(self.root, "val"),
+                    data_list=self.val_data,
+                    transform=self.transform,
                 )
 
         if stage == "test" or stage is None:
-            if self.test_data:
+            if self.test_data is not None or osp.exists(osp.join(self.root, "test", "processed")):
                 self.test_dataset = DualGraphDataset(
-                    self.test_data,
-                    transform=self.transform
+                    root=osp.join(self.root, "test"),
+                    data_list=self.test_data,
+                    transform=self.transform,
                 )
 
     def _create_loader(self, dataset, shuffle: bool) -> PyGDataLoader:
@@ -114,9 +206,9 @@ class DualGraphDataModule(L.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=shuffle,
             num_workers=self.num_workers,
-            follow_batch=['asm_x'],  # 为 ASM 图生成 batch 索引
+            follow_batch=["asm_x"],  # 为 ASM 图生成 batch 索引
             pin_memory=True,
-            persistent_workers=self.num_workers > 0
+            persistent_workers=self.num_workers > 0,
         )
 
     def train_dataloader(self) -> PyGDataLoader:

@@ -6,7 +6,7 @@ Cell 类型分类器
 import re
 from typing import Tuple, Optional
 
-from .types import NodeType, EdgeType
+from .data_types import NodeType, EdgeType
 
 
 class CellClassifier:

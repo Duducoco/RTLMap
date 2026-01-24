@@ -24,7 +24,7 @@ from .interaction import CrossGraphInteraction
 
 def drop_path(x: torch.Tensor, drop_prob: float, training: bool) -> torch.Tensor:
     """Stochastic Depth (论文: Deep Networks with Stochastic Depth)"""
-    if drop_prob == 0. or not training:
+    if drop_prob == 0.0 or not training:
         return x
     keep_prob = 1 - drop_prob
     shape = (x.shape[0],) + (1,) * (x.ndim - 1)
@@ -46,7 +46,7 @@ class GNNLayer(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 2),
             nn.GELU(),
-            nn.Linear(hidden_dim * 2, hidden_dim)
+            nn.Linear(hidden_dim * 2, hidden_dim),
         )
         self.conv = GINEConv(self.mlp, edge_dim=hidden_dim)
         self.norm = nn.LayerNorm(hidden_dim)
@@ -56,7 +56,7 @@ class GNNLayer(nn.Module):
         self,
         x: torch.Tensor,
         edge_index: torch.Tensor,
-        edge_attr: Optional[torch.Tensor] = None
+        edge_attr: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -94,7 +94,7 @@ class InteractiveDualEncoder(nn.Module):
         num_heads: int = 4,
         dropout: float = 0.1,
         num_edge_types: int = 5,  # DATA, CONTROL, CLOCK, RESET, ENABLE
-        **kwargs  # 兼容旧参数
+        **kwargs,  # 兼容旧参数
     ):
         super().__init__()
         self.num_layers = num_layers
@@ -102,12 +102,10 @@ class InteractiveDualEncoder(nn.Module):
 
         # 输入投影（独立）
         self.rtl_input = nn.Sequential(
-            nn.Linear(rtl_node_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim)
+            nn.Linear(rtl_node_dim, hidden_dim), nn.LayerNorm(hidden_dim)
         )
         self.asm_input = nn.Sequential(
-            nn.Linear(asm_node_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim)
+            nn.Linear(asm_node_dim, hidden_dim), nn.LayerNorm(hidden_dim)
         )
 
         # 边类型嵌入（独立）
@@ -115,14 +113,17 @@ class InteractiveDualEncoder(nn.Module):
         self.asm_edge_type_embedding = nn.Embedding(num_edge_types, hidden_dim)
 
         # GNN 层（独立，逐层增加 drop_path 概率）
-        drop_rates = [dropout * i / (num_layers - 1) if num_layers > 1 else 0 for i in range(num_layers)]
+        drop_rates = [
+            dropout * i / (num_layers - 1) if num_layers > 1 else 0
+            for i in range(num_layers)
+        ]
 
-        self.rtl_layers = nn.ModuleList([
-            GNNLayer(hidden_dim, drop_rates[i]) for i in range(num_layers)
-        ])
-        self.asm_layers = nn.ModuleList([
-            GNNLayer(hidden_dim, drop_rates[i]) for i in range(num_layers)
-        ])
+        self.rtl_layers = nn.ModuleList(
+            [GNNLayer(hidden_dim, drop_rates[i]) for i in range(num_layers)]
+        )
+        self.asm_layers = nn.ModuleList(
+            [GNNLayer(hidden_dim, drop_rates[i]) for i in range(num_layers)]
+        )
 
         # 跨图交互（共享参数，作为连接两图的桥梁）
         self.cross_attn = CrossGraphInteraction(hidden_dim, num_heads, dropout)
@@ -136,13 +137,15 @@ class InteractiveDualEncoder(nn.Module):
         edge_type: Optional[torch.Tensor],
         embedding: nn.Embedding,
         num_edges: int,
-        device
+        device,
     ) -> torch.Tensor:
         """获取边特征：如果有边类型则嵌入，否则使用零向量"""
         if edge_type is not None:
             return embedding(edge_type)
         else:
-            warnings.warn("Edge types are required for GINEConv. Using zero vectors instead.")
+            warnings.warn(
+                "Edge types are required for GINEConv. Using zero vectors instead."
+            )
             # 无边类型时使用零向量（不影响 GINEConv 聚合）
             return torch.zeros(num_edges, self.hidden_dim, device=device)
 
@@ -156,7 +159,7 @@ class InteractiveDualEncoder(nn.Module):
         asm_batch: Optional[torch.Tensor] = None,
         rtl_edge_type: Optional[torch.Tensor] = None,
         asm_edge_type: Optional[torch.Tensor] = None,
-        **kwargs  # 忽略其他参数
+        **kwargs,  # 忽略其他参数
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list]:
         """
         前向传播
@@ -186,12 +189,10 @@ class InteractiveDualEncoder(nn.Module):
 
         # 边类型嵌入（使用各自独立的嵌入层）
         rtl_edge_attr = self._get_edge_attr(
-            rtl_edge_type, self.rtl_edge_type_embedding,
-            rtl_edge_index.size(1), device
+            rtl_edge_type, self.rtl_edge_type_embedding, rtl_edge_index.size(1), device
         )
         asm_edge_attr = self._get_edge_attr(
-            asm_edge_type, self.asm_edge_type_embedding,
-            asm_edge_index.size(1), device
+            asm_edge_type, self.asm_edge_type_embedding, asm_edge_index.size(1), device
         )
 
         cross_attentions = []
@@ -210,7 +211,9 @@ class InteractiveDualEncoder(nn.Module):
                 asm_dense = asm_h.unsqueeze(0)
                 rtl_mask = asm_mask = None
 
-            rtl_inter, asm_inter = self.cross_attn(rtl_dense, asm_dense, rtl_mask, asm_mask)
+            rtl_inter, asm_inter = self.cross_attn(
+                rtl_dense, asm_dense, rtl_mask, asm_mask
+            )
             cross_attentions.append(None)  # 简化：不返回注意力权重
 
             # 转回 sparse

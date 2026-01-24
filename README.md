@@ -34,7 +34,7 @@ Annotated CDFG (edges with coverage_label)      │
 cdfg_annotated.json / cdfg_output.svg           │
         │                                       │
         └───────────────┬───────────────────────┘
-                        │ (models.DualGraphData)
+                        │ (datasets.DualGraphData)
                         ▼
             DualGraphFusionModel (双图交互编码)
                         │ (trainer.train_model)
@@ -58,7 +58,7 @@ cdfg_annotated.json / cdfg_output.svg           │
 
 ```bash
 # 克隆仓库
-git clone <repository-url>
+git clone https://github.com/Duducoco/RTLMap
 cd RTLMap
 
 # 使用 uv 安装依赖
@@ -143,13 +143,13 @@ uv run python data_annotate.py \
 
 ```bash
 # 从文件列表生成 RTLIL JSON
-uv run python tools/YosysRunner.py \
+uv run python -m tools.yosys_runner \
     --top <module_name> \
     --flist <manifest.flist> \
     --output-dir json/
 
 # 从指定文件生成
-uv run python tools/YosysRunner.py \
+uv run python -m tools.yosys_runner \
     --top <module_name> \
     --files file1.sv file2.sv \
     --output-dir json/
@@ -169,7 +169,7 @@ uv run python -m asm_cdfg.extractor input.S -o output.json -v
 uv run python -m models.test_model
 
 # 训练器单元测试
-uv run python trainer/test_trainer.py
+uv run python -m trainer.test_trainer
 ```
 
 ## 项目结构
@@ -183,7 +183,7 @@ RTLMap/
 │
 ├── cdfg/                     # CDFG 提取与可视化模块
 │   ├── __init__.py
-│   ├── types.py              # 节点/边类型定义 (Node, Edge, CDFG)
+│   ├── data_types.py         # 节点/边类型定义 (Node, Edge, CDFG)
 │   ├── extractor.py          # RTLIL JSON -> CDFG 提取
 │   ├── classifier.py         # Yosys cell 类型分类
 │   ├── exporter.py           # 导出 JSON/Graphviz
@@ -197,16 +197,21 @@ RTLMap/
 │
 ├── asm_cdfg/                 # RISC-V 汇编 CDFG 模块
 │   ├── __init__.py
-│   ├── asm_types.py          # 指令和基本块类型定义
+│   ├── data_types.py         # 指令和基本块类型定义
 │   ├── parser.py             # 汇编文件解析器
 │   ├── classifier.py         # 指令分类器 (RV32I/M/F/C, Xpulp)
 │   ├── bb_builder.py         # 基本块构建器
 │   ├── extractor.py          # 基本块 -> CDFG 提取
 │   └── visualizer.py         # ASM CDFG 可视化
 │
+├── datasets/                 # 数据集加载模块
+│   ├── __init__.py
+│   ├── data_types.py         # DualGraphData 数据类型
+│   └── datamodule.py         # DualGraphDataset + DualGraphDataModule
+│
 ├── models/                   # 双图融合 GNN 模型
 │   ├── __init__.py
-│   ├── data_types.py         # 数据类型 (DualGraphData, ModelConfig)
+│   ├── data_types.py         # ModelConfig, ModelOutput
 │   ├── encoder.py            # 图编码器 (GINEConv + 跨图交互)
 │   ├── interaction.py        # 跨图注意力机制
 │   ├── model.py              # 完整模型 + 任务头
@@ -216,14 +221,13 @@ RTLMap/
 │   ├── __init__.py
 │   ├── config.py             # 训练超参数配置
 │   ├── callbacks.py          # Callback 工厂类
-│   ├── datamodule.py         # 数据模块封装
 │   ├── module.py             # Lightning 模型封装
 │   ├── utils.py              # 便捷训练函数
 │   └── test_trainer.py       # 训练器单元测试
 │
 ├── tools/                    # 工具脚本
 │   ├── __init__.py
-│   └── YosysRunner.py        # Yosys 执行封装
+│   └── yosys_runner.py       # Yosys 执行封装
 │
 └── designs/                  # 设计文件目录
     ├── cv32e40p/             # CV32E40P RISC-V 处理器
@@ -242,22 +246,12 @@ designs/<design_name>/
 │       └── *.sv
 ├── RTLIL_json/                  # 自动生成的 RTLIL JSON
 │   └── <module_name>.json
-├── module2html.json             # 模块名 -> 覆盖率 HTML 文件映射
 ├── source2html.json             # 源文件名 -> 覆盖率 HTML 映射（自动生成）
 └── coverage_reports/
     └── <report_name>/           # VCS/URG 生成的覆盖率报告
         └── *.html
 ```
 
-### module2html.json 格式
-
-```json
-{
-    "cv32e40p_core": "mod1.html",
-    "cv32e40p_controller": "mod2.html",
-    "cv32e40p_decoder": "mod3.html"
-}
-```
 
 ## 输出格式
 
@@ -465,7 +459,8 @@ exporter.to_graphviz("output.svg", show_coverage=True)
 ### GNN 训练 API
 
 ```python
-from models import create_model, ModelConfig, DualGraphData
+from datasets import DualGraphData
+from models import create_model, ModelConfig
 from trainer import train_model, TrainerConfig
 
 # 创建模型配置
@@ -484,12 +479,13 @@ trainer_config = TrainerConfig(
 )
 
 # 准备数据（DualGraphData 包含 RTL 和 ASM 双图）
-# train_data, val_data = ...
+# train_data, val_data = ...  # List[DualGraphData]
 
-# 训练模型
+# 训练模型（数据自动保存到磁盘并按需加载）
 module, trainer = train_model(
     model_config=model_config,
     trainer_config=trainer_config,
+    data_root='./data',  # 数据集根目录
     train_data=train_data,
     val_data=val_data,
     experiment_name="coverage_prediction"
@@ -513,17 +509,8 @@ print(f"边数: {len(cdfg.edges)}")
 
 ```bash
 # 克隆并安装开发依赖
-git clone <repository-url>
+git clone https://github.com/Duducoco/RTLMap
 cd RTLMap
 uv sync
-
-# 运行测试（如果有）
-uv run pytest
 ```
 
-### 代码风格
-
-- 使用中文注释和日志输出
-- 遵循 Python 类型注解规范
-- 使用 dataclass 定义数据结构
-- 函数和类需要完整的 docstring

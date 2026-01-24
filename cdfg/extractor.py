@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 from collections import defaultdict
 
-from .types import Node, Edge, CDFG, NodeType, EdgeType
+from .data_types import Node, Edge, CDFG, NodeType, EdgeType
 from .classifier import CellClassifier
 
 
@@ -128,7 +128,9 @@ class CDFGExtractor:
 
             # 解析源代码位置
             src_attr = attributes.get("src", "")
-            source_file, source_line, stmt_start_line = CellClassifier.parse_source_location(src_attr)
+            source_file, source_line, stmt_start_line = (
+                CellClassifier.parse_source_location(src_attr)
+            )
 
             # 提取输入输出端口
             input_ports = []

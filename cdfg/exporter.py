@@ -5,7 +5,7 @@ CDFG 导出器
 
 import json
 
-from .types import CDFG
+from .data_types import CDFG
 from .visualizer import CDFGVisualizer
 
 

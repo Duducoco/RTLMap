@@ -6,7 +6,7 @@ CDFG 可视化器
 from typing import Dict
 import graphviz
 
-from .types import CDFG, Node, Edge, NodeType, EdgeType
+from .data_types import CDFG, Node, Edge, NodeType, EdgeType
 
 
 class CDFGVisualizer:
@@ -34,22 +34,46 @@ class CDFGVisualizer:
             "fillcolor": "#ADD8E6",  # lightblue
             "style": "filled,bold",
         },
-        NodeType.MUX: {"shape": "trapezium", "fillcolor": "#F5DEB3", "style": "filled"},  # wheat
-        NodeType.ARITHMETIC: {"shape": "box", "fillcolor": "#FFFFFF", "style": "filled"},  # white
-        NodeType.LOGIC: {"shape": "box", "fillcolor": "#E6E6FA", "style": "filled"},  # lavender
-        NodeType.COMPARE: {"shape": "box", "fillcolor": "#FFE4E1", "style": "filled"},  # mistyrose
+        NodeType.MUX: {
+            "shape": "trapezium",
+            "fillcolor": "#F5DEB3",
+            "style": "filled",
+        },  # wheat
+        NodeType.ARITHMETIC: {
+            "shape": "box",
+            "fillcolor": "#FFFFFF",
+            "style": "filled",
+        },  # white
+        NodeType.LOGIC: {
+            "shape": "box",
+            "fillcolor": "#E6E6FA",
+            "style": "filled",
+        },  # lavender
+        NodeType.COMPARE: {
+            "shape": "box",
+            "fillcolor": "#FFE4E1",
+            "style": "filled",
+        },  # mistyrose
         NodeType.MEMORY: {
             "shape": "box3d",
             "fillcolor": "#D3D3D3",  # lightgray
             "style": "filled",
         },
-        NodeType.SHIFT: {"shape": "box", "fillcolor": "#F0FFF0", "style": "filled"},  # honeydew
+        NodeType.SHIFT: {
+            "shape": "box",
+            "fillcolor": "#F0FFF0",
+            "style": "filled",
+        },  # honeydew
         NodeType.COMBINATIONAL: {
             "shape": "box",
             "fillcolor": "#FFFFFF",  # white
             "style": "filled",
         },
-        NodeType.UNKNOWN: {"shape": "box", "fillcolor": "#FFFFFF", "style": "filled"},  # white
+        NodeType.UNKNOWN: {
+            "shape": "box",
+            "fillcolor": "#FFFFFF",
+            "style": "filled",
+        },  # white
     }
 
     # 边样式配置
@@ -369,29 +393,29 @@ class CDFGVisualizer:
     def _create_edge_tooltip(self, edge: Edge, show_coverage: bool = False) -> str:
         """
         创建边的悬停提示信息
-        
+
         Args:
             edge: 边对象
             show_coverage: 是否显示覆盖率信息
-            
+
         Returns:
             tooltip 字符串
         """
         lines = []
-        
+
         # 端口信息
         if edge.source_port:
             lines.append(f"源端口: {edge.source_port}")
         if edge.target_port:
             lines.append(f"目标端口: {edge.target_port}")
-        
+
         # 位宽
         if edge.width > 1:
             lines.append(f"位宽: {edge.width}")
-        
+
         # 边类型
         lines.append(f"边类型: {edge.edge_type.name}")
-        
+
         # 覆盖率信息
         if show_coverage:
             if edge.coverage_label == 1:
@@ -401,7 +425,7 @@ class CDFGVisualizer:
             else:
                 status = "未标注"
             lines.append(f"覆盖状态: {status}")
-            
+
             if edge.coverage_type:
                 ctype_full = {
                     "always": "必然执行",
@@ -411,13 +435,13 @@ class CDFGVisualizer:
                     "propagated": "传播标注",
                 }.get(edge.coverage_type, edge.coverage_type)
                 lines.append(f"覆盖类型: {ctype_full}")
-            
+
             if edge.branch_index >= 0:
                 lines.append(f"分支索引: {edge.branch_index}")
-            
+
             if edge.source_line > 0:
                 lines.append(f"源码行号: {edge.source_line}")
-        
+
         return "\\n".join(lines) if lines else ""
 
     def to_dot_string(self) -> str:

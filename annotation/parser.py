@@ -36,8 +36,6 @@ class BranchCoverage:
     instance_index: int = 0  # 同行多实例时的实例索引（用于 generate 展开）
 
 
-
-
 class CoverageParser:
     """覆盖率报告解析器"""
 
@@ -55,9 +53,7 @@ class CoverageParser:
         with open(self.html_path, "r", encoding="utf-8", errors="ignore") as f:
             self.html_content = f.read()
 
-    def parse_branch_coverage(
-        self, instance_tag: str = None
-    ) -> List[BranchCoverage]:
+    def parse_branch_coverage(self, instance_tag: str = None) -> List[BranchCoverage]:
         """
         解析分支覆盖数据
 
@@ -121,15 +117,17 @@ class CoverageParser:
             instance_idx = line_instance_count.get(line_no, 0)
             line_instance_count[line_no] = instance_idx + 1
 
-            result.append(BranchCoverage(
-                line_no=line_no,
-                branch_type=branch_type,
-                total_branches=total,
-                covered_branches=covered,
-                percent=percent,
-                branches=[],
-                instance_index=instance_idx,
-            ))
+            result.append(
+                BranchCoverage(
+                    line_no=line_no,
+                    branch_type=branch_type,
+                    total_branches=total,
+                    covered_branches=covered,
+                    percent=percent,
+                    branches=[],
+                    instance_index=instance_idx,
+                )
+            )
 
         # 2. 解析每个分支的详细状态
         # 找到所有 "Branches:" 后的表格
@@ -159,31 +157,33 @@ class CoverageParser:
                 # 格式3 (旧版CASE): <td nowrap>(1.RESET )->(2)->...</td><td>Covered</td>
                 #
                 # 更宽泛的正则表达式：捕获所有 td 内容（除了空标签）
-                td_values = re.findall(
-                    r"<td[^>]*>([^<]+)</td>", row_content
-                )
+                td_values = re.findall(r"<td[^>]*>([^<]+)</td>", row_content)
 
                 condition_values = {}
                 case_labels = {}
 
                 # 首先检查是否是复杂路径格式：(1.STATE)->(2)->(!3)->...
                 # 这种格式会被提取为单个 td，需要特殊处理
-                path_match = re.search(r'<td[^>]*>\((\d+\.[^)]+)\)->', row_content)
+                path_match = re.search(r"<td[^>]*>\((\d+\.[^)]+)\)->", row_content)
                 if path_match:
                     # 复杂路径格式
                     # 匹配整个 td 内容
-                    full_path_match = re.search(r'<td[^>]*>(\([^<]+)</td>', row_content)
+                    full_path_match = re.search(r"<td[^>]*>(\([^<]+)</td>", row_content)
                     if full_path_match:
                         path_str = full_path_match.group(1)
                         # 解析路径中的条件: (1.STATE)->(2)->(!3)->(4.-)
                         # 数字表示条件编号，! 表示取反，- 表示无关
-                        cond_matches = re.findall(r'\((!?)(\d+)(?:\.([^)]*))?\)', path_str)
+                        cond_matches = re.findall(
+                            r"\((!?)(\d+)(?:\.([^)]*))?\)", path_str
+                        )
                         for cond_match in cond_matches:
-                            negated = cond_match[0] == '!'  # 是否取反
-                            cond_num = int(cond_match[1])   # 条件编号
-                            label = cond_match[2] if len(cond_match) > 2 else None  # 标签名
+                            negated = cond_match[0] == "!"  # 是否取反
+                            cond_num = int(cond_match[1])  # 条件编号
+                            label = (
+                                cond_match[2] if len(cond_match) > 2 else None
+                            )  # 标签名
 
-                            if label == '-':
+                            if label == "-":
                                 # 无关条件
                                 condition_values[cond_num] = -1
                             elif label:
@@ -219,17 +219,21 @@ class CoverageParser:
                 # 旧版 CASE 格式: (1.STATE_NAME)->(2)->(!3)->...
                 if not condition_values:
                     # 匹配整个分支路径字符串
-                    path_match = re.search(r'<td[^>]*>\(([^<]+)\)</td>', row_content)
+                    path_match = re.search(r"<td[^>]*>\(([^<]+)\)</td>", row_content)
                     if path_match:
                         path_str = path_match.group(1)
                         # 解析路径中的条件: (1.STATE)->(2)->(!3)->(4.-)
                         # 数字表示条件编号，! 表示取反，- 表示无关
-                        cond_matches = re.findall(r'\((!?\d+)(?:\.([^)]+))?\)', path_str)
+                        cond_matches = re.findall(
+                            r"\((!?\d+)(?:\.([^)]+))?\)", path_str
+                        )
                         for cond_match in cond_matches:
                             cond_num_str = cond_match[0]  # 条件编号（可能带 !）
-                            label = cond_match[1] if len(cond_match) > 1 else None  # 标签名
+                            label = (
+                                cond_match[1] if len(cond_match) > 1 else None
+                            )  # 标签名
 
-                            if cond_num_str.startswith('!'):
+                            if cond_num_str.startswith("!"):
                                 cond_num = int(cond_num_str[1:])
                                 condition_values[cond_num] = 0  # !n 表示条件 n 为假
                             else:
@@ -246,7 +250,7 @@ class CoverageParser:
                         BranchStatus(
                             condition_values=condition_values,
                             is_covered=is_covered,
-                            case_labels=case_labels
+                            case_labels=case_labels,
                         )
                     )
 
@@ -306,14 +310,11 @@ class CoverageParser:
         return None
 
 
-
 def main():
     """命令行入口，用于调试和测试覆盖率解析"""
     import argparse
 
-    parser = argparse.ArgumentParser(
-        description="解析 VCS/URG 覆盖率 HTML 报告"
-    )
+    parser = argparse.ArgumentParser(description="解析 VCS/URG 覆盖率 HTML 报告")
     parser.add_argument("html_path", help="覆盖率 HTML 文件路径")
     parser.add_argument("--instance", "-i", help="实例标签 (如 inst_tag_58)")
     parser.add_argument("--branch", "-b", action="store_true", help="只解析分支覆盖")
@@ -339,8 +340,10 @@ def main():
     instances = cov_parser.get_available_instances()
     if instances:
         instances.sort(key=lambda x: int(re.search(r"\d+", x).group()))
-        print(f"可用实例 ({len(instances)}): {', '.join(instances[:5])}" +
-              (f" ... (共 {len(instances)} 个)" if len(instances) > 5 else ""))
+        print(
+            f"可用实例 ({len(instances)}): {', '.join(instances[:5])}"
+            + (f" ... (共 {len(instances)} 个)" if len(instances) > 5 else "")
+        )
         print(f"最后实例: {cov_parser.get_last_instance()}")
 
     instance_tag = args.instance
@@ -359,6 +362,7 @@ def main():
         else:
             # 按行号分组显示
             from collections import defaultdict
+
             by_line: Dict[int, List[BranchCoverage]] = defaultdict(list)
             for bc in branch_cov_list:
                 by_line[bc.line_no].append(bc)
@@ -366,10 +370,14 @@ def main():
             for line_no in sorted(by_line.keys()):
                 coverages = by_line[line_no]
                 for bc in coverages:
-                    instance_str = f" [实例 {bc.instance_index}]" if len(coverages) > 1 else ""
+                    instance_str = (
+                        f" [实例 {bc.instance_index}]" if len(coverages) > 1 else ""
+                    )
                     status = "✓" if bc.covered_branches == bc.total_branches else "✗"
-                    print(f"\n行 {line_no}{instance_str} [{bc.branch_type}] {status} "
-                          f"{bc.covered_branches}/{bc.total_branches} ({bc.percent:.1f}%)")
+                    print(
+                        f"\n行 {line_no}{instance_str} [{bc.branch_type}] {status} "
+                        f"{bc.covered_branches}/{bc.total_branches} ({bc.percent:.1f}%)"
+                    )
 
                     for idx, branch in enumerate(bc.branches):
                         cov_mark = "✓" if branch.is_covered else "✗"
@@ -378,7 +386,6 @@ def main():
                             for k, v in sorted(branch.condition_values.items())
                         )
                         print(f"  分支 {idx + 1}: [{cov_mark}] {cond_str}")
-
 
     print("\n" + "=" * 60)
     return 0

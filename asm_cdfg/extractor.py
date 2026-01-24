@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # 支持直接运行和模块导入两种方式
 if __name__ == "__main__" or __package__ is None:
-    from asm_cdfg.asm_types import (
+    from asm_cdfg.data_types import (
         BasicBlock,
         Instruction,
         InstrCategory,
@@ -26,7 +26,7 @@ if __name__ == "__main__" or __package__ is None:
         AsmEdgeType,
     )
 else:
-    from .asm_types import (
+    from .data_types import (
         BasicBlock,
         Instruction,
         InstrCategory,
@@ -107,7 +107,9 @@ class AsmCDFGExtractor:
             branch_target = None
             if block.instructions and node_type == AsmNodeType.BRANCH:
                 last_instr = block.instructions[-1]
-                branch_condition = f"{last_instr.mnemonic} {', '.join(last_instr.operands)}"
+                branch_condition = (
+                    f"{last_instr.mnemonic} {', '.join(last_instr.operands)}"
+                )
                 branch_target = last_instr.label
 
             # 创建节点
@@ -189,7 +191,10 @@ class AsmCDFGExtractor:
         }
 
         # 内存操作混合
-        if InstrCategory.LOAD in category_counts and InstrCategory.STORE in category_counts:
+        if (
+            InstrCategory.LOAD in category_counts
+            and InstrCategory.STORE in category_counts
+        ):
             return AsmNodeType.MEMORY
 
         return category_to_node_type.get(dominant_category, AsmNodeType.COMPUTE)
@@ -213,7 +218,11 @@ class AsmCDFGExtractor:
                             condition = node.branch_condition
                         else:
                             edge_type = AsmEdgeType.BRANCH_NOT_TAKEN
-                            condition = f"not ({node.branch_condition})" if node.branch_condition else None
+                            condition = (
+                                f"not ({node.branch_condition})"
+                                if node.branch_condition
+                                else None
+                            )
                     else:
                         edge_type = AsmEdgeType.CONTROL_FLOW
                         condition = None
@@ -221,7 +230,10 @@ class AsmCDFGExtractor:
                     # 检查是否为函数调用（jal ra, xxx）
                     if block.instructions:
                         last_instr = block.instructions[-1]
-                        if last_instr.mnemonic in {"jal", "jalr"} and last_instr.rd == "x1":
+                        if (
+                            last_instr.mnemonic in {"jal", "jalr"}
+                            and last_instr.rd == "x1"
+                        ):
                             edge_type = AsmEdgeType.CALL
                         else:
                             edge_type = AsmEdgeType.JUMP
@@ -428,9 +440,7 @@ def main():
         else:
             from .visualizer import AsmCDFGVisualizer
 
-        svg_path = (
-            args.output.replace(".json", "") if args.output else cdfg.module_name
-        )
+        svg_path = args.output.replace(".json", "") if args.output else cdfg.module_name
 
         visualizer = AsmCDFGVisualizer(
             show_instructions=True,

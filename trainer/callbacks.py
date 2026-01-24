@@ -15,6 +15,7 @@ from .config import TrainerConfig
 # RichProgressBar 是可选依赖
 try:
     from lightning.pytorch.callbacks import RichProgressBar
+
     _RICH_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):
     _RICH_AVAILABLE = False
@@ -22,6 +23,7 @@ except (ImportError, ModuleNotFoundError):
 try:
     # 检查 rich 库是否可用
     import rich
+
     _RICH_AVAILABLE = _RICH_AVAILABLE and True
 except ImportError:
     _RICH_AVAILABLE = False
@@ -33,7 +35,7 @@ class CallbackFactory:
     @staticmethod
     def create_lr_monitor() -> LearningRateMonitor:
         """创建学习率监控 callback"""
-        return LearningRateMonitor(logging_interval='step')
+        return LearningRateMonitor(logging_interval="step")
 
     @staticmethod
     def create_progress_bar(use_rich: bool = True) -> Union[ProgressBar, Callback]:
@@ -53,8 +55,7 @@ class CallbackFactory:
 
     @staticmethod
     def create_checkpoint(
-        config: TrainerConfig,
-        experiment_name: str
+        config: TrainerConfig, experiment_name: str
     ) -> ModelCheckpoint:
         """创建模型检查点 callback"""
         return ModelCheckpoint(
@@ -63,7 +64,7 @@ class CallbackFactory:
             monitor=config.checkpoint_monitor,
             mode="min",
             save_top_k=config.save_top_k,
-            save_last=True
+            save_last=True,
         )
 
     @staticmethod
@@ -73,7 +74,7 @@ class CallbackFactory:
             monitor=config.early_stopping_monitor,
             mode=config.early_stopping_mode,
             patience=config.early_stopping_patience,
-            verbose=True
+            verbose=True,
         )
 
     @classmethod
@@ -83,7 +84,7 @@ class CallbackFactory:
         experiment_name: str,
         has_validation: bool = True,
         extra_callbacks: Optional[List[Callback]] = None,
-        use_rich_progress: bool = True
+        use_rich_progress: bool = True,
     ) -> List[Callback]:
         """
         创建默认 callback 列表

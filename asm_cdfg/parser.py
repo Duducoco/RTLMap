@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from typing import List, Optional, Dict, Union
 
-from .asm_types import (
+from .data_types import (
     Instruction,
     InstrFormat,
     InstrCategory,
@@ -356,15 +356,21 @@ class AsmParser:
             InstrFormat.CB_TYPE,
             InstrFormat.CJ_TYPE,
         ):
-            self._parse_compressed_operands(mnemonic, operands, result, normalize_reg, parse_imm)
+            self._parse_compressed_operands(
+                mnemonic, operands, result, normalize_reg, parse_imm
+            )
 
         # Xpulp 扩展
         elif instr_format == InstrFormat.XPULP_TYPE:
-            self._parse_xpulp_operands(mnemonic, operands, result, normalize_reg, parse_imm)
+            self._parse_xpulp_operands(
+                mnemonic, operands, result, normalize_reg, parse_imm
+            )
 
         # 伪指令
         elif instr_format == InstrFormat.PSEUDO:
-            self._parse_pseudo_operands(mnemonic, operands, result, normalize_reg, parse_imm)
+            self._parse_pseudo_operands(
+                mnemonic, operands, result, normalize_reg, parse_imm
+            )
 
         return result
 
@@ -380,7 +386,14 @@ class AsmParser:
                 result["rd"] = normalize_reg(operands[0])
                 result["rs2"] = normalize_reg(operands[1])
 
-        elif mnemonic_lower in ("c.addi", "c.slli", "c.srli", "c.srai", "c.andi", "c.li"):
+        elif mnemonic_lower in (
+            "c.addi",
+            "c.slli",
+            "c.srli",
+            "c.srai",
+            "c.andi",
+            "c.li",
+        ):
             # rd, imm
             if len(operands) >= 2:
                 result["rd"] = normalize_reg(operands[0])
@@ -470,7 +483,9 @@ class AsmParser:
                 result["rs2"] = normalize_reg(operands[2])
 
         # 位操作: cv.extract rd, rs1, imm1, imm2
-        elif mnemonic_lower.startswith("cv.extract") or mnemonic_lower.startswith("cv.insert"):
+        elif mnemonic_lower.startswith("cv.extract") or mnemonic_lower.startswith(
+            "cv.insert"
+        ):
             if len(operands) >= 2:
                 result["rd"] = normalize_reg(operands[0])
                 result["rs1"] = normalize_reg(operands[1])

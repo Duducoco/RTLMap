@@ -107,7 +107,9 @@ class CoverageAnnotator:
         """获取 MUX 节点的控制信号源节点 ID"""
         return self._mux_to_control_source.get(mux_node_id, "")
 
-    def _group_mux_by_control_signal(self, mux_nodes: List[str]) -> Dict[str, List[str]]:
+    def _group_mux_by_control_signal(
+        self, mux_nodes: List[str]
+    ) -> Dict[str, List[str]]:
         """
         按控制信号源分组 MUX 节点
 
@@ -168,12 +170,12 @@ class CoverageAnnotator:
         expected_mux_count = total_branches - 1
         best_match = []
         best_match_score = 0
-        
+
         # 收集所有 MUX 的行号
         all_mux_lines = sorted(self.line_to_mux_nodes.keys())
         if not all_mux_lines:
             return []
-        
+
         # 根据分支类型使用不同的收集策略
         if branch_type == "CASE":
             # CASE 语句：使用 case/endcase 范围解析
@@ -190,13 +192,17 @@ class CoverageAnnotator:
                 return []
         elif branch_type == "TERNARY":
             # 三元表达式：使用 ? : 范围解析
-            collected = self._collect_ternary_mux_nodes(coverage_line, expected_mux_count)
+            collected = self._collect_ternary_mux_nodes(
+                coverage_line, expected_mux_count
+            )
             if collected:
                 return collected
-        
+
         # 如果精确范围解析失败，回退到启发式方法
         # 直接在 coverage_line 行搜索 MUX
-        collected = self._collect_continuous_mux_chain(coverage_line, expected_mux_count)
+        collected = self._collect_continuous_mux_chain(
+            coverage_line, expected_mux_count
+        )
 
         if len(collected) >= expected_mux_count:
             # 找到足够的 MUX
@@ -218,47 +224,51 @@ class CoverageAnnotator:
         if coverage_line in self.stmt_line_to_mux_nodes:
             stmt_mux = self.stmt_line_to_mux_nodes[coverage_line]
             if len(stmt_mux) >= expected_mux_count:
-                return self._sort_mux_nodes_for_annotation(stmt_mux[:expected_mux_count])
+                return self._sort_mux_nodes_for_annotation(
+                    stmt_mux[:expected_mux_count]
+                )
             if len(stmt_mux) > best_match_score:
                 best_match = stmt_mux
                 best_match_score = len(stmt_mux)
 
         # 返回最佳匹配（即使不完整）
         if best_match:
-            print(f"  警告：期望 {expected_mux_count} 个 MUX，但只找到 {len(best_match)} 个")
+            print(
+                f"  警告：期望 {expected_mux_count} 个 MUX，但只找到 {len(best_match)} 个"
+            )
             return self._sort_mux_nodes_for_annotation(best_match)
 
         return []
-    
+
     def _collect_case_mux_nodes(
         self, coverage_line: int, expected_mux_count: int
     ) -> List[str]:
         """
         为 CASE 语句收集所有相关的 MUX 节点
-        
+
         VCS 将 CASE 语句和其内部的所有 if-else 合并成一个覆盖率条目。
         需要收集从 case 语句开始到 endcase 之间的所有 MUX。
-        
+
         对于 CASE 语句，CDFG 中可能有比条件数更多的 MUX，因为：
         1. 每个 case 分支内的 if-else 会生成 MUX
         2. 数据路径复制会产生多个 MUX
-        
+
         我们需要收集所有相关的 MUX，而不是只取 expected_mux_count 个。
-        
+
         Args:
             coverage_line: 覆盖率报告中的行号（case 语句的行号）
             expected_mux_count: 期望的 MUX 数量（仅用于参考）
-            
+
         Returns:
             MUX 节点 ID 列表（按行号排序）
         """
         all_mux_lines = sorted(self.line_to_mux_nodes.keys())
         if not all_mux_lines:
             return []
-        
+
         # 尝试从源文件中找到 case/endcase 的范围
         case_range = self._find_case_range_from_source(coverage_line)
-        
+
         if case_range:
             case_start, case_end = case_range
             print(f"  从源码解析到 case 范围: {case_start}-{case_end}")
@@ -287,7 +297,7 @@ class CoverageAnnotator:
 
             if collected:
                 return self._sort_mux_nodes_for_annotation(collected)
-        
+
         # 如果无法从源码解析，使用启发式方法
         # 收集从 coverage_line 开始的一定范围内的所有 MUX
         # CASE 语句通常跨越较大的行号范围（可能 100+ 行）
@@ -302,7 +312,7 @@ class CoverageAnnotator:
             return self._sort_mux_nodes_for_annotation(collected)
 
         return []
-    
+
     def _collect_if_mux_nodes(
         self, coverage_line: int, expected_mux_count: int
     ) -> List[str]:
@@ -367,9 +377,14 @@ class CoverageAnnotator:
 
                 # 如果唯一控制信号数与期望 MUX 数匹配或接近，说明匹配正确
                 # 允许一定容差（3 倍）用于处理嵌套 if-else 等情况
-                if expected_mux_count > 0 and unique_control_count > expected_mux_count * 3:
-                    print(f"  警告: 收集到 {len(collected)} 个 MUX（{unique_control_count} 个独立控制信号），"
-                          f"但期望 {expected_mux_count} 个，可能是行号匹配错误")
+                if (
+                    expected_mux_count > 0
+                    and unique_control_count > expected_mux_count * 3
+                ):
+                    print(
+                        f"  警告: 收集到 {len(collected)} 个 MUX（{unique_control_count} 个独立控制信号），"
+                        f"但期望 {expected_mux_count} 个，可能是行号匹配错误"
+                    )
                     # 检查是否有更精确的匹配
                     # 尝试在更小的范围内查找
                     narrow_collected = []
@@ -390,28 +405,39 @@ class CoverageAnnotator:
                                     narrow_set.add(mux_id)
 
                     if narrow_collected:
-                        narrow_control_count = self._count_unique_control_signals(narrow_collected)
+                        narrow_control_count = self._count_unique_control_signals(
+                            narrow_collected
+                        )
                         if narrow_control_count <= expected_mux_count * 2:
-                            print(f"  使用精确范围匹配: 收集到 {len(narrow_collected)} 个 MUX（{narrow_control_count} 个独立控制信号）")
+                            print(
+                                f"  使用精确范围匹配: 收集到 {len(narrow_collected)} 个 MUX（{narrow_control_count} 个独立控制信号）"
+                            )
                             return self._sort_mux_nodes_for_annotation(narrow_collected)
 
                     # 如果仍然不匹配，返回 None 表示已解析但无有效 MUX
                     return None
 
                 # 匹配成功：打印详细信息
-                if len(collected) > expected_mux_count and unique_control_count <= expected_mux_count:
-                    print(f"  数据路径复制检测: {len(collected)} 个 MUX 共享 {unique_control_count} 个控制信号（期望 {expected_mux_count} 个）")
+                if (
+                    len(collected) > expected_mux_count
+                    and unique_control_count <= expected_mux_count
+                ):
+                    print(
+                        f"  数据路径复制检测: {len(collected)} 个 MUX 共享 {unique_control_count} 个控制信号（期望 {expected_mux_count} 个）"
+                    )
 
                 return self._sort_mux_nodes_for_annotation(collected)
             else:
                 # 成功解析到 IF 范围，但范围内没有 MUX
                 # 这可能是时序逻辑（如 always_ff 中的复位），返回 None 避免启发式错误匹配
-                print(f"  IF 范围 {if_start}-{if_end} 内没有 MUX 节点（可能是时序逻辑）")
+                print(
+                    f"  IF 范围 {if_start}-{if_end} 内没有 MUX 节点（可能是时序逻辑）"
+                )
                 return None
 
         # 如果无法从源码解析，返回空列表，让调用者回退到启发式方法
         return []
-    
+
     def _collect_ternary_mux_nodes(
         self, coverage_line: int, expected_mux_count: int
     ) -> List[str]:
@@ -454,7 +480,7 @@ class CoverageAnnotator:
 
         # 如果无法从源码解析，返回空列表，让调用者回退到启发式方法
         return []
-    
+
     def _find_ternary_range_from_source(
         self, coverage_line: int, expected_mux_count: int = 0
     ) -> tuple:
@@ -477,7 +503,7 @@ class CoverageAnnotator:
             return None
 
         try:
-            with open(source_file_path, 'r', encoding='utf-8') as f:
+            with open(source_file_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
         except Exception as e:
             print(f"  警告: 无法读取源文件 {source_file_path}: {e}")
@@ -497,10 +523,10 @@ class CoverageAnnotator:
         # 注意：
         # 1. 需要排除注释中的 ?
         # 2. 三元表达式可能跨行，: 可能在后续行，所以只检查 ? 即可
-        if '?' in line_content:
+        if "?" in line_content:
             # 简单检查：确保 ? 不在注释中
-            comment_pos = line_content.find('//')
-            question_pos = line_content.find('?')
+            comment_pos = line_content.find("//")
+            question_pos = line_content.find("?")
 
             if comment_pos == -1 or question_pos < comment_pos:
                 ternary_start = search_line + 1  # 转换回 1-based 行号
@@ -520,13 +546,13 @@ class CoverageAnnotator:
                         return (ternary_start, ternary_end)
 
         return None
-    
+
     def _find_ternary_end(self, lines: List[str], start_line: int) -> int:
         """
         从三元表达式开始位置找到其结束位置
-        
+
         处理嵌套的三元表达式和跨行的情况。
-        
+
         嵌套三元表达式示例：
         1. 简单嵌套：a ? b : (c ? d : e)
         2. 多层嵌套：a ? (b ? c : d) : (e ? f : g)
@@ -534,17 +560,17 @@ class CoverageAnnotator:
            sel1 ? val1 :
            sel2 ? val2 :
                   val3
-        
+
         Args:
             lines: 源文件行列表
             start_line: 三元表达式起始行索引（0-based）
-            
+
         Returns:
             三元表达式结束的行号（1-based），如果找不到则返回 None
         """
         # 三元表达式可能跨越多行
         # 需要匹配括号和 ? : 的配对
-        
+
         # 策略：
         # 1. 跟踪括号深度 () 和 []
         # 2. 对于 ?，增加待匹配的冒号计数
@@ -552,47 +578,47 @@ class CoverageAnnotator:
         #    - 位选择的冒号在 [] 内部
         #    - 三元表达式的冒号在 [] 外部
         # 4. 当所有 ? 都找到匹配的 : 时，表达式结束
-        
+
         paren_depth = 0
         bracket_depth = 0
         ternary_depth = 0  # 未匹配的 ? 数量（嵌套深度）
-        
+
         for i in range(start_line, min(start_line + 30, len(lines))):
             line_content = lines[i]
-            
+
             # 跳过注释部分
-            comment_pos = line_content.find('//')
+            comment_pos = line_content.find("//")
             if comment_pos != -1:
                 line_content = line_content[:comment_pos]
-            
+
             # 处理字符串字面量（简单处理：跳过引号内的内容）
             in_string = False
             j = 0
             while j < len(line_content):
                 char = line_content[j]
-                
+
                 # 处理字符串
-                if char == '"' and (j == 0 or line_content[j-1] != '\\'):
+                if char == '"' and (j == 0 or line_content[j - 1] != "\\"):
                     in_string = not in_string
                     j += 1
                     continue
-                
+
                 if in_string:
                     j += 1
                     continue
-                
-                if char == '(':
+
+                if char == "(":
                     paren_depth += 1
-                elif char == ')':
+                elif char == ")":
                     paren_depth -= 1
-                elif char == '[':
+                elif char == "[":
                     bracket_depth += 1
-                elif char == ']':
+                elif char == "]":
                     bracket_depth -= 1
-                elif char == '?':
+                elif char == "?":
                     # 新的三元表达式开始
                     ternary_depth += 1
-                elif char == ':':
+                elif char == ":":
                     # 区分三元表达式的冒号和位选择的冒号
                     # 位选择的冒号在 [] 内部，如 data[7:0]
                     if bracket_depth == 0:
@@ -600,10 +626,10 @@ class CoverageAnnotator:
                         if ternary_depth > 0:
                             ternary_depth -= 1
                     # 如果 bracket_depth > 0，这是位选择的冒号，忽略
-                elif char == ';':
+                elif char == ";":
                     # 分号表示语句结束
                     return i + 1  # 转换为 1-based 行号
-                elif char == ',':
+                elif char == ",":
                     # 逗号可能表示表达式结束（在函数参数或数组初始化中）
                     # 只有当所有三元表达式都已匹配时才结束
                     if ternary_depth == 0 and paren_depth <= 0:
@@ -614,27 +640,27 @@ class CoverageAnnotator:
             # 检查行尾是否有悬挂的操作符（表示表达式继续到下一行）
             # 链式三元表达式通常以 `:` 结尾继续到下一行
             line_stripped = line_content.strip()
-            has_trailing_colon = line_stripped.endswith(':')
-            has_trailing_question = line_stripped.endswith('?')
+            has_trailing_colon = line_stripped.endswith(":")
+            has_trailing_question = line_stripped.endswith("?")
 
             # 检查是否找到了完整的三元表达式
             # 条件：所有 ? 都找到了匹配的 :，且括号平衡，且没有悬挂操作符
             if ternary_depth == 0 and paren_depth <= 0 and i > start_line:
                 if not has_trailing_colon and not has_trailing_question:
                     return i + 1  # 转换为 1-based 行号
-        
+
         # 如果没有找到明确的结束，返回起始行后的几行
         return min(start_line + 10, len(lines))
-    
+
     def _find_case_range_from_source(self, coverage_line: int) -> tuple:
         """
         从源文件中找到 case 语句的范围
-        
+
         通过解析源码中的 case 和 endcase 关键字来确定范围。
-        
+
         Args:
             coverage_line: 覆盖率报告中的行号
-            
+
         Returns:
             (case_start, case_end) 元组，如果找不到则返回 None
         """
@@ -644,7 +670,7 @@ class CoverageAnnotator:
             return None
 
         try:
-            with open(source_file_path, 'r', encoding='utf-8') as f:
+            with open(source_file_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
         except Exception as e:
             print(f"  警告: 无法读取源文件 {source_file_path}: {e}")
@@ -659,7 +685,7 @@ class CoverageAnnotator:
         line_content = lines[search_line].strip().lower()
 
         # 检查是否是 case 语句
-        if 'case' in line_content and 'endcase' not in line_content:
+        if "case" in line_content and "endcase" not in line_content:
             case_start = search_line + 1  # 转换回 1-based 行号
 
             # 向下搜索 endcase
@@ -669,44 +695,45 @@ class CoverageAnnotator:
                 return (case_start, case_end)
 
         return None
-    
+
     def _find_endcase(self, lines: List[str], case_line: int) -> int:
         """
         从 case 语句开始向下搜索 endcase
-        
+
         处理嵌套的 case 语句。
-        
+
         Args:
             lines: 源文件行列表
             case_line: case 语句的行索引（0-based）
-            
+
         Returns:
             endcase 的行号（1-based），如果找不到则返回 None
         """
         nesting_level = 1
-        
+
         for i in range(case_line + 1, len(lines)):
             line_content = lines[i].strip().lower()
-            
+
             # 跳过注释
-            if line_content.startswith('//'):
+            if line_content.startswith("//"):
                 continue
-            
+
             # 检查嵌套的 case
-            if 'case' in line_content and 'endcase' not in line_content:
+            if "case" in line_content and "endcase" not in line_content:
                 # 确保是 case 关键字而不是变量名的一部分
                 import re
-                if re.search(r'\bcase[xz]?\s*\(', line_content):
+
+                if re.search(r"\bcase[xz]?\s*\(", line_content):
                     nesting_level += 1
-            
+
             # 检查 endcase
-            if 'endcase' in line_content:
+            if "endcase" in line_content:
                 nesting_level -= 1
                 if nesting_level == 0:
                     return i + 1  # 转换为 1-based 行号
-        
+
         return None
-    
+
     def _find_if_range_from_source(self, coverage_line: int) -> tuple:
         """
         从源文件中找到 if 语句的范围
@@ -727,7 +754,7 @@ class CoverageAnnotator:
             return None
 
         try:
-            with open(source_file_path, 'r', encoding='utf-8') as f:
+            with open(source_file_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
         except Exception as e:
             print(f"  警告: 无法读取源文件 {source_file_path}: {e}")
@@ -743,7 +770,7 @@ class CoverageAnnotator:
 
         # 检查是否是 if 语句（排除 else if）
         # 匹配 "if (" 或 "if(" 但不匹配 "else if"
-        if re.search(r'(?<!else\s)\bif\s*\(', line_content):
+        if re.search(r"(?<!else\s)\bif\s*\(", line_content):
             if_start = search_line + 1  # 转换回 1-based 行号
 
             # 向下搜索 if 语句的结束
@@ -752,7 +779,7 @@ class CoverageAnnotator:
                 return (if_start, if_end)
 
         return None
-    
+
     def _find_if_end(self, lines: List[str], if_line: int) -> int:
         """
         从 if 语句开始向下搜索 if 块的结束
@@ -770,16 +797,16 @@ class CoverageAnnotator:
 
         # 检查 if 语句是否包含 begin
         if_line_content = lines[if_line].strip().lower()
-        has_begin = 'begin' in if_line_content
+        has_begin = "begin" in if_line_content
 
         # 如果没有 begin，可能是单行 if、三元表达式，或 if-else-if 链
         if not has_begin:
             # 检查下一行是否有 begin
             if if_line + 1 < len(lines):
                 next_line = lines[if_line + 1].strip().lower()
-                if 'begin' in next_line:
+                if "begin" in next_line:
                     has_begin = True
-                elif 'else' in next_line:
+                elif "else" in next_line:
                     # 这是一个 if-else-if 链（没有 begin/end）
                     # 继续搜索直到找到最后的 else 分支或非 else-if 行
                     return self._find_if_else_chain_end(lines, if_line)
@@ -787,7 +814,7 @@ class CoverageAnnotator:
                     # 检查是否是单行 if 后面跟着 else if
                     # 例如: if (cond) val = x; else if (cond2) val = y;
                     # 在同一行上可能有 else if
-                    if 'else' in if_line_content.split('//')[-1]:  # 排除注释
+                    if "else" in if_line_content.split("//")[-1]:  # 排除注释
                         # 当前行就有 else，检查是否是 if-else-if 链的一部分
                         return self._find_if_else_chain_end(lines, if_line)
 
@@ -802,17 +829,17 @@ class CoverageAnnotator:
                     stmt_end_line = if_line + 1
                     for i in range(if_line + 1, min(if_line + 5, len(lines))):
                         check_line = lines[i].strip()
-                        if ';' in check_line:
+                        if ";" in check_line:
                             stmt_end_line = i
                             break
 
                     # 检查语句后是否有 else
                     if stmt_end_line + 1 < len(lines):
                         after_stmt_line = lines[stmt_end_line + 1].strip().lower()
-                        if re.search(r'\belse\b', after_stmt_line):
+                        if re.search(r"\belse\b", after_stmt_line):
                             # else 后面可能跟着 if，需要递归处理
                             # 检查是否是 else if
-                            if re.search(r'\belse\s+if\b', after_stmt_line):
+                            if re.search(r"\belse\s+if\b", after_stmt_line):
                                 # else if，继续作为 if-else-if 链处理
                                 return self._find_if_else_chain_end(lines, if_line)
                             else:
@@ -823,12 +850,14 @@ class CoverageAnnotator:
                                 # 或者: else if (cond) ...
                                 # 或者: else stmt;
                                 else_content = after_stmt_line
-                                if 'begin' in else_content:
+                                if "begin" in else_content:
                                     # else begin ... end
                                     # 需要找到对应的 end
-                                    else_end = self._find_begin_end_block(lines, else_start)
+                                    else_end = self._find_begin_end_block(
+                                        lines, else_start
+                                    )
                                     return else_end
-                                elif re.search(r'\bif\s*\(', else_content):
+                                elif re.search(r"\bif\s*\(", else_content):
                                     # else 行内有 if（不是 else if，而是 else\n  if）
                                     # 递归查找内部 if 的结束
                                     inner_if_end = self._find_if_end(lines, else_start)
@@ -836,15 +865,22 @@ class CoverageAnnotator:
                                 else:
                                     # 检查下一行是否有 if（else 后换行跟 if）
                                     if else_start + 1 < len(lines):
-                                        next_to_else = lines[else_start + 1].strip().lower()
-                                        if re.search(r'\bif\s*\(', next_to_else):
+                                        next_to_else = (
+                                            lines[else_start + 1].strip().lower()
+                                        )
+                                        if re.search(r"\bif\s*\(", next_to_else):
                                             # else 后面跟着 if
-                                            inner_if_end = self._find_if_end(lines, else_start + 1)
+                                            inner_if_end = self._find_if_end(
+                                                lines, else_start + 1
+                                            )
                                             return inner_if_end
                                         else:
                                             # else 后面是单行语句
-                                            for j in range(else_start + 1, min(else_start + 5, len(lines))):
-                                                if ';' in lines[j]:
+                                            for j in range(
+                                                else_start + 1,
+                                                min(else_start + 5, len(lines)),
+                                            ):
+                                                if ";" in lines[j]:
                                                     return j + 1
                                             return else_start + 2
                                     return else_start + 2
@@ -857,10 +893,10 @@ class CoverageAnnotator:
             # 向下看几行，看是否有 else if
             for i in range(if_line + 1, min(if_line + 5, len(lines))):
                 check_line = lines[i].strip().lower()
-                if re.search(r'\belse\s+if\b', check_line):
+                if re.search(r"\belse\s+if\b", check_line):
                     # 这是 if-else-if 链
                     return self._find_if_else_chain_end(lines, if_line)
-                elif check_line and not check_line.startswith('//'):
+                elif check_line and not check_line.startswith("//"):
                     # 遇到非空非注释行，且不是 else if，说明是单行 if
                     break
             return if_line + 1
@@ -873,22 +909,22 @@ class CoverageAnnotator:
             line_content = lines[i].strip().lower()
 
             # 跳过注释
-            if line_content.startswith('//'):
+            if line_content.startswith("//"):
                 continue
 
             # 检查 begin（增加嵌套层级）
             # 注意：begin 可能在 if/else/case 等语句的同一行
-            begin_count = len(re.findall(r'\bbegin\b', line_content))
+            begin_count = len(re.findall(r"\bbegin\b", line_content))
 
             # 检查 end（减少嵌套层级）
             # 注意：end 可能后跟 else
-            end_count = len(re.findall(r'\bend\b', line_content))
+            end_count = len(re.findall(r"\bend\b", line_content))
 
             # 更新嵌套层级
             nesting_level += begin_count - end_count
 
             # 检查是否是 else 分支
-            if 'else' in line_content:
+            if "else" in line_content:
                 in_else_branch = True
 
             # 当嵌套层级回到 0 时，找到了 if 块的结束
@@ -914,16 +950,16 @@ class CoverageAnnotator:
             line_content = lines[i].strip().lower()
 
             # 跳过注释
-            if line_content.startswith('//'):
+            if line_content.startswith("//"):
                 continue
 
             # 移除行内注释
-            if '//' in line_content:
-                line_content = line_content.split('//')[0].strip()
+            if "//" in line_content:
+                line_content = line_content.split("//")[0].strip()
 
             # 统计 begin 和 end
-            begin_count = len(re.findall(r'\bbegin\b', line_content))
-            end_count = len(re.findall(r'\bend\b', line_content))
+            begin_count = len(re.findall(r"\bbegin\b", line_content))
+            end_count = len(re.findall(r"\bend\b", line_content))
 
             nesting_level += begin_count - end_count
 
@@ -957,18 +993,18 @@ class CoverageAnnotator:
             line_content = lines[i].strip().lower()
 
             # 跳过空行和纯注释行
-            if not line_content or line_content.startswith('//'):
+            if not line_content or line_content.startswith("//"):
                 continue
 
             # 去掉行内注释
-            if '//' in line_content:
-                line_content = line_content.split('//')[0].strip()
+            if "//" in line_content:
+                line_content = line_content.split("//")[0].strip()
 
             # 检查是否是 if/else if/else 行
             is_if_else = (
-                re.search(r'\bif\s*\(', line_content) or
-                re.search(r'\belse\s+if\s*\(', line_content) or
-                re.search(r'\belse\b', line_content)
+                re.search(r"\bif\s*\(", line_content)
+                or re.search(r"\belse\s+if\s*\(", line_content)
+                or re.search(r"\belse\b", line_content)
             )
 
             if is_if_else:
@@ -977,21 +1013,21 @@ class CoverageAnnotator:
 
             # 检查是否是赋值语句（if 分支的执行语句）
             # 通常是 xxx = yyy; 形式
-            if '=' in line_content and ';' in line_content:
+            if "=" in line_content and ";" in line_content:
                 last_valid_line = i
                 continue
 
             # 检查是否到达了 end 或其他块结束标记
-            if re.search(r'\bend\b', line_content):
+            if re.search(r"\bend\b", line_content):
                 last_valid_line = i
                 break
 
             # 如果遇到其他语句（不是 if/else/赋值），链结束
             # 但要排除缩进的赋值语句
-            if line_content and not line_content.startswith('//'):
+            if line_content and not line_content.startswith("//"):
                 # 检查这一行是否是前一行语句的延续
-                prev_line = lines[i - 1].strip() if i > 0 else ''
-                if not prev_line.endswith(';') and ';' in line_content:
+                prev_line = lines[i - 1].strip() if i > 0 else ""
+                if not prev_line.endswith(";") and ";" in line_content:
                     # 这是前一行语句的延续
                     last_valid_line = i
                     continue
@@ -1000,88 +1036,92 @@ class CoverageAnnotator:
                 break
 
         return last_valid_line + 1  # 转换为 1-based 行号
-    
+
     def _get_source_file_path(self) -> str:
         """
         获取源文件的完整路径
-        
+
         Returns:
             源文件路径，如果找不到则返回 None
         """
         if not self.source_file:
             return None
-        
+
         # 尝试从 CDFG 节点中获取源文件路径
         for node in self.cdfg.nodes.values():
             if node.source_file == self.source_file:
                 # 尝试构建完整路径
                 # 假设源文件在 designs/<design_name>/source/rtl/ 目录下
                 import os
-                
+
                 # 尝试几种可能的路径
                 possible_paths = [
                     # 直接使用源文件名
                     self.source_file,
                     # 在当前目录下查找
-                    os.path.join("designs", "cv32e40p", "source", "rtl", self.source_file),
+                    os.path.join(
+                        "designs", "cv32e40p", "source", "rtl", self.source_file
+                    ),
                 ]
-                
+
                 for path in possible_paths:
                     if os.path.exists(path):
                         return path
-                
+
                 break
-        
+
         return None
-    
-    def _collect_continuous_mux_chain(self, start_line: int, expected_count: int) -> List[str]:
+
+    def _collect_continuous_mux_chain(
+        self, start_line: int, expected_count: int
+    ) -> List[str]:
         """
         从指定行开始收集连续的 MUX 链
-        
+
         对于 if-else-if 结构，收集所有相关的 MUX，而不是只取期望数量。
         因为 Yosys 可能为数据路径复制生成额外的 MUX。
-        
+
         Args:
             start_line: 起始行号
             expected_count: 期望的 MUX 数量（仅用于参考）
-            
+
         Returns:
             MUX 节点 ID 列表
         """
         all_mux_lines = sorted(self.line_to_mux_nodes.keys())
         collected = []
-        
+
         # 允许行号有小的跳跃（最多跳过10行，以覆盖嵌套的 if 语句）
         current_line = start_line
         max_gap = 10
-        
+
         for line in all_mux_lines:
             if line >= current_line and line <= current_line + max_gap:
                 collected.extend(self.line_to_mux_nodes[line])
                 current_line = line + 1
                 # 不再限制数量，收集所有连续的 MUX
-        
+
         return collected
-    
+
     def _sort_mux_nodes_for_annotation(self, mux_nodes: List[str]) -> List[str]:
         """
         为标注排序 MUX 节点
-        
+
         对于 if-else-if 链，需要按逻辑顺序（从外到内）排列
         以便条件编号与 MUX 正确对应
-        
+
         Args:
             mux_nodes: MUX 节点 ID 列表
-            
+
         Returns:
             排序后的 MUX 节点 ID 列表
         """
         if len(mux_nodes) <= 1:
             return mux_nodes
-        
+
         # 先进行拓扑排序
         sorted_nodes = self._sort_mux_nodes_topologically(mux_nodes)
-        
+
         # 然后反转，使其按逻辑顺序（从外到内）
         # 这样条件1对应最外层的MUX（索引0）
         return sorted_nodes[::-1]
@@ -1089,13 +1129,15 @@ class CoverageAnnotator:
     def _search_mux_at_line(self, line: int, total_branches: int) -> List[str]:
         """在指定行搜索 MUX 节点"""
         expected_mux_count = total_branches - 1
-        
+
         # 先检查 stmt_start_line
         if line in self.stmt_line_to_mux_nodes:
             stmt_mux = self.stmt_line_to_mux_nodes[line]
             if stmt_mux:
                 if len(stmt_mux) >= expected_mux_count:
-                    return self._sort_mux_nodes_for_annotation(stmt_mux[:expected_mux_count])
+                    return self._sort_mux_nodes_for_annotation(
+                        stmt_mux[:expected_mux_count]
+                    )
                 return self._sort_mux_nodes_for_annotation(stmt_mux)
 
         # 尝试收集连续的 MUX 链
@@ -1104,7 +1146,6 @@ class CoverageAnnotator:
             return self._sort_mux_nodes_for_annotation(collected[:expected_mux_count])
 
         return []
-
 
     def annotate(self) -> AnnotationStats:
         """
@@ -1117,6 +1158,7 @@ class CoverageAnnotator:
 
         # 按 (行号, 分支类型) 分组覆盖率数据，以便处理 generate 展开的同行多实例
         from collections import defaultdict
+
         line_type_coverages: Dict[tuple, List[BranchCoverage]] = defaultdict(list)
         for cov in self.coverage_data:
             key = (cov.line_no, cov.branch_type)
@@ -1153,14 +1195,18 @@ class CoverageAnnotator:
                                 self._annotate_mux_chain(instance_mux_nodes, coverage)
                     else:
                         # 按顺序分配 MUX 给每个实例
-                        sorted_all_mux = self._sort_mux_nodes_for_annotation(all_mux_nodes)
+                        sorted_all_mux = self._sort_mux_nodes_for_annotation(
+                            all_mux_nodes
+                        )
                         for idx, coverage in enumerate(coverages):
                             start_idx = idx * mux_per_instance
                             end_idx = start_idx + mux_per_instance
                             if start_idx < len(sorted_all_mux):
                                 instance_mux_nodes = sorted_all_mux[start_idx:end_idx]
                                 if instance_mux_nodes:
-                                    self._annotate_mux_chain(instance_mux_nodes, coverage)
+                                    self._annotate_mux_chain(
+                                        instance_mux_nodes, coverage
+                                    )
                 else:
                     # 单实例场景（普通情况）
                     print(
@@ -1179,9 +1225,7 @@ class CoverageAnnotator:
                     for coverage in coverages:
                         self._annotate_sequential_reset(seq_nodes, coverage)
                 else:
-                    print(
-                        f"警告: 行 {line_no} ({branch_type}) 没有找到对应的节点"
-                    )
+                    print(f"警告: 行 {line_no} ({branch_type}) 没有找到对应的节点")
 
         return self.stats
 
@@ -1508,8 +1552,7 @@ class CoverageAnnotator:
         """
         # 检测是否是 CASE 语句（条件值中包含 CASE 标签值 2）
         is_case_statement = any(
-            2 in br.condition_values.values()
-            for br in coverage.branches
+            2 in br.condition_values.values() for br in coverage.branches
         )
 
         if is_case_statement:
@@ -1550,7 +1593,9 @@ class CoverageAnnotator:
         # 2. MUX 组数 < 条件数
         # 3. 第一个分支只有条件 1 为真（典型的复位分支模式）
         skip_first_condition = False
-        if coverage.branch_type == "IF" and len(unique_control_sources) < len(sorted_conditions):
+        if coverage.branch_type == "IF" and len(unique_control_sources) < len(
+            sorted_conditions
+        ):
             # 检查是否是复位逻辑模式
             # 复位分支通常是：条件1=1，其他条件=-1（无关）
             first_branch = coverage.branches[0] if coverage.branches else None
@@ -1563,10 +1608,14 @@ class CoverageAnnotator:
                     if all(v == -1 for v in other_vals):
                         # 这是复位逻辑模式，跳过第一个条件
                         skip_first_condition = True
-                        print(f"  检测到复位逻辑: 条件 {first_cond} 对应时序节点复位，跳过 MUX 映射")
+                        print(
+                            f"  检测到复位逻辑: 条件 {first_cond} 对应时序节点复位，跳过 MUX 映射"
+                        )
 
         cond_to_mux_group = {}
-        conditions_to_map = sorted_conditions[1:] if skip_first_condition else sorted_conditions
+        conditions_to_map = (
+            sorted_conditions[1:] if skip_first_condition else sorted_conditions
+        )
 
         for idx, cond in enumerate(conditions_to_map):
             if idx < len(unique_control_sources):
@@ -1581,7 +1630,9 @@ class CoverageAnnotator:
 
         # 调试信息
         if len(mux_nodes) > len(sorted_conditions):
-            print(f"  注意：{len(mux_nodes)} 个 MUX 分组为 {len(unique_control_sources)} 组，对应 {len(sorted_conditions)} 个条件")
+            print(
+                f"  注意：{len(mux_nodes)} 个 MUX 分组为 {len(unique_control_sources)} 组，对应 {len(sorted_conditions)} 个条件"
+            )
 
         for branch_idx, branch_status in enumerate(coverage.branches):
             # 找到这个分支对应的 MUX
@@ -1699,15 +1750,27 @@ class CoverageAnnotator:
         is_complex_case = len(if_cond_indices) > 5
 
         if is_nested_case or is_complex_case:
-            reason = "嵌套 CASE" if is_nested_case else f"复杂 CASE ({len(if_cond_indices)} 个内部 IF)"
-            print(f"  CASE 语句: {reason}，选择器条件 {sorted(case_selector_conditions)}，内部 IF 条件 {if_cond_indices}")
-            self._annotate_nested_case(mux_nodes, coverage, case_selector_conditions, if_cond_indices)
+            reason = (
+                "嵌套 CASE"
+                if is_nested_case
+                else f"复杂 CASE ({len(if_cond_indices)} 个内部 IF)"
+            )
+            print(
+                f"  CASE 语句: {reason}，选择器条件 {sorted(case_selector_conditions)}，内部 IF 条件 {if_cond_indices}"
+            )
+            self._annotate_nested_case(
+                mux_nodes, coverage, case_selector_conditions, if_cond_indices
+            )
             return
 
         # 单层简单 CASE 的原有逻辑
-        case_cond_idx = min(case_selector_conditions) if case_selector_conditions else None
+        case_cond_idx = (
+            min(case_selector_conditions) if case_selector_conditions else None
+        )
 
-        print(f"  CASE 语句: 条件 {case_cond_idx} 是 CASE 选择器，条件 {if_cond_indices} 是内部 IF")
+        print(
+            f"  CASE 语句: 条件 {case_cond_idx} 是 CASE 选择器，条件 {if_cond_indices} 是内部 IF"
+        )
 
         # 步骤 2：解析 CASE 分支的行号范围
         case_branch_ranges = self._parse_case_branch_ranges(coverage.line_no)
@@ -1745,7 +1808,10 @@ class CoverageAnnotator:
             if case_label:
                 for if_cond_idx in if_cond_indices:
                     if_cond_val = br.condition_values.get(if_cond_idx, -1)
-                    if if_cond_val in (0, 1) and if_cond_idx not in case_label_to_if_cond[case_label]:
+                    if (
+                        if_cond_val in (0, 1)
+                        and if_cond_idx not in case_label_to_if_cond[case_label]
+                    ):
                         case_label_to_if_cond[case_label].append(if_cond_idx)
 
         # 步骤 5：根据分支路径标注
@@ -1765,14 +1831,17 @@ class CoverageAnnotator:
                 # 尝试模糊匹配
                 case_label_lower = case_label.lower().strip()
                 # 移除包名前缀（如 cv32e40p_pkg::TRAP_MACHINE -> TRAP_MACHINE）
-                if '::' in case_label:
-                    case_label_stripped = case_label.split('::')[-1].lower().strip()
+                if "::" in case_label:
+                    case_label_stripped = case_label.split("::")[-1].lower().strip()
                 else:
                     case_label_stripped = case_label_lower
 
                 for label in branch_to_mux.keys():
                     label_lower = label.lower().strip()
-                    if label_lower == case_label_lower or label_lower == case_label_stripped:
+                    if (
+                        label_lower == case_label_lower
+                        or label_lower == case_label_stripped
+                    ):
                         branch_mux_nodes = branch_to_mux[label]
                         break
 
@@ -1804,7 +1873,7 @@ class CoverageAnnotator:
                 internal_if_mux = []
 
                 for ctrl_src, mux_list in mux_groups_in_branch.items():
-                    if ctrl_src.startswith('port_'):
+                    if ctrl_src.startswith("port_"):
                         # 控制信号是输入端口，这是内部 IF MUX
                         internal_if_mux.extend(mux_list)
                     else:
@@ -1814,36 +1883,50 @@ class CoverageAnnotator:
                 # 标注 CASE 选择器 MUX（每个分支路径都需要标注）
                 for mux_node in case_selector_mux:
                     self._annotate_mux_edges(
-                        mux_node, branch_idx, branch_status.is_covered,
-                        is_true_branch=True, coverage_line=coverage.line_no
+                        mux_node,
+                        branch_idx,
+                        branch_status.is_covered,
+                        is_true_branch=True,
+                        coverage_line=coverage.line_no,
                     )
 
                 # 标注内部 IF MUX
                 for if_cond_idx, if_cond_val in internal_if_values.items():
-                    is_true_branch = (if_cond_val == 1)
+                    is_true_branch = if_cond_val == 1
 
                     # 使用内部 IF MUX
-                    if_mux_nodes = internal_if_mux if internal_if_mux else branch_mux_nodes
+                    if_mux_nodes = (
+                        internal_if_mux if internal_if_mux else branch_mux_nodes
+                    )
 
                     for mux_node in if_mux_nodes:
                         self._annotate_mux_edges(
-                            mux_node, branch_idx, branch_status.is_covered,
-                            is_true_branch, coverage.line_no
+                            mux_node,
+                            branch_idx,
+                            branch_status.is_covered,
+                            is_true_branch,
+                            coverage.line_no,
                         )
             else:
                 # 没有内部 IF（default 分支或纯 CASE 选择）
                 # 对于该 CASE 分支内的所有 MUX，标注 B 端口（分支被选中）
                 for mux_node in branch_mux_nodes:
                     self._annotate_mux_edges(
-                        mux_node, branch_idx, branch_status.is_covered,
-                        is_true_branch=True, coverage_line=coverage.line_no
+                        mux_node,
+                        branch_idx,
+                        branch_status.is_covered,
+                        is_true_branch=True,
+                        coverage_line=coverage.line_no,
                     )
 
             # 标注未分配的 MUX（全局 CASE 选择器，如 $pmux）
             for mux_node in unassigned_mux:
                 self._annotate_mux_edges(
-                    mux_node, branch_idx, branch_status.is_covered,
-                    is_true_branch=True, coverage_line=coverage.line_no
+                    mux_node,
+                    branch_idx,
+                    branch_status.is_covered,
+                    is_true_branch=True,
+                    coverage_line=coverage.line_no,
                 )
 
     def _annotate_nested_case(
@@ -1851,7 +1934,7 @@ class CoverageAnnotator:
         mux_nodes: List[str],
         coverage: BranchCoverage,
         case_selector_conditions: set,
-        if_cond_indices: List[int]
+        if_cond_indices: List[int],
     ):
         """
         嵌套 CASE 语句的标注策略
@@ -1890,10 +1973,12 @@ class CoverageAnnotator:
         branches_with_false = []
 
         for branch_idx, branch_status in enumerate(coverage.branches):
-            active_conds = [c for c, v in branch_status.condition_values.items()
-                           if v == 1 or v == 2]
-            inactive_conds = [c for c, v in branch_status.condition_values.items()
-                            if v == 0]
+            active_conds = [
+                c for c, v in branch_status.condition_values.items() if v == 1 or v == 2
+            ]
+            inactive_conds = [
+                c for c, v in branch_status.condition_values.items() if v == 0
+            ]
 
             if active_conds:
                 branches_with_true.append((branch_idx, branch_status))
@@ -1902,11 +1987,19 @@ class CoverageAnnotator:
 
         # 判断 B 端口（true 分支）的整体覆盖状态
         b_port_has_covered = any(br.is_covered for _, br in branches_with_true)
-        b_port_all_uncovered = all(not br.is_covered for _, br in branches_with_true) if branches_with_true else False
+        b_port_all_uncovered = (
+            all(not br.is_covered for _, br in branches_with_true)
+            if branches_with_true
+            else False
+        )
 
         # 判断 A 端口（false 分支）的整体覆盖状态
         a_port_has_covered = any(br.is_covered for _, br in branches_with_false)
-        a_port_all_uncovered = all(not br.is_covered for _, br in branches_with_false) if branches_with_false else False
+        a_port_all_uncovered = (
+            all(not br.is_covered for _, br in branches_with_false)
+            if branches_with_false
+            else False
+        )
 
         # 标注所有 MUX 的 B 端口
         if branches_with_true:
@@ -1915,8 +2008,11 @@ class CoverageAnnotator:
             is_covered = b_port_has_covered  # 只要有一个覆盖，就标注为覆盖
             for mux_id in mux_nodes:
                 self._annotate_mux_edges(
-                    mux_id, rep_branch_idx, is_covered,
-                    is_true_branch=True, coverage_line=coverage.line_no
+                    mux_id,
+                    rep_branch_idx,
+                    is_covered,
+                    is_true_branch=True,
+                    coverage_line=coverage.line_no,
                 )
 
         # 标注所有 MUX 的 A 端口
@@ -1926,14 +2022,19 @@ class CoverageAnnotator:
             is_covered = a_port_has_covered  # 只要有一个覆盖，就标注为覆盖
             for mux_id in mux_nodes:
                 self._annotate_mux_edges(
-                    mux_id, rep_branch_idx, is_covered,
-                    is_true_branch=False, coverage_line=coverage.line_no
+                    mux_id,
+                    rep_branch_idx,
+                    is_covered,
+                    is_true_branch=False,
+                    coverage_line=coverage.line_no,
                 )
 
         # 如果有未覆盖的分支，需要确保这些信息被记录
         # 在统计信息中反映出来
         if uncovered_count > 0:
-            print(f"  注意: 嵌套 CASE 有 {uncovered_count}/{len(coverage.branches)} 个未覆盖分支")
+            print(
+                f"  注意: 嵌套 CASE 有 {uncovered_count}/{len(coverage.branches)} 个未覆盖分支"
+            )
 
     def _parse_case_branch_ranges(self, case_line: int) -> Dict[str, tuple]:
         """
@@ -1952,7 +2053,7 @@ class CoverageAnnotator:
             return {}
 
         try:
-            with open(source_file_path, 'r', encoding='utf-8') as f:
+            with open(source_file_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
         except Exception as e:
             print(f"  警告: 无法读取源文件 {source_file_path}: {e}")
@@ -1961,20 +2062,62 @@ class CoverageAnnotator:
         # SystemVerilog 关键字，不应被识别为 CASE 标签
         # 包括 begin/end 块标签语法: begin: label_name
         sv_keywords = {
-            'begin', 'end', 'if', 'else', 'for', 'while', 'do', 'foreach',
-            'case', 'casex', 'casez', 'endcase', 'function', 'endfunction',
-            'task', 'endtask', 'module', 'endmodule', 'always', 'always_ff',
-            'always_comb', 'always_latch', 'assign', 'wire', 'reg', 'logic',
-            'input', 'output', 'inout', 'parameter', 'localparam', 'generate',
-            'endgenerate', 'initial', 'final', 'fork', 'join', 'disable',
-            'wait', 'event', 'posedge', 'negedge', 'or', 'and', 'not',
-            'unique', 'priority', 'return', 'break', 'continue'
+            "begin",
+            "end",
+            "if",
+            "else",
+            "for",
+            "while",
+            "do",
+            "foreach",
+            "case",
+            "casex",
+            "casez",
+            "endcase",
+            "function",
+            "endfunction",
+            "task",
+            "endtask",
+            "module",
+            "endmodule",
+            "always",
+            "always_ff",
+            "always_comb",
+            "always_latch",
+            "assign",
+            "wire",
+            "reg",
+            "logic",
+            "input",
+            "output",
+            "inout",
+            "parameter",
+            "localparam",
+            "generate",
+            "endgenerate",
+            "initial",
+            "final",
+            "fork",
+            "join",
+            "disable",
+            "wait",
+            "event",
+            "posedge",
+            "negedge",
+            "or",
+            "and",
+            "not",
+            "unique",
+            "priority",
+            "return",
+            "break",
+            "continue",
         }
 
         def remove_comments(line: str) -> str:
             """移除行内注释"""
             # 简单处理：找到 // 并截断
-            comment_idx = line.find('//')
+            comment_idx = line.find("//")
             if comment_idx >= 0:
                 return line[:comment_idx]
             return line
@@ -1993,7 +2136,7 @@ class CoverageAnnotator:
             line_stripped = line.strip()
 
             # 跳过纯注释行
-            if line_stripped.startswith('//'):
+            if line_stripped.startswith("//"):
                 continue
 
             # 移除行内注释后再分析
@@ -2002,7 +2145,7 @@ class CoverageAnnotator:
 
             # 检测 case 语句起始
             # 对于 IF+CASE 复合结构，覆盖率报告可能指向 IF 行而非 CASE 行
-            if re.search(r'\b(unique\s+|priority\s+)?case[xz]?\s*\(', line_lower):
+            if re.search(r"\b(unique\s+|priority\s+)?case[xz]?\s*\(", line_lower):
                 if not found_case_start:
                     # 找到真正的 case 语句起始
                     found_case_start = True
@@ -2011,7 +2154,7 @@ class CoverageAnnotator:
                     case_depth += 1
 
             # 检测 endcase
-            if re.search(r'\bendcase\b', line_lower):
+            if re.search(r"\bendcase\b", line_lower):
                 if case_depth > 0:
                     case_depth -= 1
                 elif found_case_start:
@@ -2026,7 +2169,7 @@ class CoverageAnnotator:
                 # 标签必须在行首（或只有空白），格式: IDLE: 或 IDLE : 或 IDLE: begin 或 3'b000: 或 default:
                 label_match = re.match(
                     r"^\s*([A-Za-z_][A-Za-z0-9_]*|\d+'[bhd][0-9a-fA-F_]+|default)\s*:",
-                    line_no_comment
+                    line_no_comment,
                 )
                 if label_match:
                     label_name = label_match.group(1)
@@ -2039,7 +2182,10 @@ class CoverageAnnotator:
                     # 保存前一个分支的范围
                     if current_label:
                         # 结束行是当前行的前一行（1-based）
-                        ranges[current_label] = (current_start, i)  # i 是 0-based，转为 1-based 后是 i+1-1=i
+                        ranges[current_label] = (
+                            current_start,
+                            i,
+                        )  # i 是 0-based，转为 1-based 后是 i+1-1=i
 
                     current_label = label_name
                     current_start = i + 1  # 1-based 行号（包含标签行本身）
@@ -2053,7 +2199,9 @@ class CoverageAnnotator:
             return node.source_line
         return 0
 
-    def _annotate_mux_chain_fallback(self, mux_nodes: List[str], coverage: BranchCoverage):
+    def _annotate_mux_chain_fallback(
+        self, mux_nodes: List[str], coverage: BranchCoverage
+    ):
         """
         MUX 链的回退标注方法（用于无法解析 CASE 结构时）
 
@@ -2094,21 +2242,30 @@ class CoverageAnnotator:
                     mux_group = cond_to_mux_group.get(cond, [])
                     for mux_node in mux_group:
                         self._annotate_mux_edges(
-                            mux_node, branch_idx, branch_status.is_covered,
-                            is_true_branch=True, coverage_line=coverage.line_no
+                            mux_node,
+                            branch_idx,
+                            branch_status.is_covered,
+                            is_true_branch=True,
+                            coverage_line=coverage.line_no,
                         )
                 for cond in false_conditions:
                     mux_group = cond_to_mux_group.get(cond, [])
                     for mux_node in mux_group:
                         self._annotate_mux_edges(
-                            mux_node, branch_idx, branch_status.is_covered,
-                            is_true_branch=False, coverage_line=coverage.line_no
+                            mux_node,
+                            branch_idx,
+                            branch_status.is_covered,
+                            is_true_branch=False,
+                            coverage_line=coverage.line_no,
                         )
             else:
                 for mux_node in mux_nodes:
                     self._annotate_mux_edges(
-                        mux_node, branch_idx, branch_status.is_covered,
-                        is_true_branch=False, coverage_line=coverage.line_no
+                        mux_node,
+                        branch_idx,
+                        branch_status.is_covered,
+                        is_true_branch=False,
+                        coverage_line=coverage.line_no,
                     )
 
     def _annotate_mux_edges(
@@ -2199,7 +2356,6 @@ class CoverageAnnotator:
             self.stats.annotated_mux_nodes += 1
 
 
-
 def annotate_cdfg_with_coverage(
     cdfg: CDFG,
     html_path: str,
@@ -2231,9 +2387,7 @@ def annotate_cdfg_with_coverage(
     source_file = parser.get_source_file()
 
     # 执行标注
-    annotator = CoverageAnnotator(
-        cdfg, coverage_data, source_file=source_file
-    )
+    annotator = CoverageAnnotator(cdfg, coverage_data, source_file=source_file)
     stats = annotator.annotate()
 
     # 可选：传播覆盖率到非分支边

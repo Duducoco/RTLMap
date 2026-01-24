@@ -14,7 +14,9 @@ class InstrFormat(Enum):
     """RISC-V 指令编码格式"""
 
     # RV32I 基本格式
-    R_TYPE = auto()  # 寄存器-寄存器操作: add, sub, and, or, xor, sll, srl, sra, slt, sltu
+    R_TYPE = (
+        auto()
+    )  # 寄存器-寄存器操作: add, sub, and, or, xor, sll, srl, sra, slt, sltu
     I_TYPE = auto()  # 立即数操作/加载: addi, ori, andi, lb, lh, lw, jalr
     S_TYPE = auto()  # 存储操作: sb, sh, sw
     B_TYPE = auto()  # 分支操作: beq, bne, blt, bge, bltu, bgeu
@@ -357,8 +359,12 @@ class AsmCDFG:
 
     # 索引结构（加速查询）
     label_to_node: Dict[str, str] = field(default_factory=dict)  # 标签 -> 节点 ID
-    reg_def_nodes: Dict[str, List[str]] = field(default_factory=dict)  # 寄存器 -> 定义节点列表
-    reg_use_nodes: Dict[str, List[str]] = field(default_factory=dict)  # 寄存器 -> 使用节点列表
+    reg_def_nodes: Dict[str, List[str]] = field(
+        default_factory=dict
+    )  # 寄存器 -> 定义节点列表
+    reg_use_nodes: Dict[str, List[str]] = field(
+        default_factory=dict
+    )  # 寄存器 -> 使用节点列表
 
     def add_node(self, node: AsmNode):
         """添加节点"""
@@ -391,14 +397,20 @@ class AsmCDFG:
         node = self.nodes.get(node_id)
         if not node:
             return []
-        return [self.nodes[succ_id] for succ_id in node.successors if succ_id in self.nodes]
+        return [
+            self.nodes[succ_id] for succ_id in node.successors if succ_id in self.nodes
+        ]
 
     def get_predecessors(self, node_id: str) -> List[AsmNode]:
         """获取前驱节点"""
         node = self.nodes.get(node_id)
         if not node:
             return []
-        return [self.nodes[pred_id] for pred_id in node.predecessors if pred_id in self.nodes]
+        return [
+            self.nodes[pred_id]
+            for pred_id in node.predecessors
+            if pred_id in self.nodes
+        ]
 
     def get_control_edges(self) -> List[AsmEdge]:
         """获取所有控制流边"""
@@ -430,4 +442,3 @@ class AsmCDFG:
         """计算统计信息"""
         self.total_basic_blocks = len(self.nodes)
         self.total_instructions = sum(node.instr_count for node in self.nodes.values())
-

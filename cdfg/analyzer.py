@@ -6,7 +6,7 @@ CDFG 分析器
 from typing import List, Tuple
 from collections import defaultdict
 
-from .types import CDFG, EdgeType, NodeType
+from .data_types import CDFG, EdgeType, NodeType
 
 
 class CDFGAnalyzer:

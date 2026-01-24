@@ -5,7 +5,7 @@ ASM CDFG 模块 - RISC-V 汇编代码到控制数据流图的转换
 支持指令集：RV32IMFC + Xpulp（兼容 CV32E40P）
 """
 
-from .asm_types import (
+from .data_types import (
     # 指令相关
     InstrFormat,
     InstrCategory,

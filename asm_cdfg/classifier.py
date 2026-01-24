@@ -7,7 +7,7 @@ RISC-V 指令分类器
 """
 
 from typing import Dict, Tuple, Optional
-from .asm_types import InstrFormat, InstrCategory
+from .data_types import InstrFormat, InstrCategory
 
 
 class InstructionClassifier:

@@ -16,6 +16,7 @@ from cdfg import CDFGExtractor, CDFGExporter, CDFG
 from annotation import CoverageParser, annotate_cdfg_with_coverage, AnnotationStats
 from tools import YosysRunner
 
+
 @dataclass
 class DataAnnotatorConfig:
     """DataAnnotator 配置类"""
@@ -137,7 +138,9 @@ class DataAnnotator:
                     return cached_data
                 else:
                     if self.config.verbose:
-                        print(f"缓存失效: HTML 文件数量变化 ({meta.get('html_count')} -> {current_html_count})")
+                        print(
+                            f"缓存失效: HTML 文件数量变化 ({meta.get('html_count')} -> {current_html_count})"
+                        )
             except (json.JSONDecodeError, KeyError):
                 pass  # 缓存损坏，重新生成
 
@@ -172,9 +175,7 @@ class DataAnnotator:
 
         return source_to_html
 
-    def _find_coverage_files(
-        self, design_dir: Path, coverage_dir: Path
-    ) -> list:
+    def _find_coverage_files(self, design_dir: Path, coverage_dir: Path) -> list:
         """
         根据覆盖率报告中的源文件信息和 CDFG 中的源文件自动查找覆盖率文件
 
@@ -444,9 +445,7 @@ class DataAnnotator:
 
         # 计算覆盖率
         if self.stats.annotated_edges > 0:
-            coverage_rate = (
-                self.stats.covered_edges / self.stats.annotated_edges * 100
-            )
+            coverage_rate = self.stats.covered_edges / self.stats.annotated_edges * 100
             print(f"\n边覆盖率: {coverage_rate:.2f}%")
 
     def export_json(self, output_path: Optional[str] = None) -> str:
@@ -614,11 +613,9 @@ def main():
 
     args = parser.parse_args()
 
-
-
     # 检查design_name与rtlil_json的一致性
-    design_dir = Path('designs', args.design_name).absolute()
-    rtlil_json_path = design_dir / 'RTLIL_json' / f"{args.module_name}.json"
+    design_dir = Path("designs", args.design_name).absolute()
+    rtlil_json_path = design_dir / "RTLIL_json" / f"{args.module_name}.json"
     if not rtlil_json_path.exists():
         # 调用yosys runner来进行生成
         runner = YosysRunner()

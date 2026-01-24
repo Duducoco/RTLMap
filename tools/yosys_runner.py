@@ -7,6 +7,7 @@ from typing import List, Optional, Union
 # Define paths for default usage
 PROJECT_ROOT = Path(__file__).parent.parent.absolute()
 
+
 class YosysRunner:
     def __init__(self, oss_cad_suite_path: Optional[Path] = None):
         # 获取环境变量中的YOSYS_HOME路径
@@ -16,8 +17,10 @@ class YosysRunner:
         elif yosys_home:
             self.oss_cad_suite_path = Path(yosys_home)
         else:
-            raise EnvironmentError("YOSYS_HOME environment variable is not set and no path was provided.")
-        
+            raise EnvironmentError(
+                "YOSYS_HOME environment variable is not set and no path was provided."
+            )
+
         self.yosys_exe = self.oss_cad_suite_path / "bin" / "yosys"
 
         self.env = self._setup_environment()
@@ -25,6 +28,7 @@ class YosysRunner:
     def _setup_environment(self) -> dict:
         """Select environment setup based on platform."""
         import platform
+
         if platform.system() == "Windows":
             return self._setup_environment_win()
         else:
@@ -107,8 +111,8 @@ class YosysRunner:
             commands: List of Yosys commands to execute.
             output_file: Optional path to write the log output to.
         """
-        # Join commands with 
-        
+        # Join commands with
+
         command_str = "; ".join(commands)
 
         print(f"Executing Yosys commands: {command_str}")
@@ -203,7 +207,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    args.output_dir = Path(args.flist).parent / args.output_dir if args.flist else Path(args.output_dir)
+    args.output_dir = (
+        Path(args.flist).parent / args.output_dir
+        if args.flist
+        else Path(args.output_dir)
+    )
 
     runner = YosysRunner()
 

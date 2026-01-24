@@ -15,7 +15,7 @@ import graphviz
 
 # 支持直接运行和模块导入两种方式
 if __name__ == "__main__" or __package__ is None:
-    from asm_cdfg.asm_types import (
+    from asm_cdfg.data_types import (
         AsmCDFG,
         AsmNode,
         AsmEdge,
@@ -24,7 +24,7 @@ if __name__ == "__main__" or __package__ is None:
         InstrCategory,
     )
 else:
-    from .asm_types import (
+    from .data_types import (
         AsmCDFG,
         AsmNode,
         AsmEdge,
@@ -311,7 +311,9 @@ class AsmCDFGVisualizer:
         html_parts = ['<<TABLE BORDER="0" CELLBORDER="1" CELLSPACING="0">']
 
         # 标题行
-        type_badge = f'<FONT POINT-SIZE="7" COLOR="#666666">[{node.node_type.name}]</FONT>'
+        type_badge = (
+            f'<FONT POINT-SIZE="7" COLOR="#666666">[{node.node_type.name}]</FONT>'
+        )
         html_parts.append(
             f'<TR><TD COLSPAN="2" BGCOLOR="#E8E8E8"><B>{title}</B>{loop_marker} '
             f'<FONT POINT-SIZE="8"> {line_info}</FONT><BR/>{type_badge}</TD></TR>'
@@ -351,7 +353,7 @@ class AsmCDFGVisualizer:
             if node.defs:
                 def_str = ", ".join(sorted(node.defs)[:5])
                 if len(node.defs) > 5:
-                    def_str += f" +{len(node.defs)-5}"
+                    def_str += f" +{len(node.defs) - 5}"
                 html_parts.append(
                     f'<TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#228B22">'
                     f"def:</FONT></TD>"
@@ -361,7 +363,7 @@ class AsmCDFGVisualizer:
             if node.uses:
                 use_str = ", ".join(sorted(node.uses)[:5])
                 if len(node.uses) > 5:
-                    use_str += f" +{len(node.uses)-5}"
+                    use_str += f" +{len(node.uses) - 5}"
                 html_parts.append(
                     f'<TR><TD ALIGN="LEFT"><FONT POINT-SIZE="8" COLOR="#4169E1">'
                     f"use:</FONT></TD>"
@@ -476,9 +478,7 @@ class AsmCDFGVisualizer:
     def _add_legend(self, dot: graphviz.Digraph):
         """添加图例"""
         with dot.subgraph(name="cluster_legend") as legend:
-            legend.attr(
-                label="Legend", style="rounded", color="gray", fontsize="10"
-            )
+            legend.attr(label="Legend", style="rounded", color="gray", fontsize="10")
             legend.attr(rank="sink")
 
             # 控制流边图例
@@ -509,7 +509,9 @@ class AsmCDFGVisualizer:
             )
 
             legend.node("l_back_src", "", shape="point", width="0.1")
-            legend.node("l_back_dst", "Back Edge (Loop)", shape="plaintext", fontsize="9")
+            legend.node(
+                "l_back_dst", "Back Edge (Loop)", shape="plaintext", fontsize="9"
+            )
             legend.edge("l_back_src", "l_back_dst", **self.BACK_EDGE_STYLE)
 
             if self.show_data_edges:

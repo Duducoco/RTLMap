@@ -14,7 +14,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, Optional
 
-from .data_types import DualGraphData, ModelConfig, ModelOutput
+from datasets import DualGraphData
+from .data_types import ModelConfig, ModelOutput
 from .encoder import InteractiveDualEncoder
 
 
@@ -30,7 +31,7 @@ class EdgeClassifier(nn.Module):
         hidden_dim: int,
         num_classes: int = 3,
         num_edge_types: int = 5,
-        dropout: float = 0.1
+        dropout: float = 0.1,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -43,14 +44,14 @@ class EdgeClassifier(nn.Module):
             nn.Linear(hidden_dim * 3, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_classes)
+            nn.Linear(hidden_dim, num_classes),
         )
 
     def forward(
         self,
         node_features: torch.Tensor,
         edge_index: torch.Tensor,
-        edge_type: Optional[torch.Tensor] = None
+        edge_type: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -70,8 +71,7 @@ class EdgeClassifier(nn.Module):
             edge_type_feat = self.edge_type_embedding(edge_type)  # [E, D]
         else:
             edge_type_feat = torch.zeros(
-                edge_index.size(1), self.hidden_dim,
-                device=node_features.device
+                edge_index.size(1), self.hidden_dim, device=node_features.device
             )
 
         edge_feat = torch.cat([src_feat, tgt_feat, edge_type_feat], dim=-1)
@@ -92,7 +92,7 @@ class GraphRegressor(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_targets)
+            nn.Linear(hidden_dim, num_targets),
         )
 
     def forward(self, rtl_graph_emb: torch.Tensor) -> torch.Tensor:
@@ -129,7 +129,7 @@ class DualGraphFusionModel(nn.Module):
             num_layers=config.num_gnn_layers,
             num_heads=config.num_heads,
             dropout=config.dropout,
-            num_edge_types=config.num_edge_types
+            num_edge_types=config.num_edge_types,
         )
 
         # 边分类器（仅 RTL）
@@ -137,7 +137,7 @@ class DualGraphFusionModel(nn.Module):
             hidden_dim=config.hidden_dim,
             num_classes=config.num_edge_classes,
             num_edge_types=config.num_edge_types,
-            dropout=config.dropout
+            dropout=config.dropout,
         )
 
         # 图回归器（仅 RTL）
@@ -161,17 +161,17 @@ class DualGraphFusionModel(nn.Module):
         rtl_node, rtl_graph, asm_node, asm_graph, cross_attn = self.encoder(
             rtl_x=data.x,
             rtl_edge_index=data.edge_index,
-            asm_x=getattr(data, 'asm_x', None),
-            asm_edge_index=getattr(data, 'asm_edge_index', None),
-            rtl_batch=getattr(data, 'batch', None),
-            asm_batch=getattr(data, 'asm_x_batch', None),
-            rtl_edge_type=getattr(data, 'edge_type', None),
-            asm_edge_type=getattr(data, 'asm_edge_type', None)
+            asm_x=getattr(data, "asm_x", None),
+            asm_edge_index=getattr(data, "asm_edge_index", None),
+            rtl_batch=getattr(data, "batch", None),
+            asm_batch=getattr(data, "asm_x_batch", None),
+            rtl_edge_type=getattr(data, "edge_type", None),
+            asm_edge_type=getattr(data, "asm_edge_type", None),
         )
 
         # 预测阶段：仅使用 RTL
         edge_logits = self.edge_classifier(
-            rtl_node, data.edge_index, getattr(data, 'edge_type', None)
+            rtl_node, data.edge_index, getattr(data, "edge_type", None)
         )
         graph_pred = self.graph_regressor(rtl_graph)  # 仅 RTL 图嵌入
 
@@ -180,7 +180,7 @@ class DualGraphFusionModel(nn.Module):
             graph_pred=graph_pred,
             rtl_final=rtl_node,
             asm_final=asm_node,
-            cross_attentions=cross_attn
+            cross_attentions=cross_attn,
         )
 
     def compute_loss(
@@ -189,7 +189,7 @@ class DualGraphFusionModel(nn.Module):
         data: DualGraphData,
         edge_loss_weight: float = 1.0,
         graph_loss_weight: float = 1.0,
-        label_smoothing: float = 0.1
+        label_smoothing: float = 0.1,
     ) -> Dict[str, torch.Tensor]:
         """
         计算损失
@@ -208,7 +208,7 @@ class DualGraphFusionModel(nn.Module):
         losses = {}
 
         # 边分类损失（mask 掉 label=-1 的边，仅对 label∈{0,1} 计算损失）
-        edge_labels = getattr(data, 'edge_labels', None)
+        edge_labels = getattr(data, "edge_labels", None)
         if edge_labels is not None:
             # mask: True 表示有效边（label != -1）
             valid_mask = edge_labels != -1
@@ -221,31 +221,31 @@ class DualGraphFusionModel(nn.Module):
 
                 # 二分类：{0: 未覆盖, 1: 已覆盖}
                 edge_loss = F.cross_entropy(
-                    valid_logits,
-                    valid_labels,
-                    label_smoothing=label_smoothing
+                    valid_logits, valid_labels, label_smoothing=label_smoothing
                 )
-                losses['edge_loss'] = edge_loss * edge_loss_weight
+                losses["edge_loss"] = edge_loss * edge_loss_weight
             else:
-                losses['edge_loss'] = torch.tensor(0., device=device)
+                losses["edge_loss"] = torch.tensor(0.0, device=device)
 
-            losses['num_valid_edges'] = num_valid
+            losses["num_valid_edges"] = num_valid
         else:
-            losses['edge_loss'] = torch.tensor(0., device=device)
-            losses['num_valid_edges'] = 0
+            losses["edge_loss"] = torch.tensor(0.0, device=device)
+            losses["num_valid_edges"] = 0
 
         # 图回归损失
         if data.y is not None:
             graph_loss = F.smooth_l1_loss(output.graph_pred, data.y)
-            losses['graph_loss'] = graph_loss * graph_loss_weight
+            losses["graph_loss"] = graph_loss * graph_loss_weight
         else:
-            losses['graph_loss'] = torch.tensor(0., device=device)
+            losses["graph_loss"] = torch.tensor(0.0, device=device)
 
-        losses['total_loss'] = losses['edge_loss'] + losses['graph_loss']
+        losses["total_loss"] = losses["edge_loss"] + losses["graph_loss"]
         return losses
 
 
-def create_model(config: Optional[ModelConfig] = None, **kwargs) -> DualGraphFusionModel:
+def create_model(
+    config: Optional[ModelConfig] = None, **kwargs
+) -> DualGraphFusionModel:
     """创建模型"""
     if config is None:
         config = ModelConfig(**kwargs)
@@ -254,13 +254,13 @@ def create_model(config: Optional[ModelConfig] = None, **kwargs) -> DualGraphFus
 
 def create_small_model(**kwargs) -> DualGraphFusionModel:
     """创建小型模型（调试用）"""
-    defaults = {'hidden_dim': 128, 'num_gnn_layers': 2, 'num_heads': 4}
+    defaults = {"hidden_dim": 128, "num_gnn_layers": 2, "num_heads": 4}
     defaults.update(kwargs)
     return create_model(**defaults)
 
 
 def create_base_model(**kwargs) -> DualGraphFusionModel:
     """创建基础模型"""
-    defaults = {'hidden_dim': 256, 'num_gnn_layers': 4, 'num_heads': 4}
+    defaults = {"hidden_dim": 256, "num_gnn_layers": 4, "num_heads": 4}
     defaults.update(kwargs)
     return create_model(**defaults)

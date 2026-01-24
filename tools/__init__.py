@@ -2,6 +2,6 @@
 RTLMap Tools Package
 """
 
-from .YosysRunner import YosysRunner
+from .yosys_runner import YosysRunner
 
 __all__ = ["YosysRunner"]

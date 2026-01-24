@@ -7,7 +7,7 @@
 
 from typing import List, Dict, Optional, Set
 
-from .asm_types import Instruction, BasicBlock, InstrFormat, InstrCategory
+from .data_types import Instruction, BasicBlock, InstrFormat, InstrCategory
 
 
 class BasicBlockBuilder:

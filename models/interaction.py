@@ -28,7 +28,7 @@ class CrossGraphAttention(nn.Module):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = hidden_dim // num_heads
-        self.scale = self.head_dim ** -0.5
+        self.scale = self.head_dim**-0.5
 
         # 共享的 Q/K/V 投影
         self.q_proj = nn.Linear(hidden_dim, hidden_dim)
@@ -37,10 +37,7 @@ class CrossGraphAttention(nn.Module):
         self.out_proj = nn.Linear(hidden_dim, hidden_dim)
 
         # 简化门控：学习标量缩放
-        self.gate = nn.Sequential(
-            nn.Linear(hidden_dim * 2, 1),
-            nn.Sigmoid()
-        )
+        self.gate = nn.Sequential(nn.Linear(hidden_dim * 2, 1), nn.Sigmoid())
 
         self.norm = nn.LayerNorm(hidden_dim)
         self.dropout = nn.Dropout(dropout)
@@ -49,7 +46,7 @@ class CrossGraphAttention(nn.Module):
         self,
         query: torch.Tensor,
         key_value: torch.Tensor,
-        kv_mask: Optional[torch.Tensor] = None
+        kv_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -67,14 +64,26 @@ class CrossGraphAttention(nn.Module):
         q_normed = self.norm(query)
 
         # QKV 投影
-        Q = self.q_proj(q_normed).view(B, N_q, self.num_heads, self.head_dim).transpose(1, 2)
-        K = self.k_proj(key_value).view(B, N_k, self.num_heads, self.head_dim).transpose(1, 2)
-        V = self.v_proj(key_value).view(B, N_k, self.num_heads, self.head_dim).transpose(1, 2)
+        Q = (
+            self.q_proj(q_normed)
+            .view(B, N_q, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+        )
+        K = (
+            self.k_proj(key_value)
+            .view(B, N_k, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+        )
+        V = (
+            self.v_proj(key_value)
+            .view(B, N_k, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+        )
 
         # 注意力
         attn = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
         if kv_mask is not None:
-            attn = attn.masked_fill(~kv_mask[:, None, None, :], float('-inf'))
+            attn = attn.masked_fill(~kv_mask[:, None, None, :], float("-inf"))
         attn = F.softmax(attn, dim=-1)
         attn = self.dropout(attn)
 
@@ -105,7 +114,7 @@ class CrossGraphInteraction(nn.Module):
         rtl: torch.Tensor,
         asm: torch.Tensor,
         rtl_mask: Optional[torch.Tensor] = None,
-        asm_mask: Optional[torch.Tensor] = None
+        asm_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
