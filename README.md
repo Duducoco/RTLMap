@@ -7,29 +7,39 @@ RTLMap 是一个用于从 Yosys RTLIL JSON 提取控制数据流图 (CDFG) 并�
 - **CDFG 提取**：从 Yosys 综合后的 RTLIL JSON 中提取控制数据流图
 - **覆盖率标注**：解析 VCS/URG HTML 覆盖率报告，将分支覆盖信息映射到 CDFG 边
 - **可视化输出**：生成带覆盖率着色的 SVG 图形（绿色=已覆盖，红色=未覆盖）
-- **层次化支持**：支持 flatten 后包含多个子模块的设计
+- **ASM CDFG 提取**：从 RISC-V 汇编代码提取基本块级 CDFG，支持 RV32I/M/F/C 和 Xpulp 扩展
+- **双图融合 GNN**：RTL-Assembly 双图交互式编码，用于覆盖率预测
+- **PyTorch Lightning 训练**：多任务训练框架（边分类 + 图回归），支持 TensorBoard
 - **自动综合**：自动调用 Yosys（需要 oss-cad-suite）生成 RTLIL JSON
 - **智能缓存**：自动缓存源文件到 HTML 的映射关系，加速重复运行
 
 ## 数据流管线
 
 ```
-RTL (SystemVerilog)
-        │ (YosysRunner + slang plugin)
-        ▼
-design.json (RTLIL JSON)
-        │ (cdfg.CDFGExtractor)
-        ▼
-CDFG object (nodes + edges)
-        │ (annotation.CoverageParser)
-        ▼
-coverage.html -> BranchCoverage data
-        │ (annotation.CoverageAnnotator)
-        ▼
-Annotated CDFG (edges with coverage_label)
-        │ (cdfg.CDFGExporter)
-        ▼
-cdfg_annotated.json / cdfg_output.svg
+RTL (SystemVerilog)                      Assembly (.S)
+        │ (YosysRunner + slang plugin)          │ (asm_cdfg.AsmParser)
+        ▼                                       ▼
+design.json (RTLIL JSON)                 Instruction list
+        │ (cdfg.CDFGExtractor)                  │ (asm_cdfg.BasicBlockBuilder)
+        ▼                                       ▼
+CDFG object (nodes + edges)              BasicBlock list
+        │ (annotation.CoverageParser)           │ (asm_cdfg.AsmCDFGExtractor)
+        ▼                                       ▼
+coverage.html -> BranchCoverage data     ASM CDFG (基本块级图)
+        │ (annotation.CoverageAnnotator)        │
+        ▼                                       │
+Annotated CDFG (edges with coverage_label)      │
+        │ (cdfg.CDFGExporter)                   │
+        ▼                                       │
+cdfg_annotated.json / cdfg_output.svg           │
+        │                                       │
+        └───────────────┬───────────────────────┘
+                        │ (models.DualGraphData)
+                        ▼
+            DualGraphFusionModel (双图交互编码)
+                        │ (trainer.train_model)
+                        ▼
+            覆盖率预测模型 (边分类 + 图回归)
 ```
 
 ## 安装
@@ -40,6 +50,9 @@ cdfg_annotated.json / cdfg_output.svg
 - [uv](https://github.com/astral-sh/uv) (推荐的 Python 包管理器)
 - [oss-cad-suite](https://github.com/YosysHQ/oss-cad-suite-build) (用于 Yosys 综合)
 - Graphviz (用于 SVG 可视化)
+- PyTorch 2.6+ with CUDA 12.4 (用于 GNN 训练)
+- PyTorch Geometric 2.7+ (图神经网络库)
+- PyTorch Lightning 2.6+ (训练框架)
 
 ### 安装步骤
 
@@ -142,6 +155,23 @@ uv run python tools/YosysRunner.py \
     --output-dir json/
 ```
 
+### ASM CDFG 提取
+
+```bash
+# 从 RISC-V 汇编文件提取基本块级 CDFG
+uv run python -m asm_cdfg.extractor input.S -o output.json -v
+```
+
+### 运行测试
+
+```bash
+# 模型单元测试
+uv run python -m models.test_model
+
+# 训练器单元测试
+uv run python trainer/test_trainer.py
+```
+
 ## 项目结构
 
 ```
@@ -165,13 +195,39 @@ RTLMap/
 │   ├── parser.py             # VCS/URG HTML 解析
 │   └── annotator.py          # 覆盖率 -> CDFG 边标注
 │
+├── asm_cdfg/                 # RISC-V 汇编 CDFG 模块
+│   ├── __init__.py
+│   ├── asm_types.py          # 指令和基本块类型定义
+│   ├── parser.py             # 汇编文件解析器
+│   ├── classifier.py         # 指令分类器 (RV32I/M/F/C, Xpulp)
+│   ├── bb_builder.py         # 基本块构建器
+│   ├── extractor.py          # 基本块 -> CDFG 提取
+│   └── visualizer.py         # ASM CDFG 可视化
+│
+├── models/                   # 双图融合 GNN 模型
+│   ├── __init__.py
+│   ├── data_types.py         # 数据类型 (DualGraphData, ModelConfig)
+│   ├── encoder.py            # 图编码器 (GINEConv + 跨图交互)
+│   ├── interaction.py        # 跨图注意力机制
+│   ├── model.py              # 完整模型 + 任务头
+│   └── test_model.py         # 模型单元测试
+│
+├── trainer/                  # PyTorch Lightning 训练框架
+│   ├── __init__.py
+│   ├── config.py             # 训练超参数配置
+│   ├── callbacks.py          # Callback 工厂类
+│   ├── datamodule.py         # 数据模块封装
+│   ├── module.py             # Lightning 模型封装
+│   ├── utils.py              # 便捷训练函数
+│   └── test_trainer.py       # 训练器单元测试
+│
 ├── tools/                    # 工具脚本
 │   ├── __init__.py
 │   └── YosysRunner.py        # Yosys 执行封装
 │
 └── designs/                  # 设计文件目录
-    ├── cv32e40p/             # 示例设计
-    └── openc910/             # 示例设计
+    ├── cv32e40p/             # CV32E40P RISC-V 处理器
+    └── openc910/             # OpenC910 处理器
 ```
 
 ## 设计文件结构
@@ -404,6 +460,53 @@ stats = annotate_cdfg_with_coverage(
 exporter = CDFGExporter(cdfg)
 exporter.to_json("output.json")
 exporter.to_graphviz("output.svg", show_coverage=True)
+```
+
+### GNN 训练 API
+
+```python
+from models import create_model, ModelConfig, DualGraphData
+from trainer import train_model, TrainerConfig
+
+# 创建模型配置
+model_config = ModelConfig(
+    rtl_node_dim=64,
+    asm_node_dim=64,
+    hidden_dim=256,
+    num_gnn_layers=4
+)
+
+# 创建训练配置
+trainer_config = TrainerConfig(
+    learning_rate=1e-4,
+    max_epochs=100,
+    batch_size=32
+)
+
+# 准备数据（DualGraphData 包含 RTL 和 ASM 双图）
+# train_data, val_data = ...
+
+# 训练模型
+module, trainer = train_model(
+    model_config=model_config,
+    trainer_config=trainer_config,
+    train_data=train_data,
+    val_data=val_data,
+    experiment_name="coverage_prediction"
+)
+```
+
+### ASM CDFG API
+
+```python
+from asm_cdfg import AsmCDFGExtractor
+
+# 从汇编文件提取 CDFG
+extractor = AsmCDFGExtractor(verbose=True)
+cdfg = extractor.extract_from_file("test.S")
+
+print(f"节点数: {len(cdfg.nodes)}")
+print(f"边数: {len(cdfg.edges)}")
 ```
 
 ### 开发环境设置

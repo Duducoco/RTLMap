@@ -12,6 +12,7 @@ CDFG 中边类型语义重要：DATA（数据流）、CONTROL（控制流）、C
 - 跨图注意力共享参数（连接两图的桥梁）
 """
 
+import warnings
 import torch
 import torch.nn as nn
 from torch_geometric.nn import GINEConv, global_mean_pool
@@ -141,6 +142,7 @@ class InteractiveDualEncoder(nn.Module):
         if edge_type is not None:
             return embedding(edge_type)
         else:
+            warnings.warn("Edge types are required for GINEConv. Using zero vectors instead.")
             # 无边类型时使用零向量（不影响 GINEConv 聚合）
             return torch.zeros(num_edges, self.hidden_dim, device=device)
 

@@ -8,7 +8,7 @@ from lightning.pytorch.loggers import TensorBoardLogger, CSVLogger
 
 from models.data_types import DualGraphData, ModelConfig
 from .config import TrainerConfig
-from .datamodule import DualGraphDataModule
+from datasets import DualGraphDataModule
 from .module import DualGraphLightningModule
 from .callbacks import CallbackFactory
 

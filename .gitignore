@@ -19,7 +19,7 @@ oss-cad-suite/
 *.json
 *.svg
 CLAUDE.md
-
+checkpoints
 designs/cv32e40p
 designs/openc910
 
