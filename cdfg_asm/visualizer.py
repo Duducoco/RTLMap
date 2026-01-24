@@ -15,7 +15,7 @@ import graphviz
 
 # 支持直接运行和模块导入两种方式
 if __name__ == "__main__" or __package__ is None:
-    from asm_cdfg.data_types import (
+    from cdfg_asm.data_types import (
         AsmCDFG,
         AsmNode,
         AsmEdge,

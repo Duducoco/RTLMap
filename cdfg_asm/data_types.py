@@ -262,11 +262,8 @@ class AsmNode:
     live_in: Set[str] = field(default_factory=set)  # 入口活跃寄存器
     live_out: Set[str] = field(default_factory=set)  # 出口活跃寄存器
 
-    # 控制流信息
-    successors: List[str] = field(default_factory=list)  # 后继节点 ID
-    predecessors: List[str] = field(default_factory=list)  # 前驱节点 ID
-    is_loop_header: bool = False  # 是否为循环头
-    loop_depth: int = 0  # 循环嵌套深度
+
+
 
     # 分支信息（仅 BRANCH 类型节点）
     branch_condition: Optional[str] = None  # 分支条件（如 "beq x1, x2"）
@@ -286,8 +283,8 @@ class AsmNode:
             category_counts[cat] = category_counts.get(cat, 0) + 1
 
         return max(category_counts, key=lambda c: category_counts[c])
-
-    def get_instructions_text(self, indent: str = "") -> str:
+    @property
+    def instructions_text(self, indent: str = "") -> str:
         """
         获取当前块的指令内容，使用换行符连接
 

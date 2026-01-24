@@ -5,7 +5,10 @@
 设计理念：
 - ASM CDFG 作为上下文信息，在编码阶段通过跨图交互增强 RTL 表示
 - 边分类和图回归均只使用 RTL CDFG 的特征
-- 支持边类型嵌入（DATA, CONTROL, CLOCK, RESET, ENABLE）
+- RTL 节点特征：node_cell_type + node_width
+- RTL 边特征：edge_type + edge_width
+- ASM 节点特征：node_type + instruction_encoding（外部模型生成）
+- ASM 边特征：edge_type（仅类型嵌入）
 - Label Smoothing 防止过拟合
 """
 
@@ -16,30 +19,31 @@ from typing import Dict, Optional
 
 from datasets import DualGraphData
 from .data_types import ModelConfig, ModelOutput
-from .encoder import InteractiveDualEncoder
+from .encoder import InteractiveDualEncoder, RTLEdgeFeatureEncoder
 
 
 class EdgeClassifier(nn.Module):
     """
     边分类器
 
-    仅使用 RTL CDFG 的节点特征和边类型进行分类
+    仅使用 RTL CDFG 的节点特征和边特征进行分类
+    边特征 = edge_type 嵌入 + edge_width 编码（log2 + 线性层，加法融合）
     """
 
     def __init__(
         self,
         hidden_dim: int,
-        num_classes: int = 3,
+        num_classes: int = 2,
         num_edge_types: int = 5,
         dropout: float = 0.1,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
 
-        # 边类型嵌入
-        self.edge_type_embedding = nn.Embedding(num_edge_types, hidden_dim)
+        # 边特征编码器
+        self.edge_encoder = RTLEdgeFeatureEncoder(num_edge_types, hidden_dim)
 
-        # 输入维度：src + tgt + edge_type = 3 * hidden_dim
+        # 输入维度：src + tgt + edge_feat = 3 * hidden_dim
         self.net = nn.Sequential(
             nn.Linear(hidden_dim * 3, hidden_dim),
             nn.GELU(),
@@ -51,13 +55,15 @@ class EdgeClassifier(nn.Module):
         self,
         node_features: torch.Tensor,
         edge_index: torch.Tensor,
-        edge_type: Optional[torch.Tensor] = None,
+        edge_type: torch.Tensor,
+        edge_width: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
             node_features: [N, D] RTL 节点特征
             edge_index: [2, E] RTL 边索引
-            edge_type: [E] RTL 边类型（可选）
+            edge_type: [E] RTL 边类型
+            edge_width: [E] RTL 边 width（可选）
 
         Returns:
             [E, num_classes] 边分类 logits
@@ -66,16 +72,11 @@ class EdgeClassifier(nn.Module):
         src_feat = node_features[src]  # [E, D]
         tgt_feat = node_features[tgt]  # [E, D]
 
-        # 边类型嵌入
-        if edge_type is not None:
-            edge_type_feat = self.edge_type_embedding(edge_type)  # [E, D]
-        else:
-            edge_type_feat = torch.zeros(
-                edge_index.size(1), self.hidden_dim, device=node_features.device
-            )
+        # 边特征编码
+        edge_feat = self.edge_encoder(edge_type, edge_width)  # [E, D]
 
-        edge_feat = torch.cat([src_feat, tgt_feat, edge_type_feat], dim=-1)
-        return self.net(edge_feat)
+        combined = torch.cat([src_feat, tgt_feat, edge_feat], dim=-1)
+        return self.net(combined)
 
 
 class GraphRegressor(nn.Module):
@@ -87,7 +88,6 @@ class GraphRegressor(nn.Module):
 
     def __init__(self, hidden_dim: int, num_targets: int = 1, dropout: float = 0.1):
         super().__init__()
-        # 输入维度：仅 RTL 图嵌入 = hidden_dim
         self.net = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
@@ -120,16 +120,18 @@ class DualGraphFusionModel(nn.Module):
         super().__init__()
         self.config = config
 
-        # 双图编码器（RTL 和 ASM 交互）
+        # 双图编码器
         self.encoder = InteractiveDualEncoder(
-            rtl_node_dim=config.rtl_node_dim,
-            asm_node_dim=config.asm_node_dim,
             hidden_dim=config.hidden_dim,
             output_dim=config.hidden_dim,
             num_layers=config.num_gnn_layers,
             num_heads=config.num_heads,
             dropout=config.dropout,
             num_edge_types=config.num_edge_types,
+            num_cell_types=config.num_cell_types,
+            num_asm_node_types=config.num_asm_node_types,
+            num_asm_edge_types=config.num_asm_edge_types,
+            asm_instruction_dim=config.asm_instruction_dim,
         )
 
         # 边分类器（仅 RTL）
@@ -151,36 +153,43 @@ class DualGraphFusionModel(nn.Module):
 
         Args:
             data: 双图数据，包含 RTL 和 ASM 图
-                - 主图（RTL）: x, edge_index, edge_type, batch
-                - 辅助图（ASM）: asm_x, asm_edge_index, asm_edge_type, asm_x_batch
+                RTL: node_cell_type, node_width, edge_index, edge_type, edge_width
+                ASM: asm_node_type, asm_instruction_encoding, asm_edge_index, asm_edge_type
 
         Returns:
             ModelOutput: 边分类 logits 和图级预测（均基于 RTL）
         """
-        # 编码阶段：双图交互
-        rtl_node, rtl_graph, asm_node, asm_graph, cross_attn = self.encoder(
-            rtl_x=data.x,
+        # 编码阶段
+        rtl_node, rtl_graph, asm_node, _ = self.encoder(
+            # RTL 图
             rtl_edge_index=data.edge_index,
-            asm_x=getattr(data, "asm_x", None),
-            asm_edge_index=getattr(data, "asm_edge_index", None),
+            rtl_node_cell_type=data.node_cell_type,
+            rtl_node_width=data.node_width,
+            rtl_edge_type=data.edge_type,
             rtl_batch=getattr(data, "batch", None),
-            asm_batch=getattr(data, "asm_x_batch", None),
-            rtl_edge_type=getattr(data, "edge_type", None),
-            asm_edge_type=getattr(data, "asm_edge_type", None),
+            rtl_edge_width=getattr(data, "edge_width", None),
+            # ASM 图
+            asm_edge_index=data.asm_edge_index,
+            asm_node_type=data.asm_node_type,
+            asm_instruction_encoding=data.asm_instruction_encoding,
+            asm_edge_type=data.asm_edge_type,
+            asm_batch=getattr(data, "asm_node_type_batch", None),
         )
 
         # 预测阶段：仅使用 RTL
         edge_logits = self.edge_classifier(
-            rtl_node, data.edge_index, getattr(data, "edge_type", None)
+            rtl_node,
+            data.edge_index,
+            data.edge_type,
+            getattr(data, "edge_width", None),
         )
-        graph_pred = self.graph_regressor(rtl_graph)  # 仅 RTL 图嵌入
+        graph_pred = self.graph_regressor(rtl_graph)
 
         return ModelOutput(
             edge_logits=edge_logits,
             graph_pred=graph_pred,
             rtl_final=rtl_node,
             asm_final=asm_node,
-            cross_attentions=cross_attn,
         )
 
     def compute_loss(
@@ -207,19 +216,15 @@ class DualGraphFusionModel(nn.Module):
         device = output.edge_logits.device
         losses = {}
 
-        # 边分类损失（mask 掉 label=-1 的边，仅对 label∈{0,1} 计算损失）
+        # 边分类损失（mask 掉 label=-1 的边）
         edge_labels = getattr(data, "edge_labels", None)
         if edge_labels is not None:
-            # mask: True 表示有效边（label != -1）
             valid_mask = edge_labels != -1
             num_valid = valid_mask.sum().item()
 
             if num_valid > 0:
-                # 筛选有效边
-                valid_logits = output.edge_logits[valid_mask]  # [num_valid, 2]
-                valid_labels = edge_labels[valid_mask]  # [num_valid], 值为 {0, 1}
-
-                # 二分类：{0: 未覆盖, 1: 已覆盖}
+                valid_logits = output.edge_logits[valid_mask]
+                valid_labels = edge_labels[valid_mask]
                 edge_loss = F.cross_entropy(
                     valid_logits, valid_labels, label_smoothing=label_smoothing
                 )

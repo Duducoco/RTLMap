@@ -206,7 +206,7 @@ class DualGraphDataModule(L.LightningDataModule):
             batch_size=self.batch_size,
             shuffle=shuffle,
             num_workers=self.num_workers,
-            follow_batch=["asm_x"],  # 为 ASM 图生成 batch 索引
+            follow_batch=["asm_node_type"],  # 为 ASM 图生成 batch 索引
             pin_memory=True,
             persistent_workers=self.num_workers > 0,
         )

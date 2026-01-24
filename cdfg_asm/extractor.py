@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # 支持直接运行和模块导入两种方式
 if __name__ == "__main__" or __package__ is None:
-    from asm_cdfg.data_types import (
+    from cdfg_asm.data_types import (
         BasicBlock,
         Instruction,
         InstrCategory,
@@ -334,8 +334,8 @@ class AsmCDFGExtractor:
             AsmCDFG 对象
         """
         if __package__ is None:
-            from asm_cdfg.parser import AsmParser
-            from asm_cdfg.bb_builder import BasicBlockBuilder
+            from cdfg_asm.parser import AsmParser
+            from cdfg_asm.bb_builder import BasicBlockBuilder
         else:
             from .parser import AsmParser
             from .bb_builder import BasicBlockBuilder
@@ -436,7 +436,7 @@ def main():
     # 生成 SVG
     if args.svg:
         if __package__ is None:
-            from asm_cdfg.visualizer import AsmCDFGVisualizer
+            from cdfg_asm.visualizer import AsmCDFGVisualizer
         else:
             from .visualizer import AsmCDFGVisualizer
 

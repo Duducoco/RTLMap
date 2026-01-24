@@ -495,7 +495,7 @@ module, trainer = train_model(
 ### ASM CDFG API
 
 ```python
-from asm_cdfg import AsmCDFGExtractor
+from cdfg_asm import AsmCDFGExtractor
 
 # 从汇编文件提取 CDFG
 extractor = AsmCDFGExtractor(verbose=True)
