@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CDFG 模块 - 控制数据流图提取和分析
+RTL CDFG 模块 - RTL 控制数据流图提取和分析
 
 提供从 RTLIL JSON 提取、分析、可视化和导出 CDFG 的功能。
 """

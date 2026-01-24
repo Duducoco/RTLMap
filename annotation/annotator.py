@@ -8,7 +8,7 @@ from typing import Dict, List
 from dataclasses import dataclass
 from collections import defaultdict
 
-from cdfg import CDFG, Edge, NodeType
+from rtl_cdfg import CDFG, Edge, NodeType
 from .parser import CoverageParser, BranchCoverage
 
 

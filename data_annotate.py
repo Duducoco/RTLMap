@@ -12,7 +12,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Optional
 
-from cdfg import CDFGExtractor, CDFGExporter, CDFG
+from rtl_cdfg import CDFGExtractor, CDFGExporter, CDFG
 from annotation import CoverageParser, annotate_cdfg_with_coverage, AnnotationStats
 from tools import YosysRunner
 
