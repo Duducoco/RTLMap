@@ -13,7 +13,7 @@ class DualGraphData(Data):
         - node_cell_type: [N] 节点的 cell_type 索引（对应 CELL_TYPE_VOCAB）
         - node_width: [N] 节点的 width（信号位宽）
         - edge_index: [2, E] 边索引
-        - edge_type: [E] 边类型（0: DATA, 1: CONTROL, 2: CLOCK, 3: RESET, 4: ENABLE）
+        - edge_type: [E] 边类型（0: DATA, 1: DATA_TRUE, 2: DATA_FALSE, 3: CONTROL, 4: CLOCK, 5: RESET, 6: ENABLE）
         - edge_width: [E] 边的 width（信号位宽）
         - edge_labels: [E] 边标签（-1: 未标注, 0: 未覆盖, 1: 已覆盖）
 

@@ -41,3 +41,23 @@ class TrainerConfig:
     accelerator: str = "auto"  # auto / gpu / cpu
     devices: Union[int, str] = "auto"
     precision: str = "32-true"  # 32-true / 16-mixed / bf16-mixed
+
+    # 训练控制
+    min_epochs: int = 1
+    fast_dev_run: bool = False
+    overfit_batches: float = 0.0
+
+    # 验证
+    val_check_interval: float = 1.0
+    check_val_every_n_epoch: int = 1
+
+    # 性能
+    deterministic: bool = False
+    benchmark: bool = True
+    gradient_clip_algorithm: str = "norm"
+
+    # 日志
+    log_every_n_steps: int = 10
+    enable_checkpointing: bool = True
+    enable_progress_bar: bool = True
+    enable_model_summary: bool = True

@@ -125,7 +125,9 @@ class NodeType(Enum):
 class EdgeType(Enum):
     """边类型枚举"""
 
-    DATA = auto()  # 数据流
+    DATA = auto()  # 通用数据流
+    DATA_TRUE = auto()  # MUX 真分支数据流（B 端口，S=1 时选择）
+    DATA_FALSE = auto()  # MUX 假分支数据流（A 端口，S=0 时选择）
     CONTROL = auto()  # 控制流
     CLOCK = auto()  # 时钟
     RESET = auto()  # 复位

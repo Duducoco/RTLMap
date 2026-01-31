@@ -2,8 +2,19 @@
 """双图神经网络模型"""
 
 from .data_types import ModelConfig, ModelOutput
-from .encoder import InteractiveDualEncoder, GNNLayer
-from .interaction import CrossGraphInteraction, CrossGraphAttention
+from .encoder import (
+    FiLMDualEncoder,
+    GNNLayer,
+    ControlGatedGNNLayer,
+    EDGE_TYPE_DATA,
+    EDGE_TYPE_DATA_TRUE,
+    EDGE_TYPE_DATA_FALSE,
+    EDGE_TYPE_CONTROL,
+    EDGE_TYPE_CLOCK,
+    EDGE_TYPE_RESET,
+    EDGE_TYPE_ENABLE,
+)
+from .interaction import FiLMInjection
 from .model import (
     DualGraphFusionModel,
     create_model,
@@ -14,10 +25,17 @@ from .model import (
 __all__ = [
     "ModelConfig",
     "ModelOutput",
-    "InteractiveDualEncoder",
+    "FiLMDualEncoder",
     "GNNLayer",
-    "CrossGraphInteraction",
-    "CrossGraphAttention",
+    "ControlGatedGNNLayer",
+    "EDGE_TYPE_DATA",
+    "EDGE_TYPE_DATA_TRUE",
+    "EDGE_TYPE_DATA_FALSE",
+    "EDGE_TYPE_CONTROL",
+    "EDGE_TYPE_CLOCK",
+    "EDGE_TYPE_RESET",
+    "EDGE_TYPE_ENABLE",
+    "FiLMInjection",
     "DualGraphFusionModel",
     "create_model",
     "create_small_model",

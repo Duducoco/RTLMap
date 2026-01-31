@@ -111,8 +111,8 @@ class CellClassifier:
             return NodeType.COMBINATIONAL
 
     @classmethod
-    def get_edge_type(cls, port_name: str) -> EdgeType:
-        """根据端口名判断边类型"""
+    def get_edge_type(cls, port_name: str, cell_type: str = "") -> EdgeType:
+        """根据端口名和 cell 类型判断边类型"""
         if port_name in cls.CLOCK_PORTS:
             return EdgeType.CLOCK
         elif port_name in cls.RESET_PORTS:
@@ -121,8 +121,13 @@ class CellClassifier:
             return EdgeType.ENABLE
         elif port_name in cls.CONTROL_PORTS:
             return EdgeType.CONTROL
-        else:
-            return EdgeType.DATA
+        # MUX 数据端口特殊处理
+        elif cell_type in cls.CONTROL_CELLS:
+            if port_name == "A":
+                return EdgeType.DATA_FALSE
+            elif port_name == "B":
+                return EdgeType.DATA_TRUE
+        return EdgeType.DATA
 
     @classmethod
     def is_output_port(cls, cell_type: str, port_name: str) -> bool:

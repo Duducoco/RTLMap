@@ -204,7 +204,7 @@ class CDFGExtractor:
                     continue  # 输出端口不需要找驱动
 
                 # 对于输入端口，找到驱动源
-                edge_type = self.classifier.get_edge_type(port_name)
+                edge_type = self.classifier.get_edge_type(port_name, cell_type)
 
                 # 按连续的驱动源分组
                 source_groups = self._group_bits_by_driver(bits, cdfg, const_nodes)

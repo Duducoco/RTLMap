@@ -31,16 +31,16 @@ class DualGraphLightningModule(L.LightningModule):
         # 手动保存 ModelConfig 的字段到 hparams
         self.hparams.update(
             {
-                "rtl_node_dim": model_config.rtl_node_dim,
-                "asm_node_dim": model_config.asm_node_dim,
                 "hidden_dim": model_config.hidden_dim,
                 "num_gnn_layers": model_config.num_gnn_layers,
-                "num_heads": model_config.num_heads,
                 "dropout": model_config.dropout,
                 "num_edge_classes": model_config.num_edge_classes,
                 "num_graph_targets": model_config.num_graph_targets,
+                "num_cell_types": model_config.num_cell_types,
                 "num_edge_types": model_config.num_edge_types,
-                "encoder_type": model_config.encoder_type,
+                "num_asm_node_types": model_config.num_asm_node_types,
+                "num_asm_edge_types": model_config.num_asm_edge_types,
+                "asm_instruction_dim": model_config.asm_instruction_dim,
             }
         )
 
@@ -136,10 +136,41 @@ class DualGraphLightningModule(L.LightningModule):
 
         # 图回归指标
         if data.y is not None and output.graph_pred is not None:
-            mse = F.mse_loss(output.graph_pred, data.y)
-            mae = F.l1_loss(output.graph_pred, data.y)
+            pred = output.graph_pred
+            target = data.y
+
+            # MSE、RMSE 和 MAE
+            mse = F.mse_loss(pred, target)
+            rmse = mse.sqrt()
+            mae = F.l1_loss(pred, target)
+
             metrics[f"{stage}/graph_mse"] = mse
+            metrics[f"{stage}/graph_rmse"] = rmse
             metrics[f"{stage}/graph_mae"] = mae
+
+            # MAPE (Mean Absolute Percentage Error)
+            # 避免除零：仅对 target != 0 的样本计算
+            non_zero_mask = target.abs() > 1e-8
+            if non_zero_mask.any():
+                mape = (
+                    (pred[non_zero_mask] - target[non_zero_mask]).abs()
+                    / target[non_zero_mask].abs()
+                ).mean() * 100  # 百分比形式
+                metrics[f"{stage}/graph_mape"] = mape
+
+            # Pearson 相关系数 R
+            if pred.numel() > 1:
+                pred_flat = pred.view(-1)
+                target_flat = target.view(-1)
+                pred_mean = pred_flat.mean()
+                target_mean = target_flat.mean()
+                pred_centered = pred_flat - pred_mean
+                target_centered = target_flat - target_mean
+                cov = (pred_centered * target_centered).sum()
+                pred_std = pred_centered.pow(2).sum().sqrt()
+                target_std = target_centered.pow(2).sum().sqrt()
+                r = cov / (pred_std * target_std + 1e-8)
+                metrics[f"{stage}/graph_r"] = r
 
         return metrics
 

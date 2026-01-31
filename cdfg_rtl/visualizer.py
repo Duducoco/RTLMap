@@ -79,6 +79,8 @@ class CDFGVisualizer:
     # 边样式配置
     EDGE_STYLES = {
         EdgeType.DATA: {"color": "black", "style": "solid"},
+        EdgeType.DATA_TRUE: {"color": "darkgreen", "style": "solid"},
+        EdgeType.DATA_FALSE: {"color": "darkred", "style": "solid"},
         EdgeType.CONTROL: {"color": "red", "style": "dashed"},
         EdgeType.CLOCK: {"color": "blue", "style": "dotted"},
         EdgeType.RESET: {"color": "orange", "style": "dashed"},

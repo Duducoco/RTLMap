@@ -52,7 +52,11 @@ class CDFGAnalyzer:
             visited.add(current)
 
             for edge in self.cdfg.edges:
-                if edge.source == current and edge.edge_type == EdgeType.DATA:
+                if edge.source == current and edge.edge_type in (
+                    EdgeType.DATA,
+                    EdgeType.DATA_TRUE,
+                    EdgeType.DATA_FALSE,
+                ):
                     path.append(edge.target)
                     dfs(edge.target, path)
                     path.pop()

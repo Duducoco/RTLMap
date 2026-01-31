@@ -16,7 +16,6 @@ class ModelConfig:
     # 隐藏层和输出维度
     hidden_dim: int = 256
     num_gnn_layers: int = 4
-    num_heads: int = 4
     dropout: float = 0.1
 
     # 任务配置
@@ -25,15 +24,12 @@ class ModelConfig:
 
     # RTL 特征配置
     num_cell_types: int = NUM_CELL_TYPES  # cell_type 词汇表大小 (74)
-    num_edge_types: int = 5  # DATA, CONTROL, CLOCK, RESET, ENABLE
+    num_edge_types: int = 7  # DATA, DATA_TRUE, DATA_FALSE, CONTROL, CLOCK, RESET, ENABLE
 
     # ASM 特征配置
     num_asm_node_types: int = 22  # AsmNodeType 枚举数量
     num_asm_edge_types: int = 10  # AsmEdgeType 枚举数量
     asm_instruction_dim: int = 256  # ASM 指令编码维度（由外部模型生成）
-
-    def __post_init__(self):
-        assert self.hidden_dim % self.num_heads == 0
 
 
 @dataclass

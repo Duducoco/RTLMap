@@ -7,12 +7,14 @@ PyTorch Lightning 训练模块
 - TrainerConfig: 训练配置
 - CallbackFactory: Callback 工厂类
 - train_model: 便捷训练函数
+- LightningTrainer: 训练器包装类
 """
 
 from .config import TrainerConfig
-from .module import DualGraphLightningModule
+from .lightning_module import DualGraphLightningModule
 from .callbacks import CallbackFactory
 from .utils import train_model
+from .lightning_trainer import LightningTrainer
 
 __all__ = [
     # 配置
@@ -23,4 +25,6 @@ __all__ = [
     "CallbackFactory",
     # 工具
     "train_model",
+    # 训练器
+    "LightningTrainer",
 ]

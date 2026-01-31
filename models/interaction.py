@@ -1,132 +1,82 @@
 #!/usr/bin/env python3
 """
-跨图交互模块 (简化版)
+FiLM 注入模块
 
-基于论文最佳实践优化：
-- Pre-LN 结构 (Xiong et al., 2020)
-- 简化门控 (GRU-style)
-- 共享 K/V 投影减少参数
+实现双向特征注入：
+- ASM → RTL：测试激励驱动硬件
+- RTL → ASM：硬件状态反馈给激励
+
+基于 FiLM (Feature-wise Linear Modulation) 方法：
+- Perez et al., "FiLM: Visual Reasoning with a General Conditioning Layer" (AAAI 2018)
 """
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Optional, Tuple
 
 
-class CrossGraphAttention(nn.Module):
+class FiLMInjection(nn.Module):
     """
-    简化的跨图注意力
+    FiLM (Feature-wise Linear Modulation) 注入模块
 
-    优化点：
-    1. 共享 K/V 投影（RTL 和 ASM 使用同一套）
-    2. 简化门控：单层线性 + sigmoid
-    3. Pre-LN 结构
+    将上下文特征注入到目标节点特征：
+    h' = (1 + γ) ⊙ h + β
+
+    其中 γ, β 由上下文生成。
+
+    设计特点：
+    - 使用 (1 + γ) 而非 γ，确保初始时接近恒等映射
+    - γ 通过 Tanh 限制范围在 [-1, 1]，稳定训练
+    - 小随机初始化确保梯度非零，同时保持初始时接近恒等映射
     """
 
-    def __init__(self, hidden_dim: int, num_heads: int = 4, dropout: float = 0.1):
+    def __init__(self, hidden_dim: int, init_std: float = 0.02):
+        """
+        Args:
+            hidden_dim: 隐藏层维度
+            init_std: 初始化标准差（默认 0.02，足够小以接近恒等映射）
+        """
         super().__init__()
-        self.num_heads = num_heads
-        self.head_dim = hidden_dim // num_heads
-        self.scale = self.head_dim**-0.5
 
-        # 共享的 Q/K/V 投影
-        self.q_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.k_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.v_proj = nn.Linear(hidden_dim, hidden_dim)
-        self.out_proj = nn.Linear(hidden_dim, hidden_dim)
+        # γ 生成器（缩放因子）
+        self.gamma_gen = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),  # 限制范围在 [-1, 1]，稳定训练
+        )
 
-        # 简化门控：学习标量缩放
-        self.gate = nn.Sequential(nn.Linear(hidden_dim * 2, 1), nn.Sigmoid())
+        # β 生成器（偏移量）
+        self.beta_gen = nn.Linear(hidden_dim, hidden_dim)
 
-        self.norm = nn.LayerNorm(hidden_dim)
-        self.dropout = nn.Dropout(dropout)
+        # 小随机初始化：确保梯度非零，同时 γ ≈ 0, β ≈ 0
+        nn.init.normal_(self.gamma_gen[0].weight, std=init_std)
+        nn.init.zeros_(self.gamma_gen[0].bias)
+        nn.init.normal_(self.beta_gen.weight, std=init_std)
+        nn.init.zeros_(self.beta_gen.bias)
 
     def forward(
         self,
-        query: torch.Tensor,
-        key_value: torch.Tensor,
-        kv_mask: Optional[torch.Tensor] = None,
+        target_h: torch.Tensor,
+        context: torch.Tensor,
+        target_batch: torch.Tensor,
     ) -> torch.Tensor:
         """
+        FiLM 调制
+
         Args:
-            query: [B, N_q, D]
-            key_value: [B, N_k, D]
-            kv_mask: [B, N_k] True=有效
+            target_h: [N, D] 目标节点特征
+            context: [B, D] 上下文向量（global_mean_pool 后）
+            target_batch: [N] 目标节点的 batch 索引
 
         Returns:
-            [B, N_q, D] 更新后的 query
+            [N, D] 调制后的目标节点特征
         """
-        B, N_q, D = query.shape
-        N_k = key_value.shape[1]
+        # 生成调制参数
+        gamma = self.gamma_gen(context)  # [B, D]
+        beta = self.beta_gen(context)  # [B, D]
 
-        # Pre-LN
-        q_normed = self.norm(query)
+        # 广播到每个目标节点
+        gamma_expanded = gamma[target_batch]  # [N, D]
+        beta_expanded = beta[target_batch]  # [N, D]
 
-        # QKV 投影
-        Q = (
-            self.q_proj(q_normed)
-            .view(B, N_q, self.num_heads, self.head_dim)
-            .transpose(1, 2)
-        )
-        K = (
-            self.k_proj(key_value)
-            .view(B, N_k, self.num_heads, self.head_dim)
-            .transpose(1, 2)
-        )
-        V = (
-            self.v_proj(key_value)
-            .view(B, N_k, self.num_heads, self.head_dim)
-            .transpose(1, 2)
-        )
-
-        # 注意力
-        attn = torch.matmul(Q, K.transpose(-2, -1)) * self.scale
-        if kv_mask is not None:
-            attn = attn.masked_fill(~kv_mask[:, None, None, :], float("-inf"))
-        attn = F.softmax(attn, dim=-1)
-        attn = self.dropout(attn)
-
-        # 聚合
-        out = torch.matmul(attn, V)
-        out = out.transpose(1, 2).contiguous().view(B, N_q, D)
-        out = self.out_proj(out)
-
-        # 门控残差
-        gate_val = self.gate(torch.cat([query, out], dim=-1))  # [B, N_q, 1]
-        return query + gate_val * self.dropout(out)
-
-
-class CrossGraphInteraction(nn.Module):
-    """
-    双向跨图交互
-
-    RTL ← ASM 和 ASM ← RTL 同时进行
-    """
-
-    def __init__(self, hidden_dim: int, num_heads: int = 4, dropout: float = 0.1):
-        super().__init__()
-        # 双向注意力（共享参数以减少过拟合）
-        self.attn = CrossGraphAttention(hidden_dim, num_heads, dropout)
-
-    def forward(
-        self,
-        rtl: torch.Tensor,
-        asm: torch.Tensor,
-        rtl_mask: Optional[torch.Tensor] = None,
-        asm_mask: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Args:
-            rtl: [B, N1, D]
-            asm: [B, N2, D]
-
-        Returns:
-            rtl_updated, asm_updated
-        """
-        # RTL 从 ASM 聚合信息
-        rtl_updated = self.attn(rtl, asm, asm_mask)
-        # ASM 从 RTL 聚合信息
-        asm_updated = self.attn(asm, rtl, rtl_mask)
-
-        return rtl_updated, asm_updated
+        # FiLM 调制: h' = (1 + γ) ⊙ h + β
+        # 使用 (1 + γ) 确保初始时接近恒等映射
+        return (1 + gamma_expanded) * target_h + beta_expanded

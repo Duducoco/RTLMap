@@ -3,7 +3,7 @@
 双图融合模型
 
 设计理念：
-- ASM CDFG 作为上下文信息，在编码阶段通过跨图交互增强 RTL 表示
+- ASM 和 RTL 通过双向 FiLM 注入相互增强（ASM ↔ RTL）
 - 边分类和图回归均只使用 RTL CDFG 的特征
 - RTL 节点特征：node_cell_type + node_width
 - RTL 边特征：edge_type + edge_width
@@ -19,7 +19,7 @@ from typing import Dict, Optional
 
 from datasets import DualGraphData
 from .data_types import ModelConfig, ModelOutput
-from .encoder import InteractiveDualEncoder, RTLEdgeFeatureEncoder
+from .encoder import FiLMDualEncoder, RTLEdgeFeatureEncoder
 
 
 class EdgeClassifier(nn.Module):
@@ -111,21 +111,20 @@ class DualGraphFusionModel(nn.Module):
     双图融合模型
 
     架构设计：
-    - 编码阶段：RTL 和 ASM 通过跨图交互相互增强
+    - 编码阶段：ASM 和 RTL 通过双向 FiLM 注入相互增强（ASM ↔ RTL）
     - 预测阶段：仅使用 RTL CDFG 进行边分类和图回归
-    - ASM CDFG 作为上下文，帮助模型理解"测试激励如何影响硬件"
+    - ASM CDFG 作为上下文，模拟"测试激励驱动硬件"
     """
 
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
 
-        # 双图编码器
-        self.encoder = InteractiveDualEncoder(
+        # 双图编码器（FiLM 注入）
+        self.encoder = FiLMDualEncoder(
             hidden_dim=config.hidden_dim,
             output_dim=config.hidden_dim,
             num_layers=config.num_gnn_layers,
-            num_heads=config.num_heads,
             dropout=config.dropout,
             num_edge_types=config.num_edge_types,
             num_cell_types=config.num_cell_types,
@@ -159,8 +158,8 @@ class DualGraphFusionModel(nn.Module):
         Returns:
             ModelOutput: 边分类 logits 和图级预测（均基于 RTL）
         """
-        # 编码阶段
-        rtl_node, rtl_graph, asm_node, _ = self.encoder(
+        # 编码阶段（双向 FiLM 注入：ASM ↔ RTL）
+        rtl_node, rtl_edge_attr, rtl_graph, asm_node, _ = self.encoder(
             # RTL 图
             rtl_edge_index=data.edge_index,
             rtl_node_cell_type=data.node_cell_type,
@@ -259,13 +258,13 @@ def create_model(
 
 def create_small_model(**kwargs) -> DualGraphFusionModel:
     """创建小型模型（调试用）"""
-    defaults = {"hidden_dim": 128, "num_gnn_layers": 2, "num_heads": 4}
+    defaults = {"hidden_dim": 128, "num_gnn_layers": 2}
     defaults.update(kwargs)
     return create_model(**defaults)
 
 
 def create_base_model(**kwargs) -> DualGraphFusionModel:
     """创建基础模型"""
-    defaults = {"hidden_dim": 256, "num_gnn_layers": 4, "num_heads": 4}
+    defaults = {"hidden_dim": 256, "num_gnn_layers": 4}
     defaults.update(kwargs)
     return create_model(**defaults)

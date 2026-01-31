@@ -85,6 +85,7 @@ class CallbackFactory:
         has_validation: bool = True,
         extra_callbacks: Optional[List[Callback]] = None,
         use_rich_progress: bool = True,
+        enable_progress_bar: Optional[bool] = None,
     ) -> List[Callback]:
         """
         创建默认 callback 列表
@@ -95,16 +96,22 @@ class CallbackFactory:
             has_validation: 是否有验证数据
             extra_callbacks: 额外的自定义 callbacks
             use_rich_progress: 是否使用 RichProgressBar
+            enable_progress_bar: 是否启用进度条（None 时从 config 读取）
 
         Returns:
             callback 列表
         """
         callbacks = [cls.create_lr_monitor()]
 
-        # 添加进度条（如果可用）
-        progress_bar = cls.create_progress_bar(use_rich_progress)
-        if progress_bar is not None:
-            callbacks.append(progress_bar)
+        # 确定是否启用进度条
+        if enable_progress_bar is None:
+            enable_progress_bar = config.enable_progress_bar
+
+        # 添加进度条（如果启用且可用）
+        if enable_progress_bar:
+            progress_bar = cls.create_progress_bar(use_rich_progress)
+            if progress_bar is not None:
+                callbacks.append(progress_bar)
 
         if has_validation:
             callbacks.append(cls.create_checkpoint(config, experiment_name))

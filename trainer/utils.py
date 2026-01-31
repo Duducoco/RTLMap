@@ -4,13 +4,12 @@
 from typing import List, Optional, Tuple
 import lightning as L
 from lightning.pytorch.callbacks import Callback
-from lightning.pytorch.loggers import TensorBoardLogger, CSVLogger
 
 from datasets import DualGraphData, DualGraphDataModule
 from models.data_types import ModelConfig
 from .config import TrainerConfig
-from .module import DualGraphLightningModule
-from .callbacks import CallbackFactory
+from .lightning_module import DualGraphLightningModule
+from .lightning_trainer import LightningTrainer
 
 
 def train_model(
@@ -63,41 +62,20 @@ def train_model(
         num_workers=trainer_config.num_workers,
     )
 
-    # 创建 Logger
-    if logger_type == "tensorboard":
-        logger = TensorBoardLogger(
-            save_dir=trainer_config.checkpoint_dir, name=experiment_name
-        )
-    else:
-        logger = CSVLogger(save_dir=trainer_config.checkpoint_dir, name=experiment_name)
-
-    # 创建 Callbacks
-    callbacks = CallbackFactory.create_default_callbacks(
+    # 使用 LightningTrainer
+    lightning_trainer = LightningTrainer(
         config=trainer_config,
         experiment_name=experiment_name,
-        has_validation=val_data is not None,
+        logger_type=logger_type,
         extra_callbacks=extra_callbacks,
-    )
-
-    # 创建 Trainer
-    trainer = L.Trainer(
-        max_epochs=trainer_config.max_epochs,
-        accelerator=trainer_config.accelerator,
-        devices=trainer_config.devices,
-        precision=trainer_config.precision,
-        gradient_clip_val=trainer_config.gradient_clip_val,
-        accumulate_grad_batches=trainer_config.accumulate_grad_batches,
-        logger=logger,
-        callbacks=callbacks,
-        enable_progress_bar=True,
-        log_every_n_steps=10,
+        has_validation=val_data is not None,
     )
 
     # 训练
-    trainer.fit(module, datamodule)
+    lightning_trainer.fit(module, datamodule)
 
     # 测试（如果有测试数据）
     if test_data:
-        trainer.test(module, datamodule)
+        lightning_trainer.test(module, datamodule)
 
-    return module, trainer
+    return module, lightning_trainer.trainer
