@@ -111,16 +111,20 @@ class DualGraphFusionModel(nn.Module):
     双图融合模型
 
     架构设计：
-    - 编码阶段：ASM 和 RTL 通过双向 FiLM 注入相互增强（ASM ↔ RTL）
+    - 编码阶段：ASM 和 RTL 通过双向融合相互增强（ASM ↔ RTL）
     - 预测阶段：仅使用 RTL CDFG 进行边分类和图回归
     - ASM CDFG 作为上下文，模拟"测试激励驱动硬件"
+
+    支持两种融合模式：
+    - film: 标准 FiLM 注入（全局池化上下文）
+    - ssm_film: SSM 增强的 FiLM（状态空间动态上下文）
     """
 
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
 
-        # 双图编码器（FiLM 注入）
+        # 双图编码器（支持 FiLM 或 SSM-FiLM 融合）
         self.encoder = FiLMDualEncoder(
             hidden_dim=config.hidden_dim,
             output_dim=config.hidden_dim,
@@ -131,6 +135,10 @@ class DualGraphFusionModel(nn.Module):
             num_asm_node_types=config.num_asm_node_types,
             num_asm_edge_types=config.num_asm_edge_types,
             asm_instruction_dim=config.asm_instruction_dim,
+            # 融合配置
+            fusion_type=config.fusion_type,
+            ssm_d_state=config.ssm_d_state,
+            ssm_pool_mode=config.ssm_pool_mode,
         )
 
         # 边分类器（仅 RTL）

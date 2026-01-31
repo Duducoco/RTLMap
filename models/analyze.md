@@ -649,6 +649,352 @@ rtl_h_fused = TokenToGraph(fused_tokens[T_asm+2:])
 
 ---
 
+# SSM-FiLM 融合方案详细设计
+
+## 设计约束
+
+- **保持不变**：`GNNLayer`、`ControlGatedGNNLayer` 消息传递逻辑
+- **仅修改**：特征融合模块（当前为 `FiLMInjection`）
+- **目标**：用 SSM 的选择性状态空间机制增强 FiLM 的条件注入
+
+---
+
+## 核心思想
+
+将 Mamba 的**选择性状态空间机制**应用于跨图特征融合，而非图内消息传递。
+
+**当前 FiLM 融合**：
+```
+context = global_mean_pool(asm_h)  # [B, D] 静态上下文
+rtl_h' = (1 + γ(context)) ⊙ rtl_h + β(context)  # 全局调制
+```
+
+**SSM-FiLM 融合**：
+```
+# 1. 将 ASM 节点序列化（按拓扑序或 BFS）
+asm_seq = topological_sort(asm_h)  # [B, T_asm, D]
+
+# 2. SSM 处理：学习"执行状态"的演化
+state = SSM(asm_seq)  # [B, T_asm, D] 每个位置的状态
+
+# 3. 选择性聚合：根据 RTL 节点选择相关状态
+context = SelectivePool(state, rtl_h)  # [B, D] 或 [N_rtl, D]
+
+# 4. FiLM 注入
+rtl_h' = (1 + γ(context)) ⊙ rtl_h + β(context)
+```
+
+---
+
+## 架构设计
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ SSMFiLMInjection (替代 FiLMInjection)                       │
+│                                                             │
+│   ASM 节点特征 [N_asm, D]                                   │
+│         │                                                   │
+│         ▼ (按 batch 分组 + 拓扑排序)                        │
+│   ASM 序列 [B, T_max, D] (padding)                          │
+│         │                                                   │
+│         ▼ (Mamba Block)                                     │
+│   ┌─────────────────────────────────────────┐              │
+│   │ x → Linear → Conv1d → SSM → Linear → x' │              │
+│   │              ↑                           │              │
+│   │         Δ, B, C (选择性参数)             │              │
+│   └─────────────────────────────────────────┘              │
+│         │                                                   │
+│         ▼ (选择性聚合)                                      │
+│   Context [B, D] 或 [N_rtl, D]                              │
+│         │                                                   │
+│         ▼ (FiLM 注入)                                       │
+│   RTL 节点特征' = (1 + γ) ⊙ RTL + β                        │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## SSM 核心公式
+
+Mamba 的选择性状态空间模型：
+
+```
+# 离散化状态空间
+h_t = Ā · h_{t-1} + B̄ · x_t    # 状态更新
+y_t = C · h_t                   # 输出
+
+其中：
+- Ā = exp(Δ · A)               # 离散化状态矩阵
+- B̄ = (Δ · A)^{-1} · (Ā - I) · Δ · B
+- Δ, B, C 是输入依赖的（选择性）
+```
+
+**选择性机制的语义**：
+- **Δ（步长）**：控制"记忆"多少历史信息
+- **B（输入门）**：控制当前输入的影响
+- **C（输出门）**：控制输出哪些状态信息
+
+---
+
+## 选择性聚合策略
+
+三种聚合方式（可配置）：
+
+### 1. 全局聚合（简单）
+
+```python
+context = state[:, -1, :]  # 取最后状态 [B, D]
+# 或
+context = state.mean(dim=1)  # 平均池化 [B, D]
+```
+
+### 2. 注意力聚合（中等）
+
+```python
+# RTL 图级特征作为 query
+rtl_query = global_mean_pool(rtl_h, rtl_batch)  # [B, D]
+attn = softmax(rtl_query @ state.transpose(-1, -2))  # [B, 1, T]
+context = (attn @ state).squeeze(1)  # [B, D]
+```
+
+### 3. 节点级聚合（精细）
+
+```python
+# 每个 RTL 节点独立查询
+attn = softmax(rtl_h @ state[rtl_batch].transpose(-1, -2))  # [N_rtl, 1, T]
+context = (attn @ state[rtl_batch]).squeeze(1)  # [N_rtl, D]
+```
+
+---
+
+## 简化版 SSM 实现
+
+无需 CUDA 内核的纯 PyTorch 实现：
+
+```python
+class SimpleSSM(nn.Module):
+    """简化版选择性状态空间模型"""
+
+    def __init__(self, d_model: int, d_state: int = 16):
+        super().__init__()
+        self.d_state = d_state
+
+        # 状态空间参数（可学习）
+        self.A = nn.Parameter(torch.randn(d_model, d_state))
+
+        # 选择性参数生成器（输入依赖）
+        self.delta_proj = nn.Linear(d_model, d_model)
+        self.B_proj = nn.Linear(d_model, d_state)
+        self.C_proj = nn.Linear(d_model, d_state)
+
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Args:
+            x: [B, T, D] 输入序列
+        Returns:
+            y: [B, T, D] 输出序列
+        """
+        B, T, D = x.shape
+
+        # 选择性参数（输入依赖）
+        delta = F.softplus(self.delta_proj(x))  # [B, T, D]
+        B_t = self.B_proj(x)  # [B, T, d_state]
+        C_t = self.C_proj(x)  # [B, T, d_state]
+
+        # 离散化
+        A_bar = torch.exp(delta.unsqueeze(-1) * self.A)  # [B, T, D, d_state]
+
+        # 状态递推
+        h = x.new_zeros(B, D, self.d_state)
+        outputs = []
+        for t in range(T):
+            h = A_bar[:, t] * h + delta[:, t, :, None] * B_t[:, t, None, :]
+            y_t = (h * C_t[:, t, None, :]).sum(-1)  # [B, D]
+            outputs.append(y_t)
+
+        return torch.stack(outputs, dim=1)  # [B, T, D]
+```
+
+---
+
+## SSMFiLMInjection 完整实现
+
+```python
+class SSMFiLMInjection(nn.Module):
+    """
+    SSM 增强的 FiLM 注入模块
+
+    用 SSM 处理源图节点序列，生成动态上下文，然后进行 FiLM 注入
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        d_state: int = 16,
+        pool_mode: str = "last",  # "last", "mean", "attention"
+        init_std: float = 0.02,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.pool_mode = pool_mode
+
+        # SSM 模块
+        self.ssm = SimpleSSM(hidden_dim, d_state)
+
+        # 注意力聚合（可选）
+        if pool_mode == "attention":
+            self.query_proj = nn.Linear(hidden_dim, hidden_dim)
+            self.key_proj = nn.Linear(hidden_dim, hidden_dim)
+
+        # FiLM 参数生成器
+        self.gamma_gen = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+        )
+        self.beta_gen = nn.Linear(hidden_dim, hidden_dim)
+
+        # 小随机初始化
+        nn.init.normal_(self.gamma_gen[0].weight, std=init_std)
+        nn.init.zeros_(self.gamma_gen[0].bias)
+        nn.init.normal_(self.beta_gen.weight, std=init_std)
+        nn.init.zeros_(self.beta_gen.bias)
+
+    def forward(
+        self,
+        target_h: Tensor,          # [N_tgt, D] 目标节点特征
+        source_h: Tensor,          # [N_src, D] 源节点特征
+        target_batch: Tensor,      # [N_tgt] 目标 batch 索引
+        source_batch: Tensor,      # [N_src] 源 batch 索引
+    ) -> Tensor:
+        """
+        Args:
+            target_h: 目标图节点特征（如 RTL）
+            source_h: 源图节点特征（如 ASM）
+            target_batch: 目标节点的 batch 索引
+            source_batch: 源节点的 batch 索引
+
+        Returns:
+            调制后的目标节点特征
+        """
+        # 1. 将源节点按 batch 分组并 padding 成序列
+        source_seq, seq_mask = self._batch_to_sequence(source_h, source_batch)
+        # source_seq: [B, T_max, D], seq_mask: [B, T_max]
+
+        # 2. SSM 处理
+        ssm_out = self.ssm(source_seq)  # [B, T_max, D]
+
+        # 3. 选择性聚合
+        if self.pool_mode == "last":
+            # 取每个序列的最后一个有效位置
+            lengths = seq_mask.sum(dim=1).long() - 1  # [B]
+            context = ssm_out[torch.arange(ssm_out.size(0)), lengths]  # [B, D]
+        elif self.pool_mode == "mean":
+            # 平均池化（mask 掉 padding）
+            ssm_out = ssm_out * seq_mask.unsqueeze(-1)
+            context = ssm_out.sum(dim=1) / seq_mask.sum(dim=1, keepdim=True)  # [B, D]
+        elif self.pool_mode == "attention":
+            # 注意力聚合
+            target_graph = global_mean_pool(target_h, target_batch)  # [B, D]
+            query = self.query_proj(target_graph).unsqueeze(1)  # [B, 1, D]
+            key = self.key_proj(ssm_out)  # [B, T, D]
+            attn = torch.bmm(query, key.transpose(1, 2)) / (self.hidden_dim ** 0.5)
+            attn = attn.masked_fill(~seq_mask.unsqueeze(1), float('-inf'))
+            attn = F.softmax(attn, dim=-1)  # [B, 1, T]
+            context = torch.bmm(attn, ssm_out).squeeze(1)  # [B, D]
+
+        # 4. FiLM 注入
+        context_expanded = context[target_batch]  # [N_tgt, D]
+        gamma = self.gamma_gen(context_expanded)
+        beta = self.beta_gen(context_expanded)
+
+        return (1 + gamma) * target_h + beta
+
+    def _batch_to_sequence(
+        self, h: Tensor, batch: Tensor
+    ) -> Tuple[Tensor, Tensor]:
+        """将 batch 格式转换为 padding 序列格式"""
+        device = h.device
+        batch_size = batch.max().item() + 1
+
+        # 计算每个 batch 的节点数
+        counts = torch.bincount(batch, minlength=batch_size)
+        max_len = counts.max().item()
+
+        # 初始化
+        seq = h.new_zeros(batch_size, max_len, h.size(-1))
+        mask = h.new_zeros(batch_size, max_len, dtype=torch.bool)
+
+        # 填充
+        for b in range(batch_size):
+            idx = (batch == b).nonzero(as_tuple=True)[0]
+            length = len(idx)
+            seq[b, :length] = h[idx]
+            mask[b, :length] = True
+
+        return seq, mask
+```
+
+---
+
+## 与当前架构的集成
+
+```python
+class FiLMDualEncoder(nn.Module):
+    def __init__(
+        self,
+        ...,
+        fusion_type: str = "film",  # "film" 或 "ssm_film"
+        ssm_pool_mode: str = "last",
+    ):
+        ...
+        # 根据配置选择融合模块
+        if fusion_type == "film":
+            self.film_asm2rtl = nn.ModuleList(
+                [FiLMInjection(hidden_dim) for _ in range(num_layers)]
+            )
+            self.film_rtl2asm = nn.ModuleList(
+                [FiLMInjection(hidden_dim) for _ in range(num_layers)]
+            )
+        elif fusion_type == "ssm_film":
+            self.film_asm2rtl = nn.ModuleList(
+                [SSMFiLMInjection(hidden_dim, pool_mode=ssm_pool_mode)
+                 for _ in range(num_layers)]
+            )
+            self.film_rtl2asm = nn.ModuleList(
+                [SSMFiLMInjection(hidden_dim, pool_mode=ssm_pool_mode)
+                 for _ in range(num_layers)]
+            )
+```
+
+---
+
+## 语义解释
+
+**为什么 SSM 适合 ASM → RTL 融合？**
+
+| 特性 | 语义解释 |
+|------|----------|
+| **状态递推** | 模拟"指令逐条执行"的状态变化 |
+| **选择性 Δ** | 学习"哪些指令对当前 RTL 节点重要" |
+| **长程依赖** | 捕获复杂测试激励中的远距离依赖 |
+| **线性复杂度** | O(T) 替代注意力的 O(T²) |
+
+---
+
+## FiLM vs SSM-FiLM 对比
+
+| 特性 | FiLM | SSM-FiLM |
+|------|------|----------|
+| 上下文 | 静态（全局池化） | 动态（状态演化） |
+| 复杂度 | O(N) | O(N + T) |
+| 长程依赖 | 弱（单次池化） | 强（状态递推） |
+| 选择性 | 无 | 有（输入依赖参数） |
+| 实现难度 | 低 | 中 |
+| 参数量 | 2D² | 2D² + 3D×d_state |
+
+---
+
 ## 2024+ 参考文献
 
 - **Graph Mamba**: Wang et al., "Graph Mamba: Towards Learning on Graphs with State Space Models" (2024)

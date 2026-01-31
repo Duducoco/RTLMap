@@ -665,3 +665,191 @@ class RTLGraphRegressor(nn.Module):
 1. 添加 `edge_batch` 索引支持边级池化
 2. 使用**边特征为主导**的双池化读出
 3. 对于覆盖率预测，边池化的物理意义更直接
+
+## 10. 双图融合机制：ASM ↔ RTL 特征交互
+
+本节描述 ASM（汇编测试激励）和 RTL（硬件设计）双图之间的特征融合机制，用于模拟"测试激励在硬件上执行"的过程。
+
+### 10.1 设计理念
+
+**核心思想**：
+- **编码阶段**：ASM 和 RTL 通过双向融合相互增强（ASM ↔ RTL）
+- **预测阶段**：仅使用 RTL CDFG 进行边分类和图回归
+- ASM CDFG 作为上下文信息，模拟"测试激励驱动硬件"
+
+**信息流**：
+```
+ASM 图 ──────────────────────────────────────> ASM 特征
+    │                                              │
+    │ (RTL→ASM FiLM)                              │ (ASM→RTL FiLM)
+    ↓                                              ↓
+RTL 图 ──────────────────────────────────────> RTL 特征 ──> 边分类/图回归
+```
+
+### 10.2 FiLM 注入的数学形式
+
+FiLM (Feature-wise Linear Modulation) 是一种条件化方法，通过上下文向量调制目标特征：
+
+$$\mathbf{h}'_i = (1 + \boldsymbol{\gamma}) \odot \mathbf{h}_i + \boldsymbol{\beta}$$
+
+其中调制参数由上下文生成：
+
+$$\boldsymbol{\gamma} = \tanh(\mathbf{W}_\gamma \cdot \mathbf{c})$$
+$$\boldsymbol{\beta} = \mathbf{W}_\beta \cdot \mathbf{c}$$
+
+**符号说明**：
+- $\mathbf{h}_i \in \mathbb{R}^d$：目标节点 $i$ 的特征
+- $\mathbf{c} \in \mathbb{R}^d$：上下文向量（源图的全局池化）
+- $\boldsymbol{\gamma}, \boldsymbol{\beta} \in \mathbb{R}^d$：缩放和偏移参数
+- $\odot$：逐元素乘法
+- $(1 + \boldsymbol{\gamma})$：确保初始时接近恒等映射
+
+**双向 FiLM 注入**：
+
+每层 GNN 后执行双向特征调制：
+
+$$\mathbf{h}_{\text{rtl}}^{(k)} = \text{FiLM}_{\text{asm}\to\text{rtl}}\left(\mathbf{h}_{\text{rtl}}^{(k)}, \text{pool}(\mathbf{h}_{\text{asm}}^{(k)})\right)$$
+$$\mathbf{h}_{\text{asm}}^{(k)} = \text{FiLM}_{\text{rtl}\to\text{asm}}\left(\mathbf{h}_{\text{asm}}^{(k)}, \text{pool}(\mathbf{h}_{\text{rtl}}^{(k)})\right)$$
+
+**梯度流通路径**：
+- ASM→RTL FiLM：损失 → RTL 特征 → ASM→RTL FiLM → ASM 特征 ✓
+- RTL→ASM FiLM：损失 → RTL 特征 → 下一层 ASM→RTL FiLM → ASM 特征 → RTL→ASM FiLM ✓
+
+### 10.3 SSM-FiLM 融合的数学形式
+
+SSM-FiLM 用选择性状态空间模型（SSM）增强上下文生成，替代简单的全局池化。
+
+#### 10.3.1 状态空间方程
+
+离散化状态空间模型：
+
+$$\mathbf{h}_t = \bar{\mathbf{A}} \cdot \mathbf{h}_{t-1} + \bar{\mathbf{B}} \cdot \mathbf{x}_t$$
+$$\mathbf{y}_t = \mathbf{C} \cdot \mathbf{h}_t$$
+
+其中离散化参数：
+
+$$\bar{\mathbf{A}} = \exp(\Delta \cdot \mathbf{A})$$
+$$\bar{\mathbf{B}} = (\Delta \cdot \mathbf{A})^{-1} \cdot (\bar{\mathbf{A}} - \mathbf{I}) \cdot \Delta \cdot \mathbf{B}$$
+
+**符号说明**：
+- $\mathbf{x}_t \in \mathbb{R}^d$：时刻 $t$ 的输入（源图节点特征）
+- $\mathbf{h}_t \in \mathbb{R}^{d \times n}$：隐状态（$n$ 为状态空间维度）
+- $\mathbf{y}_t \in \mathbb{R}^d$：时刻 $t$ 的输出
+- $\mathbf{A} \in \mathbb{R}^{d \times n}$：状态转移矩阵（可学习）
+- $\Delta, \mathbf{B}, \mathbf{C}$：选择性参数（输入依赖）
+
+#### 10.3.2 选择性机制
+
+Mamba 的核心创新是**选择性参数**——$\Delta$, $\mathbf{B}$, $\mathbf{C}$ 是输入依赖的：
+
+$$\Delta_t = \text{softplus}(\mathbf{W}_\Delta \cdot \mathbf{x}_t)$$
+$$\mathbf{B}_t = \mathbf{W}_B \cdot \mathbf{x}_t$$
+$$\mathbf{C}_t = \mathbf{W}_C \cdot \mathbf{x}_t$$
+
+**语义解释**：
+| 参数 | 语义 | 作用 |
+|------|------|------|
+| $\Delta$（步长） | 记忆门 | 控制"记忆"多少历史信息 |
+| $\mathbf{B}$（输入门） | 输入权重 | 控制当前输入的影响 |
+| $\mathbf{C}$（输出门） | 输出权重 | 控制输出哪些状态信息 |
+
+#### 10.3.3 SSM-FiLM 架构
+
+```
+源图节点 [N_src, D]
+        │
+        ▼ (按 batch 分组 + padding)
+序列 [B, T_max, D]
+        │
+        ▼ (SSM 状态递推)
+状态序列 [B, T_max, D]
+        │
+        ▼ (选择性聚合)
+上下文 [B, D]
+        │
+        ▼ (FiLM 注入)
+目标节点' = (1 + γ) ⊙ 目标节点 + β
+```
+
+#### 10.3.4 三种聚合模式
+
+**1. Last 模式**（取最后状态）：
+
+$$\mathbf{c} = \mathbf{y}_{T}$$
+
+**2. Mean 模式**（平均池化）：
+
+$$\mathbf{c} = \frac{1}{T} \sum_{t=1}^{T} \mathbf{y}_t$$
+
+**3. Attention 模式**（注意力聚合）：
+
+$$\alpha_t = \frac{\exp(\mathbf{q}^\top \mathbf{k}_t / \sqrt{d})}{\sum_{t'} \exp(\mathbf{q}^\top \mathbf{k}_{t'} / \sqrt{d})}$$
+$$\mathbf{c} = \sum_{t=1}^{T} \alpha_t \mathbf{y}_t$$
+
+其中 $\mathbf{q} = \mathbf{W}_q \cdot \text{pool}(\mathbf{h}_{\text{target}})$，$\mathbf{k}_t = \mathbf{W}_k \cdot \mathbf{y}_t$。
+
+### 10.4 FiLM vs SSM-FiLM 对比
+
+| 特性 | FiLM | SSM-FiLM |
+|------|------|----------|
+| 上下文生成 | 静态（全局池化） | 动态（状态演化） |
+| 计算复杂度 | $O(N)$ | $O(N + T)$ |
+| 长程依赖 | 弱（单次池化） | 强（状态递推） |
+| 选择性 | 无 | 有（输入依赖参数） |
+| 参数量 | $2d^2$ | $2d^2 + 3d \cdot n$ |
+| 物理语义 | 全局上下文调制 | 模拟"执行状态演化" |
+
+### 10.5 为什么使用纯 PyTorch 实现 SSM
+
+#### 10.5.1 官方 mamba-ssm 库的限制
+
+| 问题 | 说明 |
+|------|------|
+| **CUDA 强依赖** | `mamba-ssm` 需要 CUDA 编译自定义内核，无法在 CPU 环境运行 |
+| **Python 版本** | 项目使用 Python 3.13，`mamba-ssm` 预编译 wheel 可能不支持 |
+| **编译复杂** | 需要 `ninja`、`triton`、`causal-conv1d` 等依赖，编译耗时且易失败 |
+| **依赖冲突** | `mamba-ssm` 依赖 `transformers`，可能与项目其他依赖冲突 |
+
+#### 10.5.2 纯 PyTorch 实现的优势
+
+| 优势 | 说明 |
+|------|------|
+| **零额外依赖** | 仅使用 PyTorch 标准操作 |
+| **跨平台** | CPU/GPU/MPS 均可运行 |
+| **易于调试** | 代码透明，可逐步调试 |
+| **性能足够** | 对于 ASM 序列长度（通常 <100 节点），性能差异可忽略 |
+
+#### 10.5.3 性能对比
+
+| 场景 | mamba-ssm | SimpleSSM (纯 PyTorch) |
+|------|-----------|------------------------|
+| 短序列 (T<100) | ~1x | ~1x（差异可忽略） |
+| 长序列 (T>1000) | ~10x 更快 | 基准 |
+| CPU 训练 | ❌ 不支持 | ✅ 支持 |
+| 调试友好 | ❌ CUDA 内核 | ✅ 纯 Python |
+
+#### 10.5.4 未来优化路径
+
+1. **`torch.compile`**：PyTorch 2.0+ JIT 编译可显著加速
+2. **切换到 `mamba-ssm`**：当环境支持 CUDA 且序列很长时
+3. **`flash-linear-attention`**：另一个高效的线性注意力库
+
+### 10.6 双图融合的物理意义
+
+**为什么 SSM 适合 ASM → RTL 融合？**
+
+1. **执行状态演化**：SSM 的状态递推模拟"指令逐条执行"的状态变化
+2. **选择性记忆**：$\Delta$ 参数学习"哪些指令对当前 RTL 节点重要"
+3. **长程依赖**：SSM 天然支持长序列，适合复杂测试激励
+4. **线性复杂度**：$O(T)$ 替代注意力的 $O(T^2)$
+
+**RTL 覆盖率预测的语义**：
+- ASM 图表示测试激励的控制流和数据流
+- RTL 图表示硬件设计的结构
+- 双向融合学习"哪些测试激励路径会激活哪些硬件路径"
+
+### 10.7 参考文献
+
+- **FiLM**: Perez et al., "FiLM: Visual Reasoning with a General Conditioning Layer" (AAAI 2018)
+- **Mamba**: Gu & Dao, "Mamba: Linear-Time Sequence Modeling with Selective State Spaces" (2024)
+- **S4**: Gu et al., "Efficiently Modeling Long Sequences with Structured State Spaces" (ICLR 2022)

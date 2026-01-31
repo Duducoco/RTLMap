@@ -22,7 +22,7 @@ from torch import Tensor
 from torch_geometric.nn import MessagePassing, global_mean_pool
 from typing import Optional, Tuple
 
-from .interaction import FiLMInjection
+from .interaction import FiLMInjection, SSMFiLMInjection
 
 # EdgeType 索引常量（0-indexed，用于控制门控聚合和 Embedding 层）
 # 对应 cdfg_rtl.data_types.EdgeType 枚举（值需减 1 转为 0-indexed）
@@ -494,6 +494,7 @@ class FiLMDualEncoder(nn.Module):
     - 计算高效：无需 dense batch 转换，直接广播
     - 训练稳定：FiLM 小随机初始化，初始时接近恒等映射且梯度非零
     - 仅调制节点特征，边特征保持不变
+    - 支持两种融合模式：FiLM 和 SSM-FiLM
     """
 
     def __init__(
@@ -509,10 +510,15 @@ class FiLMDualEncoder(nn.Module):
         num_asm_node_types: int = 22,
         num_asm_edge_types: int = 10,
         asm_instruction_dim: int = 256,
+        # 融合配置
+        fusion_type: str = "film",  # "film" 或 "ssm_film"
+        ssm_d_state: int = 16,  # SSM 状态空间维度
+        ssm_pool_mode: str = "last",  # SSM 聚合模式: "last", "mean", "attention"
     ):
         super().__init__()
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
+        self.fusion_type = fusion_type
 
         # RTL 节点编码器
         self.rtl_node_encoder = RTLNodeFeatureEncoder(num_cell_types, hidden_dim)
@@ -541,13 +547,29 @@ class FiLMDualEncoder(nn.Module):
             [GNNLayer(hidden_dim, drop_rates[i]) for i in range(num_layers)]
         )
 
-        # 双向 FiLM 注入层（独立参数）
-        self.film_asm2rtl = nn.ModuleList(
-            [FiLMInjection(hidden_dim) for _ in range(num_layers)]
-        )
-        self.film_rtl2asm = nn.ModuleList(
-            [FiLMInjection(hidden_dim) for _ in range(num_layers)]
-        )
+        # 双向融合层（根据配置选择 FiLM 或 SSM-FiLM）
+        if fusion_type == "film":
+            self.film_asm2rtl = nn.ModuleList(
+                [FiLMInjection(hidden_dim) for _ in range(num_layers)]
+            )
+            self.film_rtl2asm = nn.ModuleList(
+                [FiLMInjection(hidden_dim) for _ in range(num_layers)]
+            )
+        elif fusion_type == "ssm_film":
+            self.film_asm2rtl = nn.ModuleList(
+                [
+                    SSMFiLMInjection(hidden_dim, ssm_d_state, ssm_pool_mode)
+                    for _ in range(num_layers)
+                ]
+            )
+            self.film_rtl2asm = nn.ModuleList(
+                [
+                    SSMFiLMInjection(hidden_dim, ssm_d_state, ssm_pool_mode)
+                    for _ in range(num_layers)
+                ]
+            )
+        else:
+            raise ValueError(f"Unknown fusion_type: {fusion_type}. Use 'film' or 'ssm_film'.")
 
         # 输出投影（独立）
         self.rtl_output = nn.Linear(hidden_dim, output_dim)
@@ -621,13 +643,17 @@ class FiLMDualEncoder(nn.Module):
                 rtl_h, rtl_edge_index, rtl_edge_attr, rtl_edge_type
             )
 
-            # 2. 双向池化
-            asm_context = global_mean_pool(asm_h, asm_batch)  # [B, D]
-            rtl_context = global_mean_pool(rtl_h, rtl_batch)  # [B, D]
-
-            # 3. 双向 FiLM 注入（仅节点特征）
-            rtl_h = self.film_asm2rtl[i](rtl_h, asm_context, rtl_batch)  # ASM → RTL
-            asm_h = self.film_rtl2asm[i](asm_h, rtl_context, asm_batch)  # RTL → ASM
+            # 2. 双向融合注入（仅节点特征）
+            if self.fusion_type == "film":
+                # FiLM: 使用全局池化的上下文
+                asm_context = global_mean_pool(asm_h, asm_batch)  # [B, D]
+                rtl_context = global_mean_pool(rtl_h, rtl_batch)  # [B, D]
+                rtl_h = self.film_asm2rtl[i](rtl_h, asm_context, rtl_batch)  # ASM → RTL
+                asm_h = self.film_rtl2asm[i](asm_h, rtl_context, asm_batch)  # RTL → ASM
+            else:
+                # SSM-FiLM: 传递源节点特征，内部进行 SSM 处理
+                rtl_h = self.film_asm2rtl[i](rtl_h, asm_h, rtl_batch, asm_batch)  # ASM → RTL
+                asm_h = self.film_rtl2asm[i](asm_h, rtl_h, asm_batch, rtl_batch)  # RTL → ASM
 
         # 输出投影
         rtl_node = self.rtl_output(rtl_h)

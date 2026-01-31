@@ -14,7 +14,7 @@ from .encoder import (
     EDGE_TYPE_RESET,
     EDGE_TYPE_ENABLE,
 )
-from .interaction import FiLMInjection
+from .interaction import FiLMInjection, SimpleSSM, SSMFiLMInjection
 from .model import (
     DualGraphFusionModel,
     create_model,
@@ -36,6 +36,8 @@ __all__ = [
     "EDGE_TYPE_RESET",
     "EDGE_TYPE_ENABLE",
     "FiLMInjection",
+    "SimpleSSM",
+    "SSMFiLMInjection",
     "DualGraphFusionModel",
     "create_model",
     "create_small_model",
