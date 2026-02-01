@@ -25,6 +25,7 @@ class ModelConfig:
     # RTL 特征配置
     num_cell_types: int = NUM_CELL_TYPES  # cell_type 词汇表大小 (74)
     num_edge_types: int = 7  # DATA, DATA_TRUE, DATA_FALSE, CONTROL, CLOCK, RESET, ENABLE
+    max_ports: int = 8  # 端口位置索引最大值
 
     # ASM 特征配置
     num_asm_node_types: int = 22  # AsmNodeType 枚举数量

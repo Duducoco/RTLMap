@@ -121,38 +121,66 @@ class RTLEdgeFeatureEncoder(nn.Module):
     """
     RTL 边特征编码器
 
-    将 edge_type 和 width 编码为边嵌入：
+    将 edge_type、width 和端口位置索引编码为边嵌入：
     - edge_type: 通过 Embedding 层嵌入
     - width: 使用 log2(width + 1) 编码后通过线性层
+    - source_port_idx: 源端口在源节点 output_ports 中的位置索引
+    - target_port_idx: 目标端口在目标节点 input_ports 中的位置索引
     - 融合方式: 加法融合
     """
 
-    def __init__(self, num_edge_types: int, hidden_dim: int):
+    def __init__(self, num_edge_types: int, hidden_dim: int, max_ports: int = 8):
         super().__init__()
         self.edge_type_embedding = nn.Embedding(num_edge_types, hidden_dim)
         self.width_encoder = nn.Linear(1, hidden_dim)
+        # 端口位置 embedding：各 hidden_dim // 2，连接后为 hidden_dim
+        self.source_port_embedding = nn.Embedding(max_ports, hidden_dim // 2)
+        self.target_port_embedding = nn.Embedding(max_ports, hidden_dim // 2)
 
     def forward(
         self,
         edge_type: torch.Tensor,
         edge_width: Optional[torch.Tensor],
+        source_port_idx: Optional[torch.Tensor] = None,
+        target_port_idx: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
             edge_type: [E] 边类型索引
             edge_width: [E] 边 width（可选）
+            source_port_idx: [E] 源端口位置索引（可选）
+            target_port_idx: [E] 目标端口位置索引（可选）
 
         Returns:
             [E, hidden_dim] 边嵌入
         """
         type_emb = self.edge_type_embedding(edge_type)  # [E, D]
 
+        result = type_emb
+
         if edge_width is not None:
             width_log = torch.log2(edge_width.float() + 1).unsqueeze(-1)  # [E, 1]
             width_emb = self.width_encoder(width_log)  # [E, D]
-            return type_emb + width_emb
-        else:
-            return type_emb
+            result = result + width_emb
+
+        if source_port_idx is not None and target_port_idx is not None:
+            # 两个端口索引都存在：连接融合
+            source_port_emb = self.source_port_embedding(source_port_idx)  # [E, D/2]
+            target_port_emb = self.target_port_embedding(target_port_idx)  # [E, D/2]
+            port_emb = torch.cat([source_port_emb, target_port_emb], dim=-1)  # [E, D]
+            result = result + port_emb
+        elif source_port_idx is not None:
+            # 仅有 source_port_idx：用零填充 target 部分
+            source_port_emb = self.source_port_embedding(source_port_idx)  # [E, D/2]
+            port_emb = torch.cat([source_port_emb, torch.zeros_like(source_port_emb)], dim=-1)
+            result = result + port_emb
+        elif target_port_idx is not None:
+            # 仅有 target_port_idx：用零填充 source 部分
+            target_port_emb = self.target_port_embedding(target_port_idx)  # [E, D/2]
+            port_emb = torch.cat([torch.zeros_like(target_port_emb), target_port_emb], dim=-1)
+            result = result + port_emb
+
+        return result
 
 
 class AsmEdgeFeatureEncoder(nn.Module):
@@ -506,6 +534,7 @@ class FiLMDualEncoder(nn.Module):
         # RTL 特征配置
         num_cell_types: int = 74,
         num_edge_types: int = 7,
+        max_ports: int = 8,  # 端口位置索引最大值
         # ASM 特征配置
         num_asm_node_types: int = 22,
         num_asm_edge_types: int = 10,
@@ -528,8 +557,8 @@ class FiLMDualEncoder(nn.Module):
             num_asm_node_types, asm_instruction_dim, hidden_dim
         )
 
-        # RTL 边特征编码器
-        self.rtl_edge_encoder = RTLEdgeFeatureEncoder(num_edge_types, hidden_dim)
+        # RTL 边特征编码器（支持端口位置索引）
+        self.rtl_edge_encoder = RTLEdgeFeatureEncoder(num_edge_types, hidden_dim, max_ports)
 
         # ASM 边特征编码器（仅类型嵌入）
         self.asm_edge_encoder = AsmEdgeFeatureEncoder(num_asm_edge_types, hidden_dim)
@@ -584,6 +613,8 @@ class FiLMDualEncoder(nn.Module):
         rtl_edge_type: torch.Tensor,
         rtl_batch: Optional[torch.Tensor] = None,
         rtl_edge_width: Optional[torch.Tensor] = None,
+        rtl_edge_source_port_idx: Optional[torch.Tensor] = None,
+        rtl_edge_target_port_idx: Optional[torch.Tensor] = None,
         # ASM 图
         asm_edge_index: torch.Tensor = None,
         asm_node_type: torch.Tensor = None,
@@ -601,6 +632,8 @@ class FiLMDualEncoder(nn.Module):
             rtl_edge_type: [E1] RTL 边类型
             rtl_batch: [N1] RTL batch 索引
             rtl_edge_width: [E1] RTL 边 width
+            rtl_edge_source_port_idx: [E1] RTL 边源端口位置索引
+            rtl_edge_target_port_idx: [E1] RTL 边目标端口位置索引
             asm_edge_index: [2, E2] ASM 边索引
             asm_node_type: [N2] ASM 节点类型索引
             asm_instruction_encoding: [N2, D_instr] ASM 指令编码
@@ -630,8 +663,10 @@ class FiLMDualEncoder(nn.Module):
         rtl_h = self.rtl_node_encoder(rtl_node_cell_type, rtl_node_width)
         asm_h = self.asm_node_encoder(asm_node_type, asm_instruction_encoding)
 
-        # 边特征编码
-        rtl_edge_attr = self.rtl_edge_encoder(rtl_edge_type, rtl_edge_width)
+        # 边特征编码（包含端口位置索引）
+        rtl_edge_attr = self.rtl_edge_encoder(
+            rtl_edge_type, rtl_edge_width, rtl_edge_source_port_idx, rtl_edge_target_port_idx
+        )
         asm_edge_attr = self.asm_edge_encoder(asm_edge_type)
 
         for i in range(self.num_layers):

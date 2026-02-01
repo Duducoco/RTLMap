@@ -27,7 +27,7 @@ class EdgeClassifier(nn.Module):
     边分类器
 
     仅使用 RTL CDFG 的节点特征和边特征进行分类
-    边特征 = edge_type 嵌入 + edge_width 编码（log2 + 线性层，加法融合）
+    边特征 = edge_type 嵌入 + edge_width 编码 + 端口位置编码（加法融合）
     """
 
     def __init__(
@@ -35,13 +35,14 @@ class EdgeClassifier(nn.Module):
         hidden_dim: int,
         num_classes: int = 2,
         num_edge_types: int = 5,
+        max_ports: int = 8,
         dropout: float = 0.1,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
 
-        # 边特征编码器
-        self.edge_encoder = RTLEdgeFeatureEncoder(num_edge_types, hidden_dim)
+        # 边特征编码器（支持端口位置索引）
+        self.edge_encoder = RTLEdgeFeatureEncoder(num_edge_types, hidden_dim, max_ports)
 
         # 输入维度：src + tgt + edge_feat = 3 * hidden_dim
         self.net = nn.Sequential(
@@ -57,6 +58,8 @@ class EdgeClassifier(nn.Module):
         edge_index: torch.Tensor,
         edge_type: torch.Tensor,
         edge_width: Optional[torch.Tensor] = None,
+        source_port_idx: Optional[torch.Tensor] = None,
+        target_port_idx: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -64,6 +67,8 @@ class EdgeClassifier(nn.Module):
             edge_index: [2, E] RTL 边索引
             edge_type: [E] RTL 边类型
             edge_width: [E] RTL 边 width（可选）
+            source_port_idx: [E] 源端口位置索引（可选）
+            target_port_idx: [E] 目标端口位置索引（可选）
 
         Returns:
             [E, num_classes] 边分类 logits
@@ -72,8 +77,8 @@ class EdgeClassifier(nn.Module):
         src_feat = node_features[src]  # [E, D]
         tgt_feat = node_features[tgt]  # [E, D]
 
-        # 边特征编码
-        edge_feat = self.edge_encoder(edge_type, edge_width)  # [E, D]
+        # 边特征编码（包含端口位置索引）
+        edge_feat = self.edge_encoder(edge_type, edge_width, source_port_idx, target_port_idx)  # [E, D]
 
         combined = torch.cat([src_feat, tgt_feat, edge_feat], dim=-1)
         return self.net(combined)
@@ -132,6 +137,7 @@ class DualGraphFusionModel(nn.Module):
             dropout=config.dropout,
             num_edge_types=config.num_edge_types,
             num_cell_types=config.num_cell_types,
+            max_ports=config.max_ports,
             num_asm_node_types=config.num_asm_node_types,
             num_asm_edge_types=config.num_asm_edge_types,
             asm_instruction_dim=config.asm_instruction_dim,
@@ -141,11 +147,12 @@ class DualGraphFusionModel(nn.Module):
             ssm_pool_mode=config.ssm_pool_mode,
         )
 
-        # 边分类器（仅 RTL）
+        # 边分类器（仅 RTL，支持端口位置索引）
         self.edge_classifier = EdgeClassifier(
             hidden_dim=config.hidden_dim,
             num_classes=config.num_edge_classes,
             num_edge_types=config.num_edge_types,
+            max_ports=config.max_ports,
             dropout=config.dropout,
         )
 
@@ -160,7 +167,8 @@ class DualGraphFusionModel(nn.Module):
 
         Args:
             data: 双图数据，包含 RTL 和 ASM 图
-                RTL: node_cell_type, node_width, edge_index, edge_type, edge_width
+                RTL: node_cell_type, node_width, edge_index, edge_type, edge_width,
+                     edge_source_port_idx, edge_target_port_idx
                 ASM: asm_node_type, asm_instruction_encoding, asm_edge_index, asm_edge_type
 
         Returns:
@@ -175,6 +183,8 @@ class DualGraphFusionModel(nn.Module):
             rtl_edge_type=data.edge_type,
             rtl_batch=getattr(data, "batch", None),
             rtl_edge_width=getattr(data, "edge_width", None),
+            rtl_edge_source_port_idx=getattr(data, "edge_source_port_idx", None),
+            rtl_edge_target_port_idx=getattr(data, "edge_target_port_idx", None),
             # ASM 图
             asm_edge_index=data.asm_edge_index,
             asm_node_type=data.asm_node_type,
@@ -189,6 +199,8 @@ class DualGraphFusionModel(nn.Module):
             data.edge_index,
             data.edge_type,
             getattr(data, "edge_width", None),
+            getattr(data, "edge_source_port_idx", None),
+            getattr(data, "edge_target_port_idx", None),
         )
         graph_pred = self.graph_regressor(rtl_graph)
 

@@ -15,23 +15,44 @@ class CDFGExporter:
     def __init__(self, cdfg: CDFG):
         self.cdfg = cdfg
 
+    def _get_port_idx(self, node_id: str, port_name: str, is_output: bool) -> int:
+        """获取端口在节点端口列表中的索引
+
+        Args:
+            node_id: 节点 ID
+            port_name: 端口名称
+            is_output: True 表示查找 output_ports，False 表示查找 input_ports
+
+        Returns:
+            端口索引，未找到时返回 0
+        """
+        node = self.cdfg.nodes.get(node_id)
+        if node is None:
+            return 0
+
+        ports = node.output_ports if is_output else node.input_ports
+        try:
+            return ports.index(port_name)
+        except ValueError:
+            return 0  # 未找到时返回 0
+
     def to_dict(self) -> dict:
-        """导出为字典"""
+        """导出为字典（精简版本，仅保留 GNN 训练必需字段）"""
         return {
             "module_name": self.cdfg.module_name,
             "nodes": [
                 {
                     "id": n.id,
-                    "name": n.name,
+                    # "name": n.name,  # 仅调试用
                     "type": n.node_type.name,
                     "cell_type": n.cell_type,
                     "width": n.width,
-                    "parameters": n.parameters,
+                    # "parameters": n.parameters,  # 仅调试用
                     "input_ports": n.input_ports,
                     "output_ports": n.output_ports,
-                    "source_line": n.source_line,
-                    "stmt_start_line": n.stmt_start_line,
-                    "source_file": n.source_file,
+                    # "source_line": n.source_line,  # 仅调试/标注用
+                    # "stmt_start_line": n.stmt_start_line,  # 仅标注过程使用
+                    # "source_file": n.source_file,  # 仅调试用
                 }
                 for n in self.cdfg.nodes.values()
             ],
@@ -41,12 +62,14 @@ class CDFGExporter:
                     "target": e.target,
                     "source_port": e.source_port,
                     "target_port": e.target_port,
+                    "source_port_idx": self._get_port_idx(e.source, e.source_port, is_output=True),
+                    "target_port_idx": self._get_port_idx(e.target, e.target_port, is_output=False),
                     "type": e.edge_type.name,
                     "width": e.width,
-                    "source_line": e.source_line,
-                    "branch_index": e.branch_index,
+                    # "source_line": e.source_line,  # 仅调试用
+                    # "branch_index": e.branch_index,  # 仅标注过程使用
                     "coverage_label": e.coverage_label,
-                    "coverage_type": e.coverage_type,
+                    # "coverage_type": e.coverage_type,  # 仅调试用
                 }
                 for e in self.cdfg.edges
             ],

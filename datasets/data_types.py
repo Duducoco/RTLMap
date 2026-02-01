@@ -15,6 +15,8 @@ class DualGraphData(Data):
         - edge_index: [2, E] 边索引
         - edge_type: [E] 边类型（0: DATA, 1: DATA_TRUE, 2: DATA_FALSE, 3: CONTROL, 4: CLOCK, 5: RESET, 6: ENABLE）
         - edge_width: [E] 边的 width（信号位宽）
+        - edge_source_port_idx: [E] 源端口在源节点 output_ports 中的位置索引
+        - edge_target_port_idx: [E] 目标端口在目标节点 input_ports 中的位置索引
         - edge_labels: [E] 边标签（-1: 未标注, 0: 未覆盖, 1: 已覆盖）
 
     - 辅助图（ASM）:
@@ -59,6 +61,8 @@ class DualGraphData(Data):
             # RTL 边属性
             "edge_type",
             "edge_width",
+            "edge_source_port_idx",
+            "edge_target_port_idx",
             "edge_labels",
             # ASM 节点属性
             "asm_node_type",
