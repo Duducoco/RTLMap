@@ -29,7 +29,10 @@ designs/openc910
 *.sh
 *.S
 *.s
-
+*.txt
+*.js
+*.html
+*.css
 # 测试和设计文档
 trainer/test_trainer.py
 models/test_model.py

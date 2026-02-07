@@ -11,6 +11,7 @@ from .parser import (
     BranchStatus,
 )
 from .annotator import CoverageAnnotator, AnnotationStats, annotate_cdfg_with_coverage
+from .data_annotate import DataAnnotator, DataAnnotatorConfig
 
 __all__ = [
     # 解析器
@@ -21,4 +22,7 @@ __all__ = [
     "CoverageAnnotator",
     "AnnotationStats",
     "annotate_cdfg_with_coverage",
+    # 数据标注编排器
+    "DataAnnotator",
+    "DataAnnotatorConfig",
 ]
