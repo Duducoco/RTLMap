@@ -52,6 +52,7 @@ class DataAnnotator:
         self.cdfg: Optional[CDFG] = None
         self.coverage_files: list = []
         self.stats: AnnotationStats = AnnotationStats()
+        self.branch_coverage: float = 0.0
 
     @classmethod
     def from_args(
@@ -320,6 +321,10 @@ class DataAnnotator:
 
         print(f"\n找到 {len(self.coverage_files)} 个覆盖率报告文件")
 
+        # 分支覆盖率汇总累加器
+        total_branches_sum = 0
+        covered_branches_sum = 0
+
         for html_path in self.coverage_files:
             print(f"\n--- 正在处理: {Path(html_path).name} ---")
 
@@ -346,6 +351,11 @@ class DataAnnotator:
                 if instance_tag:
                     print(f"  实例: {instance_tag}")
 
+            # 提取分支覆盖率汇总
+            total_br, covered_br, _ = cov_parser.parse_branch_summary(instance_tag)
+            total_branches_sum += total_br
+            covered_branches_sum += covered_br
+
             if self.config.verbose:
                 instances = cov_parser.get_available_instances()
                 if instances:
@@ -369,6 +379,13 @@ class DataAnnotator:
             print(
                 f"  标注: {stats.annotated_mux_nodes} MUX, {stats.annotated_edges} 边"
             )
+
+        # 计算模块级分支覆盖率百分比
+        self.branch_coverage = (
+            round(covered_branches_sum / total_branches_sum * 100, 2)
+            if total_branches_sum > 0
+            else 0.0
+        )
 
         # 如果需要传播，在所有标注完成后统一传播
         if self.config.propagate:
@@ -464,8 +481,10 @@ class DataAnnotator:
 
         output = output_path or self.config.output
         exporter = CDFGExporter(self.cdfg)
+        data = exporter.to_dict()
+        data["branch_coverage"] = self.branch_coverage
         with open(output, "w", encoding="utf-8") as f:
-            f.write(exporter.to_json())
+            json.dump(data, f, indent=2)
         print(f"\n已导出 CDFG: {output}")
 
         return output

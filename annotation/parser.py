@@ -256,6 +256,55 @@ class CoverageParser:
 
         return result
 
+    def parse_branch_summary(
+        self, instance_tag: str = None
+    ) -> tuple[int, int, float]:
+        """
+        提取模块/实例级分支覆盖率汇总（Branches 汇总行）
+
+        Args:
+            instance_tag: 实例标签（如 "inst_tag_58"），None 则解析模块级数据
+
+        Returns:
+            (total_branches, covered_branches, percent)
+            无 Branch 部分时返回 (0, 0, 0.0)
+        """
+        # 复用 parse_branch_coverage 中的锚点定位逻辑
+        if instance_tag:
+            anchor_pattern = f'<a name="{instance_tag}_Branch"></a>'
+            next_anchor_pattern = r'<a name="inst_tag_\d+_\w+"></a>|<hr>'
+        else:
+            anchor_pattern = '<a name="Branch"></a>'
+            next_anchor_pattern = (
+                r'<a name="inst_tag_\d+"></a>|<a name="inst_tag_\d+_\w+"></a>'
+            )
+
+        start_match = re.search(re.escape(anchor_pattern), self.html_content)
+        if not start_match:
+            return (0, 0, 0.0)
+
+        start_pos = start_match.end()
+        remaining = self.html_content[start_pos:]
+        end_match = re.search(next_anchor_pattern, remaining)
+        branch_section = remaining[: end_match.start()] if end_match else remaining
+
+        # 匹配 Branches 汇总行
+        summary_match = re.search(
+            r'<td>Branches</td>\s*<td[^>]*></td>\s*'
+            r'<td[^>]*>(\d+)</td>\s*'
+            r'<td[^>]*>(\d+)</td>\s*'
+            r'<td[^>]*>([\d.]+)',
+            branch_section,
+        )
+        if not summary_match:
+            return (0, 0, 0.0)
+
+        return (
+            int(summary_match.group(1)),
+            int(summary_match.group(2)),
+            float(summary_match.group(3)),
+        )
+
     def get_available_instances(self) -> List[str]:
         """获取报告中所有可用的实例标签"""
         pattern = r'<a name="(inst_tag_\d+)_Branch"></a>'
@@ -263,7 +312,7 @@ class CoverageParser:
         return list(set(matches))
 
     def get_last_instance(self) -> Optional[str]:
-        """获取第一个实例标签"""
+        """获取最后一个实例标签"""
         instances = self.get_available_instances()
         if instances:
             # 按数字排序
