@@ -92,7 +92,7 @@ class BasicBlock:
     """基本块 - 连续执行的指令序列"""
 
     id: str  # 基本块 ID（格式: bb_N）
-    label: Optional[str]  # 标签名（如果有）
+    label: Optional[str]  # 主标签名（如果有）
     instructions: List[Instruction]  # 包含的指令列表
     start_line: int  # 起始行号
     end_line: int  # 结束行号
@@ -100,6 +100,9 @@ class BasicBlock:
     # 控制流图属性
     successors: List[str] = field(default_factory=list)  # 后继基本块 ID
     predecessors: List[str] = field(default_factory=list)  # 前驱基本块 ID
+
+    # 所有关联标签（含主标签，用于连续标签场景）
+    labels: List[str] = field(default_factory=list)
 
     # 数据流分析（寄存器活跃性）
     defs: Set[str] = field(default_factory=set)  # 定义的寄存器（写入）
@@ -262,8 +265,12 @@ class AsmNode:
     live_in: Set[str] = field(default_factory=set)  # 入口活跃寄存器
     live_out: Set[str] = field(default_factory=set)  # 出口活跃寄存器
 
+    # 图连接
+    successors: List[str] = field(default_factory=list)  # 后继节点 ID
+    predecessors: List[str] = field(default_factory=list)  # 前驱节点 ID
 
-
+    # 循环信息
+    is_loop_header: bool = False  # 是否为循环头节点
 
     # 分支信息（仅 BRANCH 类型节点）
     branch_condition: Optional[str] = None  # 分支条件（如 "beq x1, x2"）
@@ -283,7 +290,7 @@ class AsmNode:
             category_counts[cat] = category_counts.get(cat, 0) + 1
 
         return max(category_counts, key=lambda c: category_counts[c])
-    @property
+
     def instructions_text(self, indent: str = "") -> str:
         """
         获取当前块的指令内容，使用换行符连接
@@ -434,6 +441,50 @@ class AsmCDFG:
     def get_back_edges(self) -> List[AsmEdge]:
         """获取所有回边（循环边）"""
         return [e for e in self.edges if e.is_back_edge]
+
+    def to_dict(self) -> Dict:
+        """序列化为可 JSON 导出的字典"""
+        return {
+            # "module_name": self.module_name,
+            # "source_file": self.source_file,
+            "entry_node": self.entry_node,
+            "exit_nodes": self.exit_nodes,
+            # "total_instructions": self.total_instructions,
+            # "total_basic_blocks": self.total_basic_blocks,
+            "nodes": {
+                node_id: {
+                    "id": node.id,
+                    # "label": node.label,
+                    "node_type": node.node_type.name,
+                    # "start_line": node.start_line,
+                    # "end_line": node.end_line,
+                    # "instr_count": node.instr_count,
+                    "instructions": [
+                        {"mnemonic": i.mnemonic, "operands": i.operands}
+                        for i in node.instructions
+                    ],
+                    "defs": list(node.defs),
+                    "uses": list(node.uses),
+                    "successors": node.successors,
+                    "predecessors": node.predecessors,
+                    # "is_loop_header": node.is_loop_header,
+                    # "branch_condition": node.branch_condition,
+                    # "branch_target": node.branch_target,
+                }
+                for node_id, node in self.nodes.items()
+            },
+            "edges": [
+                {
+                    "source": e.source,
+                    "target": e.target,
+                    "edge_type": e.edge_type.name,
+                    "register": e.register,
+                    "condition": e.condition,
+                    # "is_back_edge": e.is_back_edge,
+                }
+                for e in self.edges
+            ],
+        }
 
     def compute_statistics(self):
         """计算统计信息"""

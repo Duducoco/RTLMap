@@ -92,18 +92,7 @@ class BasicBlockBuilder:
             if instr.instr_format == InstrFormat.DIRECTIVE:
                 continue
 
-            # 规则2: 标签是 leader
-            if instr.instr_format == InstrFormat.LABEL:
-                # 找到标签后的第一条实际指令
-                for j in range(i + 1, len(instructions)):
-                    if instructions[j].instr_format not in (
-                        InstrFormat.DIRECTIVE,
-                        InstrFormat.LABEL,
-                    ):
-                        leaders.add(j)
-                        break
-
-            # 规则3: 分支/跳转后的指令是 leader
+            # 规则2: 分支/跳转后的指令是 leader
             if instr.is_terminator:
                 # 后继指令
                 for j in range(i + 1, len(instructions)):
@@ -134,7 +123,7 @@ class BasicBlockBuilder:
         """根据 leader 创建基本块"""
         blocks = []
         current_instrs: List[Instruction] = []
-        current_label: Optional[str] = None
+        current_labels: List[str] = []
         block_id = 0
 
         # 标签到块的映射（用于后续链接）
@@ -149,57 +138,73 @@ class BasicBlockBuilder:
             if instr.instr_format == InstrFormat.LABEL:
                 # 如果当前有指令，先创建块
                 if current_instrs:
+                    primary_label = current_labels[0] if current_labels else None
                     block = self._create_single_block(
-                        block_id, current_label, current_instrs
+                        block_id, primary_label, current_instrs,
+                        labels=list(current_labels),
                     )
                     blocks.append(block)
-                    if current_label:
-                        self._label_to_block[current_label] = block.id
+                    for lbl in current_labels:
+                        self._label_to_block[lbl] = block.id
                     block_id += 1
                     current_instrs = []
+                    current_labels = []
 
-                # 记录新标签
-                current_label = instr.label
+                # 累积标签（支持连续标签）
+                if instr.label:
+                    current_labels.append(instr.label)
                 continue
 
             # 检查是否是新基本块的开始
             if i in leaders and current_instrs:
+                primary_label = current_labels[0] if current_labels else None
                 block = self._create_single_block(
-                    block_id, current_label, current_instrs
+                    block_id, primary_label, current_instrs,
+                    labels=list(current_labels),
                 )
                 blocks.append(block)
-                if current_label:
-                    self._label_to_block[current_label] = block.id
+                for lbl in current_labels:
+                    self._label_to_block[lbl] = block.id
                 block_id += 1
                 current_instrs = []
-                current_label = None
+                current_labels = []
 
             # 添加指令
             current_instrs.append(instr)
 
             # 终结指令结束当前块
             if instr.is_terminator:
+                primary_label = current_labels[0] if current_labels else None
                 block = self._create_single_block(
-                    block_id, current_label, current_instrs
+                    block_id, primary_label, current_instrs,
+                    labels=list(current_labels),
                 )
                 blocks.append(block)
-                if current_label:
-                    self._label_to_block[current_label] = block.id
+                for lbl in current_labels:
+                    self._label_to_block[lbl] = block.id
                 block_id += 1
                 current_instrs = []
-                current_label = None
+                current_labels = []
 
         # 处理最后一个块
         if current_instrs:
-            block = self._create_single_block(block_id, current_label, current_instrs)
+            primary_label = current_labels[0] if current_labels else None
+            block = self._create_single_block(
+                block_id, primary_label, current_instrs,
+                labels=list(current_labels),
+            )
             blocks.append(block)
-            if current_label:
-                self._label_to_block[current_label] = block.id
+            for lbl in current_labels:
+                self._label_to_block[lbl] = block.id
 
         return blocks
 
     def _create_single_block(
-        self, block_id: int, label: Optional[str], instrs: List[Instruction]
+        self,
+        block_id: int,
+        label: Optional[str],
+        instrs: List[Instruction],
+        labels: Optional[List[str]] = None,
     ) -> BasicBlock:
         """创建单个基本块并分析寄存器使用"""
         block = BasicBlock(
@@ -208,6 +213,7 @@ class BasicBlockBuilder:
             instructions=instrs,
             start_line=instrs[0].line_no if instrs else 0,
             end_line=instrs[-1].line_no if instrs else 0,
+            labels=labels if labels else ([label] if label else []),
         )
 
         # 分析 defs/uses（按指令顺序，前面的 def 会遮蔽后面的 use）
@@ -215,12 +221,14 @@ class BasicBlockBuilder:
 
         for instr in instrs:
             # 先处理 uses（在 defs 之前）
+            # 跳过 x0（RISC-V 硬连线零寄存器，读取恒为 0）
             for rs in [instr.rs1, instr.rs2, instr.rs3]:
-                if rs and rs not in local_defs:
+                if rs and rs != "x0" and rs not in local_defs:
                     block.uses.add(rs)
 
             # 再处理 defs
-            if instr.rd:
+            # 跳过 x0（写入 x0 无效果）
+            if instr.rd and instr.rd != "x0":
                 local_defs.add(instr.rd)
                 block.defs.add(instr.rd)
 

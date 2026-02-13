@@ -102,6 +102,10 @@ class AsmParser:
         if not line:
             return None
 
+        # 跳过预处理器指令和 GCC 行标记（行首 #）
+        if line.startswith("#"):
+            return None
+
         results = []
 
         # 处理同一行的标签和指令，如 "label: instruction"
@@ -149,11 +153,13 @@ class AsmParser:
     def _strip_comment(self, line: str) -> str:
         """去除行注释"""
         # 处理 # 和 // 风格的注释
-        # 但要小心不要去除字符串中的 #
+        # 行首 # 可能是预处理器指令或 GCC 行标记，不作为注释处理
         for comment_char in ["#", "//"]:
             idx = line.find(comment_char)
             if idx != -1:
-                # 简单处理：假设 # 或 // 前没有未闭合的引号
+                if comment_char == "#" and line.lstrip().startswith("#"):
+                    # 行首 #：跳过，保留整行（预处理器指令）
+                    continue
                 line = line[:idx]
         return line
 
