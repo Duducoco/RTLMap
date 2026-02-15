@@ -36,9 +36,7 @@ class InstructionEncoder:
             param.requires_grad = False
 
         # 768 → output_dim 线性投影
-        self.projection = nn.Linear(
-            self.model.config.hidden_size, config.output_dim
-        )
+        self.projection = nn.Linear(self.model.config.hidden_size, config.output_dim)
         self.projection.to(config.device)
 
         logger.info(
@@ -76,7 +74,9 @@ class InstructionEncoder:
                 else:
                     # mean pooling: 仅对非 padding token 取均值
                     mask = tokens["attention_mask"].unsqueeze(-1).float()
-                    pooled = (outputs.last_hidden_state * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
+                    pooled = (outputs.last_hidden_state * mask).sum(1) / mask.sum(
+                        1
+                    ).clamp(min=1e-9)
 
                 projected = self.projection(pooled)
             all_embeddings.append(projected.cpu())
@@ -99,9 +99,7 @@ class InstructionEncoder:
 
         node_ids = list(asm["nodes"].keys())
         texts = [
-            InstructionFormatter.format_block(
-                asm["nodes"][nid].get("instructions", [])
-            )
+            InstructionFormatter.format_block(asm["nodes"][nid].get("instructions", []))
             for nid in node_ids
         ]
 
@@ -144,7 +142,9 @@ class InstructionEncoder:
         if not all_texts:
             return {}
 
-        logger.info("批量编码 %d 个文件，共 %d 个节点", len(file_slices), len(all_texts))
+        logger.info(
+            "批量编码 %d 个文件，共 %d 个节点", len(file_slices), len(all_texts)
+        )
         all_embeddings = self.encode_texts(all_texts)
 
         # 按文件切分
@@ -201,10 +201,7 @@ class MultiGPUInstructionEncoder:
 
         # 均匀切分
         chunk_size = (len(texts) + n_enc - 1) // n_enc
-        chunks = [
-            texts[i * chunk_size : (i + 1) * chunk_size]
-            for i in range(n_enc)
-        ]
+        chunks = [texts[i * chunk_size : (i + 1) * chunk_size] for i in range(n_enc)]
         # 过滤空 chunk（文本数 < 设备数时）
         work = [(self._encoders[i], chunks[i]) for i in range(n_enc) if chunks[i]]
 
@@ -246,8 +243,12 @@ class MultiGPUInstructionEncoder:
         if not all_texts:
             return {}
 
-        logger.info("批量编码 %d 个文件，共 %d 个节点（%d GPU）",
-                     len(file_slices), len(all_texts), len(self._encoders))
+        logger.info(
+            "批量编码 %d 个文件，共 %d 个节点（%d GPU）",
+            len(file_slices),
+            len(all_texts),
+            len(self._encoders),
+        )
         all_embeddings = self.encode_texts(all_texts)
 
         result: dict[str, torch.Tensor] = {}

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Callable
 
 if TYPE_CHECKING:
-    from text_encoder import InstructionEncoder, MultiGPUInstructionEncoder, TextEncoderConfig
+    from text_encoder import MultiGPUInstructionEncoder, TextEncoderConfig
 
 import torch
 import lightning as L
@@ -51,7 +51,8 @@ def _generate_annotated_json(
         # 如果缺失则尝试通过 extract_rtlil_json 补充生成
         sim_results_dir = rtlil_json_dir.parent / "simulation_results"
         missing = [
-            name for name in module_names
+            name
+            for name in module_names
             if not (rtlil_json_dir / f"{name}.json").exists()
         ]
         if missing:
@@ -89,9 +90,7 @@ def _generate_annotated_json(
             annotator.export_json(str(output_path))
             generated.append(str(output_path))
         except Exception as e:
-            logger.error(
-                "标注失败 [%s/%s]: %s", test_dir.name, module_name, e
-            )
+            logger.error("标注失败 [%s/%s]: %s", test_dir.name, module_name, e)
 
     return generated
 
@@ -229,9 +228,7 @@ def _build_and_save(
                 asm_instr_enc = torch.zeros(len(asm_node_ids), 256)
 
             if asm_src:
-                asm_edge_index = torch.tensor(
-                    [asm_src, asm_tgt], dtype=torch.long
-                )
+                asm_edge_index = torch.tensor([asm_src, asm_tgt], dtype=torch.long)
             else:
                 asm_edge_index = torch.empty((2, 0), dtype=torch.long)
             asm_edge_type = torch.tensor(asm_et, dtype=torch.long)
@@ -391,11 +388,13 @@ class DualGraphDataset(Dataset):
             for test_dir in sorted(sim_results_dir.iterdir()):
                 if not test_dir.is_dir():
                     continue
-                task_args.append((
-                    str(rtlil_json_dir),
-                    str(test_dir),
-                    self._module_names,
-                ))
+                task_args.append(
+                    (
+                        str(rtlil_json_dir),
+                        str(test_dir),
+                        self._module_names,
+                    )
+                )
 
         if not task_args:
             logger.warning("未找到任何测试目录")
@@ -405,7 +404,8 @@ class DualGraphDataset(Dataset):
         # ── 阶段 1: 多进程 CPU 预处理（RTL 标注 + ASM 提取）──
         logger.info(
             "阶段 1/3: 多进程 CPU 预处理 (%d 个测试, %d workers)",
-            len(task_args), self._num_workers,
+            len(task_args),
+            self._num_workers,
         )
         with Pool(self._num_workers) as pool:
             all_results = pool.map(_process_single_test, task_args)
@@ -424,9 +424,7 @@ class DualGraphDataset(Dataset):
 
         # ── 阶段 2: 批量 GPU 编码（CodeBERT）──
         asm_encodings: dict[str, "torch.Tensor"] = {}
-        unique_asm_paths = list({
-            asm for _, asm in flat_results if asm is not None
-        })
+        unique_asm_paths = list({asm for _, asm in flat_results if asm is not None})
 
         if self._text_encoder_config is not None and unique_asm_paths:
             from text_encoder import MultiGPUInstructionEncoder
@@ -435,16 +433,16 @@ class DualGraphDataset(Dataset):
                 "阶段 2/3: 批量 GPU 编码 (%d 个 ASM 文件)", len(unique_asm_paths)
             )
             self._text_encoder = MultiGPUInstructionEncoder(self._text_encoder_config)
-            asm_encodings = self._text_encoder.encode_asm_jsons_batch(
-                unique_asm_paths
-            )
+            asm_encodings = self._text_encoder.encode_asm_jsons_batch(unique_asm_paths)
             logger.info("阶段 2 完成: %d 个编码结果", len(asm_encodings))
         else:
             logger.info("阶段 2/3: 跳过 GPU 编码（无编码器配置或无 ASM 文件）")
 
         # ── 阶段 3: 多进程张量构建 + 保存 ──
         processed_dir = str(Path(self.processed_dir))
-        save_args: list[tuple[str, Optional[str], Optional["torch.Tensor"], str, int]] = []
+        save_args: list[
+            tuple[str, Optional[str], Optional["torch.Tensor"], str, int]
+        ] = []
 
         for i, (rtl_path, asm_path) in enumerate(flat_results):
             enc = asm_encodings.get(asm_path) if asm_path else None
@@ -452,16 +450,15 @@ class DualGraphDataset(Dataset):
 
         logger.info(
             "阶段 3/3: 多进程张量构建 + 保存 (%d 个样本, %d workers)",
-            len(save_args), self._num_workers,
+            len(save_args),
+            self._num_workers,
         )
         with Pool(self._num_workers) as pool:
             results = pool.map(_build_and_save, save_args)
 
         success_count = sum(1 for r in results if r)
         self._num_samples = success_count
-        logger.info(
-            "数据处理完成: %d/%d 个样本成功", success_count, len(save_args)
-        )
+        logger.info("数据处理完成: %d/%d 个样本成功", success_count, len(save_args))
 
     def len(self) -> int:
         """返回数据集大小"""

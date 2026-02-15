@@ -172,12 +172,16 @@ class RTLEdgeFeatureEncoder(nn.Module):
         elif source_port_idx is not None:
             # 仅有 source_port_idx：用零填充 target 部分
             source_port_emb = self.source_port_embedding(source_port_idx)  # [E, D/2]
-            port_emb = torch.cat([source_port_emb, torch.zeros_like(source_port_emb)], dim=-1)
+            port_emb = torch.cat(
+                [source_port_emb, torch.zeros_like(source_port_emb)], dim=-1
+            )
             result = result + port_emb
         elif target_port_idx is not None:
             # 仅有 target_port_idx：用零填充 source 部分
             target_port_emb = self.target_port_embedding(target_port_idx)  # [E, D/2]
-            port_emb = torch.cat([torch.zeros_like(target_port_emb), target_port_emb], dim=-1)
+            port_emb = torch.cat(
+                [torch.zeros_like(target_port_emb), target_port_emb], dim=-1
+            )
             result = result + port_emb
 
         return result
@@ -558,7 +562,9 @@ class FiLMDualEncoder(nn.Module):
         )
 
         # RTL 边特征编码器（支持端口位置索引）
-        self.rtl_edge_encoder = RTLEdgeFeatureEncoder(num_edge_types, hidden_dim, max_ports)
+        self.rtl_edge_encoder = RTLEdgeFeatureEncoder(
+            num_edge_types, hidden_dim, max_ports
+        )
 
         # ASM 边特征编码器（仅类型嵌入）
         self.asm_edge_encoder = AsmEdgeFeatureEncoder(num_asm_edge_types, hidden_dim)
@@ -598,7 +604,9 @@ class FiLMDualEncoder(nn.Module):
                 ]
             )
         else:
-            raise ValueError(f"Unknown fusion_type: {fusion_type}. Use 'film' or 'ssm_film'.")
+            raise ValueError(
+                f"Unknown fusion_type: {fusion_type}. Use 'film' or 'ssm_film'."
+            )
 
         # 输出投影（独立）
         self.rtl_output = nn.Linear(hidden_dim, output_dim)
@@ -665,7 +673,10 @@ class FiLMDualEncoder(nn.Module):
 
         # 边特征编码（包含端口位置索引）
         rtl_edge_attr = self.rtl_edge_encoder(
-            rtl_edge_type, rtl_edge_width, rtl_edge_source_port_idx, rtl_edge_target_port_idx
+            rtl_edge_type,
+            rtl_edge_width,
+            rtl_edge_source_port_idx,
+            rtl_edge_target_port_idx,
         )
         asm_edge_attr = self.asm_edge_encoder(asm_edge_type)
 
@@ -687,8 +698,12 @@ class FiLMDualEncoder(nn.Module):
                 asm_h = self.film_rtl2asm[i](asm_h, rtl_context, asm_batch)  # RTL → ASM
             else:
                 # SSM-FiLM: 传递源节点特征，内部进行 SSM 处理
-                rtl_h = self.film_asm2rtl[i](rtl_h, asm_h, rtl_batch, asm_batch)  # ASM → RTL
-                asm_h = self.film_rtl2asm[i](asm_h, rtl_h, asm_batch, rtl_batch)  # RTL → ASM
+                rtl_h = self.film_asm2rtl[i](
+                    rtl_h, asm_h, rtl_batch, asm_batch
+                )  # ASM → RTL
+                asm_h = self.film_rtl2asm[i](
+                    asm_h, rtl_h, asm_batch, rtl_batch
+                )  # RTL → ASM
 
         # 输出投影
         rtl_node = self.rtl_output(rtl_h)

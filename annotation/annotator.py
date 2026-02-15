@@ -1729,7 +1729,6 @@ class CoverageAnnotator:
             mux_nodes: MUX 节点 ID 列表
             coverage: 分支覆盖数据
         """
-        import re
 
         # 步骤 1：识别所有 CASE 选择器条件（条件值为 2 的条件编号）
         case_selector_conditions = set()
@@ -1776,7 +1775,7 @@ class CoverageAnnotator:
         case_branch_ranges = self._parse_case_branch_ranges(coverage.line_no)
 
         if not case_branch_ranges:
-            print(f"  警告: 无法解析 CASE 分支范围，回退到普通标注")
+            print("  警告: 无法解析 CASE 分支范围，回退到普通标注")
             self._annotate_mux_chain_fallback(mux_nodes, coverage)
             return
 

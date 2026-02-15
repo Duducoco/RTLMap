@@ -256,9 +256,7 @@ class CoverageParser:
 
         return result
 
-    def parse_branch_summary(
-        self, instance_tag: str = None
-    ) -> tuple[int, int, float]:
+    def parse_branch_summary(self, instance_tag: str = None) -> tuple[int, int, float]:
         """
         提取模块/实例级分支覆盖率汇总（Branches 汇总行）
 
@@ -290,10 +288,10 @@ class CoverageParser:
 
         # 匹配 Branches 汇总行
         summary_match = re.search(
-            r'<td>Branches</td>\s*<td[^>]*></td>\s*'
-            r'<td[^>]*>(\d+)</td>\s*'
-            r'<td[^>]*>(\d+)</td>\s*'
-            r'<td[^>]*>([\d.]+)',
+            r"<td>Branches</td>\s*<td[^>]*></td>\s*"
+            r"<td[^>]*>(\d+)</td>\s*"
+            r"<td[^>]*>(\d+)</td>\s*"
+            r"<td[^>]*>([\d.]+)",
             branch_section,
         )
         if not summary_match:

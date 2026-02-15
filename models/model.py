@@ -78,7 +78,9 @@ class EdgeClassifier(nn.Module):
         tgt_feat = node_features[tgt]  # [E, D]
 
         # 边特征编码（包含端口位置索引）
-        edge_feat = self.edge_encoder(edge_type, edge_width, source_port_idx, target_port_idx)  # [E, D]
+        edge_feat = self.edge_encoder(
+            edge_type, edge_width, source_port_idx, target_port_idx
+        )  # [E, D]
 
         combined = torch.cat([src_feat, tgt_feat, edge_feat], dim=-1)
         return self.net(combined)

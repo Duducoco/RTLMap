@@ -18,13 +18,12 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+from tools import YosysRunner
 
 # 确保项目根目录在 sys.path 中
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
-
-from tools import YosysRunner
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +133,8 @@ def main():
         help="要生成的模块名列表（不含 .json 后缀），不指定则仅确保目录存在",
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         help="启用详细日志输出",
     )

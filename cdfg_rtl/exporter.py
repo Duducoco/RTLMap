@@ -62,8 +62,12 @@ class CDFGExporter:
                     "target": e.target,
                     "source_port": e.source_port,
                     "target_port": e.target_port,
-                    "source_port_idx": self._get_port_idx(e.source, e.source_port, is_output=True),
-                    "target_port_idx": self._get_port_idx(e.target, e.target_port, is_output=False),
+                    "source_port_idx": self._get_port_idx(
+                        e.source, e.source_port, is_output=True
+                    ),
+                    "target_port_idx": self._get_port_idx(
+                        e.target, e.target_port, is_output=False
+                    ),
                     "type": e.edge_type.name,
                     "width": e.width,
                     # "source_line": e.source_line,  # 仅调试用

@@ -160,7 +160,9 @@ class SimpleSSM(nn.Module):
 
         # 离散化：Ā = exp(Δ · A)
         # delta: [B, T, D], A: [D, d_state] -> delta_A: [B, T, D, d_state]
-        delta_A = delta.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0)  # [B, T, D, d_state]
+        delta_A = delta.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(
+            0
+        )  # [B, T, D, d_state]
         A_bar = torch.exp(delta_A)  # [B, T, D, d_state]
 
         # 状态递推
@@ -289,9 +291,7 @@ class SSMFiLMInjection(nn.Module):
 
         return (1 + gamma_expanded) * target_h + beta_expanded
 
-    def _batch_to_sequence(
-        self, h: Tensor, batch: Tensor
-    ) -> Tuple[Tensor, Tensor]:
+    def _batch_to_sequence(self, h: Tensor, batch: Tensor) -> Tuple[Tensor, Tensor]:
         """
         将 batch 格式转换为 padding 序列格式
 

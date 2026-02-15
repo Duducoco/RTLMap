@@ -239,18 +239,37 @@ class AsmCDFGExtractor:
 
                     for succ_id in block.successors:
                         if succ_id == target_id and not taken_created:
-                            cdfg.add_edge(AsmEdge(
-                                source=block.id,
-                                target=succ_id,
-                                edge_type=AsmEdgeType.BRANCH_TAKEN,
-                                condition=node.branch_condition,
-                                source_line=block.end_line,
-                            ))
+                            cdfg.add_edge(
+                                AsmEdge(
+                                    source=block.id,
+                                    target=succ_id,
+                                    edge_type=AsmEdgeType.BRANCH_TAKEN,
+                                    condition=node.branch_condition,
+                                    source_line=block.end_line,
+                                )
+                            )
                             taken_created = True
                         else:
-                            cdfg.add_edge(AsmEdge(
+                            cdfg.add_edge(
+                                AsmEdge(
+                                    source=block.id,
+                                    target=succ_id,
+                                    edge_type=AsmEdgeType.BRANCH_NOT_TAKEN,
+                                    condition=(
+                                        f"not ({node.branch_condition})"
+                                        if node.branch_condition
+                                        else None
+                                    ),
+                                    source_line=block.end_line,
+                                )
+                            )
+
+                    # 目标 == fall-through（successors 只有一个元素）时补充 NOT_TAKEN
+                    if len(block.successors) == 1 and target_id == block.successors[0]:
+                        cdfg.add_edge(
+                            AsmEdge(
                                 source=block.id,
-                                target=succ_id,
+                                target=block.successors[0],
                                 edge_type=AsmEdgeType.BRANCH_NOT_TAKEN,
                                 condition=(
                                     f"not ({node.branch_condition})"
@@ -258,45 +277,36 @@ class AsmCDFGExtractor:
                                     else None
                                 ),
                                 source_line=block.end_line,
-                            ))
-
-                    # 目标 == fall-through（successors 只有一个元素）时补充 NOT_TAKEN
-                    if len(block.successors) == 1 and target_id == block.successors[0]:
-                        cdfg.add_edge(AsmEdge(
-                            source=block.id,
-                            target=block.successors[0],
-                            edge_type=AsmEdgeType.BRANCH_NOT_TAKEN,
-                            condition=(
-                                f"not ({node.branch_condition})"
-                                if node.branch_condition
-                                else None
-                            ),
-                            source_line=block.end_line,
-                        ))
+                            )
+                        )
                 else:
                     # 无明确目标（间接分支等）：所有 successors 标记为 BRANCH_TAKEN/NOT_TAKEN
                     # 第一个 successor 视为 TAKEN，其余为 NOT_TAKEN
                     for idx, succ_id in enumerate(block.successors):
                         if idx == 0:
-                            cdfg.add_edge(AsmEdge(
-                                source=block.id,
-                                target=succ_id,
-                                edge_type=AsmEdgeType.BRANCH_TAKEN,
-                                condition=node.branch_condition,
-                                source_line=block.end_line,
-                            ))
+                            cdfg.add_edge(
+                                AsmEdge(
+                                    source=block.id,
+                                    target=succ_id,
+                                    edge_type=AsmEdgeType.BRANCH_TAKEN,
+                                    condition=node.branch_condition,
+                                    source_line=block.end_line,
+                                )
+                            )
                         else:
-                            cdfg.add_edge(AsmEdge(
-                                source=block.id,
-                                target=succ_id,
-                                edge_type=AsmEdgeType.BRANCH_NOT_TAKEN,
-                                condition=(
-                                    f"not ({node.branch_condition})"
-                                    if node.branch_condition
-                                    else None
-                                ),
-                                source_line=block.end_line,
-                            ))
+                            cdfg.add_edge(
+                                AsmEdge(
+                                    source=block.id,
+                                    target=succ_id,
+                                    edge_type=AsmEdgeType.BRANCH_NOT_TAKEN,
+                                    condition=(
+                                        f"not ({node.branch_condition})"
+                                        if node.branch_condition
+                                        else None
+                                    ),
+                                    source_line=block.end_line,
+                                )
+                            )
 
             else:
                 # 非分支节点
@@ -321,13 +331,15 @@ class AsmCDFGExtractor:
                         edge_type = AsmEdgeType.CONTROL_FLOW
                         condition = None
 
-                    cdfg.add_edge(AsmEdge(
-                        source=block.id,
-                        target=succ_id,
-                        edge_type=edge_type,
-                        condition=condition,
-                        source_line=block.end_line,
-                    ))
+                    cdfg.add_edge(
+                        AsmEdge(
+                            source=block.id,
+                            target=succ_id,
+                            edge_type=edge_type,
+                            condition=condition,
+                            source_line=block.end_line,
+                        )
+                    )
 
     def _create_data_edges(self, blocks: List[BasicBlock], cdfg: AsmCDFG):
         """
@@ -489,26 +501,28 @@ class AsmCDFGExtractor:
                     key = (store_bid, bid, "MEMORY_DEP")
                     if key not in seen_mem_edges:
                         seen_mem_edges.add(key)
-                        cdfg.add_edge(AsmEdge(
-                            source=store_bid,
-                            target=bid,
-                            edge_type=AsmEdgeType.MEMORY_DEP,
-                        ))
+                        cdfg.add_edge(
+                            AsmEdge(
+                                source=store_bid,
+                                target=bid,
+                                edge_type=AsmEdgeType.MEMORY_DEP,
+                            )
+                        )
 
                 # STORE → STORE: WAW
                 if has_store:
                     key = (store_bid, bid, "OUTPUT_DEP")
                     if key not in seen_mem_edges:
                         seen_mem_edges.add(key)
-                        cdfg.add_edge(AsmEdge(
-                            source=store_bid,
-                            target=bid,
-                            edge_type=AsmEdgeType.OUTPUT_DEP,
-                        ))
+                        cdfg.add_edge(
+                            AsmEdge(
+                                source=store_bid,
+                                target=bid,
+                                edge_type=AsmEdgeType.OUTPUT_DEP,
+                            )
+                        )
 
-    def _detect_entry_point(
-        self, instructions: List[Instruction], cdfg: AsmCDFG
-    ):
+    def _detect_entry_point(self, instructions: List[Instruction], cdfg: AsmCDFG):
         """
         基于 .globl 指令检测入口点
 

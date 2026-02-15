@@ -218,7 +218,7 @@ class CDFGVisualizer:
         except Exception as e:
             # sfdp 引擎可能因缺少三角化库而失败，回退到 fdp
             if engine == "sfdp" and "triangulation" in str(e):
-                print(f"[WARN] sfdp 引擎不可用，回退到 fdp 引擎")
+                print("[WARN] sfdp 引擎不可用，回退到 fdp 引擎")
                 dot.engine = "fdp"
                 # fdp 需要禁用 overlap 移除以避免同样问题
                 dot.attr(overlap="scale")

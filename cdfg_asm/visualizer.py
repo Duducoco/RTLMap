@@ -10,7 +10,7 @@ ASM CDFG 可视化器
 - 循环回边高亮
 """
 
-from typing import Dict, Optional
+from typing import Dict
 import graphviz
 
 # 支持直接运行和模块导入两种方式
@@ -21,7 +21,6 @@ if __name__ == "__main__" or __package__ is None:
         AsmEdge,
         AsmNodeType,
         AsmEdgeType,
-        InstrCategory,
     )
 else:
     from .data_types import (
@@ -30,7 +29,6 @@ else:
         AsmEdge,
         AsmNodeType,
         AsmEdgeType,
-        InstrCategory,
     )
 
 

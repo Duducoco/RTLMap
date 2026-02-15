@@ -140,7 +140,9 @@ class BasicBlockBuilder:
                 if current_instrs:
                     primary_label = current_labels[0] if current_labels else None
                     block = self._create_single_block(
-                        block_id, primary_label, current_instrs,
+                        block_id,
+                        primary_label,
+                        current_instrs,
                         labels=list(current_labels),
                     )
                     blocks.append(block)
@@ -159,7 +161,9 @@ class BasicBlockBuilder:
             if i in leaders and current_instrs:
                 primary_label = current_labels[0] if current_labels else None
                 block = self._create_single_block(
-                    block_id, primary_label, current_instrs,
+                    block_id,
+                    primary_label,
+                    current_instrs,
                     labels=list(current_labels),
                 )
                 blocks.append(block)
@@ -176,7 +180,9 @@ class BasicBlockBuilder:
             if instr.is_terminator:
                 primary_label = current_labels[0] if current_labels else None
                 block = self._create_single_block(
-                    block_id, primary_label, current_instrs,
+                    block_id,
+                    primary_label,
+                    current_instrs,
                     labels=list(current_labels),
                 )
                 blocks.append(block)
@@ -190,7 +196,9 @@ class BasicBlockBuilder:
         if current_instrs:
             primary_label = current_labels[0] if current_labels else None
             block = self._create_single_block(
-                block_id, primary_label, current_instrs,
+                block_id,
+                primary_label,
+                current_instrs,
                 labels=list(current_labels),
             )
             blocks.append(block)
