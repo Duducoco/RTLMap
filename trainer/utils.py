@@ -27,6 +27,7 @@ def train_model(
     logger_type: str = "tensorboard",
     experiment_name: str = "dual_graph_gnn",
     extra_callbacks: Optional[List[Callback]] = None,
+    ckpt_path: Optional[str] = None,
 ) -> Tuple[DualGraphLightningModule, L.Trainer]:
     """
     便捷训练函数
@@ -43,6 +44,7 @@ def train_model(
         logger_type: 日志类型（tensorboard / csv）
         experiment_name: 实验名称
         extra_callbacks: 额外的自定义 callbacks（可选）
+        ckpt_path: 检查点路径（用于恢复训练）
 
     Returns:
         (module, trainer): 训练后的模块和 Trainer
@@ -79,7 +81,7 @@ def train_model(
     )
 
     # 训练
-    lightning_trainer.fit(module, datamodule)
+    lightning_trainer.fit(module, datamodule, ckpt_path=ckpt_path)
 
     # 测试
     if has_test:

@@ -34,6 +34,7 @@ from models.data_types import ModelConfig
 from trainer.config import TrainerConfig
 from trainer.lightning_module import DualGraphLightningModule
 from trainer.lightning_trainer import LightningTrainer
+from trainer.utils import train_model
 
 logger = logging.getLogger(__name__)
 
@@ -247,32 +248,20 @@ def main() -> None:
         )
         lt.test(module, datamodule)
     else:
-        # 训练模式
-        module = DualGraphLightningModule(
+        # 训练模式（可选从检查点恢复）
+        module, trainer = train_model(
             model_config=model_config,
-            learning_rate=trainer_config.learning_rate,
-            weight_decay=trainer_config.weight_decay,
-            edge_loss_weight=trainer_config.edge_loss_weight,
-            graph_loss_weight=trainer_config.graph_loss_weight,
-            label_smoothing=trainer_config.label_smoothing,
-            warmup_steps=trainer_config.warmup_steps,
-            scheduler_type=trainer_config.scheduler_type,
-        )
-        datamodule = DualGraphDataModule(
-            root=args.data_root,
+            trainer_config=trainer_config,
+            data_root=args.data_root,
             sim_results_dirs=args.sim_results_dirs,
             module_names=args.module_names,
             text_encoder_config=text_encoder_config,
-            batch_size=trainer_config.batch_size,
-            num_workers=trainer_config.num_workers,
-        )
-        lt = LightningTrainer(
-            config=trainer_config,
-            experiment_name=args.experiment_name,
-            logger_type=args.logger_type,
             has_validation=True,
+            has_test=False,
+            logger_type=args.logger_type,
+            experiment_name=args.experiment_name,
+            ckpt_path=args.ckpt_path,
         )
-        lt.fit(module, datamodule, ckpt_path=args.ckpt_path)
         logger.info("训练完成")
 
 
