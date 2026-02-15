@@ -28,6 +28,8 @@ dependencies = [
     "tensorboard>=2.20.0",
     "rich>=14.2.0",
     "ruff>=0.14.14",
+    "transformers>=4.40.0",
+    "sentencepiece>=0.2.0",
 ]
 
 [project.urls]

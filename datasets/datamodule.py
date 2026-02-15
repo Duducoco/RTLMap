@@ -3,8 +3,13 @@
 
 import json
 import logging
+import os
+from multiprocessing import Pool
 from pathlib import Path
-from typing import List, Optional, Callable
+from typing import TYPE_CHECKING, List, Optional, Callable
+
+if TYPE_CHECKING:
+    from text_encoder import InstructionEncoder, MultiGPUInstructionEncoder, TextEncoderConfig
 
 import torch
 import lightning as L
@@ -25,289 +30,144 @@ _ASM_NODE_TYPE_MAP = {e.name: e.value - 1 for e in AsmNodeType}
 _ASM_EDGE_TYPE_MAP = {e.name: e.value - 1 for e in AsmEdgeType}
 
 
-class DualGraphDataset(Dataset):
-    """
-    双图数据集 - 继承自 PyG Dataset
+def _generate_annotated_json(
+    rtlil_json_dir: Path,
+    test_dir: Path,
+    module_names: Optional[list[str]],
+) -> list[str]:
+    """为单个测试生成所有模块的标注 JSON（模块级函数，供多进程调用）"""
+    from annotation.data_annotate import DataAnnotator
 
-    支持磁盘持久化，数据按索引存储在 processed_dir 中。
-
-    Args:
-        root: 数据集根目录，包含 raw/ 和 processed/ 子目录
-        data_list: DualGraphData 对象列表（首次运行时提供）
-        transform: 每次获取数据时应用的变换
-        pre_transform: 处理前应用的变换（保存到磁盘）
-        pre_filter: 处理前的过滤函数
-
-    目录结构:
-        root/
-        ├── raw/              # 原始文件（可选）
-        └── processed/        # 处理后的 .pt 文件
-            ├── data_0.pt
-            ├── data_1.pt
-            └── ...
-
-    Example:
-        >>> # 首次创建数据集（处理并保存）
-        >>> data_list = [DualGraphData(...), DualGraphData(...)]
-        >>> dataset = DualGraphDataset(root='./data', data_list=data_list)
-
-        >>> # 后续加载（从磁盘读取）
-        >>> dataset = DualGraphDataset(root='./data')
-        >>> len(dataset)
-        2
-        >>> dataset[0]
-        DualGraphData(...)
-    """
-
-    def __init__(
-        self,
-        root: Optional[str] = "dataset_root",
-        data_list: Optional[List[DualGraphData]] = None,
-        sim_results_dirs: Optional[List[str]] = None,
-        module_names: Optional[List[str]] = None,
-        transform: Optional[Callable] = None,
-        pre_transform: Optional[Callable] = None,
-        pre_filter: Optional[Callable] = None,
-    ):
-        """
-        Args:
-            root: 数据集根目录
-            data_list: DualGraphData 对象列表（首次运行时提供）
-            sim_results_dirs: simulation_results 目录路径列表
-            module_names: 要标注的模块名列表（不含 .json 后缀），None 表示全部
-            transform: 每次获取数据时应用的变换
-            pre_transform: 处理前应用的变换
-            pre_filter: 处理前的过滤函数
-        """
-        self.root = root
-        self._data_list = data_list
-        self._sim_results_dirs = sim_results_dirs or [
-            "designs/cv32e40p/simulation_results"
-        ]
-        self._module_names = module_names or [
-            "cv32e40p_int_controller",
-        ]
-        self._num_samples: Optional[int] = None
-        super().__init__(root, transform, pre_transform, pre_filter)
-
-    @property
-    def raw_file_names(self) -> List[str]:
-        return self._sim_results_dirs
-
-    @property
-    def processed_file_names(self) -> List[str]:
-        """处理后的文件列表"""
-        # 动态读取 processed_dir 中的文件
-        if self._num_samples is not None:
-            return [f"data_{i}.pt" for i in range(self._num_samples)]
-
-        # 检查已存在的文件
-        processed_path = Path(self.processed_dir)
-        if processed_path.exists():
-            files = sorted(
-                f.name
-                for f in processed_path.iterdir()
-                if f.name.startswith("data_") and f.name.endswith(".pt")
-            )
-            if files:
-                self._num_samples = len(files)
-                return files
-
-        # 如果提供了 data_list，返回预期文件名
-        if self._data_list is not None:
-            self._num_samples = len(self._data_list)
-            return [f"data_{i}.pt" for i in range(self._num_samples)]
-
+    coverage_report_dir = test_dir / "coverage" / "report"
+    if not coverage_report_dir.is_dir():
         return []
 
-    def download(self):
-        pass
+    output_dir = test_dir / "annotated"
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    def process(self):
-        """处理原始数据：遍历 simulation_results 生成标注 JSON 并转换为 .pt"""
-        from annotation.data_annotate import DataAnnotator
+    # 收集 RTLIL JSON 文件（按 module_names 过滤）
+    if module_names is not None:
+        design_dir = rtlil_json_dir.parent
+        flist = design_dir / f"{design_dir.name}.flist"
 
-        idx = 0
-
-        for raw_path in self.raw_file_names:
-            sim_results_dir = Path(raw_path)
-            if not sim_results_dir.is_dir():
-                logger.warning("simulation_results 目录不存在: %s", sim_results_dir)
-                continue
-
-            # 路径推导: designs/cv32e40p/simulation_results -> designs/cv32e40p
-            design_dir = sim_results_dir.parent
-            rtlil_json_dir = design_dir / "RTLIL_json"
-
-            if not rtlil_json_dir.is_dir():
+        for name in module_names:
+            json_path = rtlil_json_dir / f"{name}.json"
+            if not json_path.exists():
+                logger.info("RTLIL JSON 不存在，尝试生成: %s", json_path)
                 try:
-                    rtlil_json_dir.mkdir(parents=True, exist_ok=True)
-                    logger.info("已创建 RTLIL JSON 目录: %s", rtlil_json_dir)
+                    runner = YosysRunner()
+                    runner.get_json(
+                        top_module=name,
+                        output_dir=rtlil_json_dir,
+                        flist=flist,
+                        files=None,
+                    )
                 except Exception as e:
-                    raise RuntimeError(f"无法创建 RTLIL JSON 目录: {rtlil_json_dir}") from e
+                    logger.error("YosysRunner 生成失败 [%s]: %s", name, e)
 
-            for test_dir in sorted(sim_results_dir.iterdir()):
-                if not test_dir.is_dir():
-                    continue
+        json_files = [
+            rtlil_json_dir / f"{name}.json"
+            for name in module_names
+            if (rtlil_json_dir / f"{name}.json").exists()
+        ]
+    else:
+        json_files = sorted(rtlil_json_dir.glob("*.json"))
 
-                # 1. 生成标注 RTL JSON
-                rtl_files = self._generate_annotated_json(
-                    rtlil_json_dir, test_dir, DataAnnotator
-                )
+    generated: list[str] = []
 
-                # 2. 生成 ASM CDFG JSON
-                asm_json = self._generate_asm_cdfg_json(test_dir)
-                if asm_json:
-                    logger.info("  ASM CDFG: %s", Path(asm_json).name)
+    for json_file in json_files:
+        module_name = json_file.stem
+        output_path = output_dir / f"{module_name}.json"
 
-                # 3. 构建 DualGraphData 并保存 .pt
-                for rtl_file in rtl_files:
-                    try:
-                        data = self._build_dual_graph_data(rtl_file, asm_json)
-                        if data is not None:
-                            pt_path = Path(self.processed_dir) / f"data_{idx}.pt"
-                            torch.save(data, pt_path)
-                            idx += 1
-                    except Exception as e:
-                        logger.error("构建 DualGraphData 失败 [%s]: %s", rtl_file, e)
-
-        self._num_samples = idx
-        logger.info("数据处理完成，共 %d 个样本", self._num_samples)
-
-    def _generate_annotated_json(
-        self,
-        rtlil_json_dir: Path,
-        test_dir: Path,
-        annotator_cls: type,
-    ) -> List[str]:
-        """
-        为单个测试生成所有模块的标注 JSON
-
-        Args:
-            rtlil_json_dir: RTLIL JSON 文件目录
-            test_dir: 测试目录 (simulation_results/{test_name}/)
-            annotator_cls: DataAnnotator 类引用
-
-        Returns:
-            生成的文件路径列表
-        """
-        coverage_report_dir = test_dir / "coverage" / "report"
-        if not coverage_report_dir.is_dir():
-            return []
-
-        output_dir = test_dir / "annotated"
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        # 收集 RTLIL JSON 文件（按 module_names 过滤）
-        if self._module_names is not None:
-            # 检查缺失的 JSON 文件并尝试通过 YosysRunner 生成
-            design_dir = rtlil_json_dir.parent
-            flist = design_dir / f"{design_dir.name}.flist"
-
-            for name in self._module_names:
-                json_path = rtlil_json_dir / f"{name}.json"
-                if not json_path.exists():
-                    logger.info("RTLIL JSON 不存在，尝试生成: %s", json_path)
-                    try:
-                        runner = YosysRunner()
-                        runner.get_json(
-                            top_module=name,
-                            output_dir=rtlil_json_dir,
-                            flist=flist,
-                            files=None,
-                        )
-                    except Exception as e:
-                        logger.error("YosysRunner 生成失败 [%s]: %s", name, e)
-
-            json_files = [
-                rtlil_json_dir / f"{name}.json"
-                for name in self._module_names
-                if (rtlil_json_dir / f"{name}.json").exists()
-            ]
-        else:
-            json_files = sorted(rtlil_json_dir.glob("*.json"))
-
-        generated: List[str] = []
-
-        for json_file in json_files:
-            module_name = json_file.stem
-            output_path = output_dir / f"{module_name}.json"
-
-            # 跳过已标注的文件
-            if output_path.exists():
-                generated.append(str(output_path))
-                continue
-
-            try:
-                annotator = annotator_cls.from_args(
-                    design_json=str(json_file),
-                    coverage_dir=str(coverage_report_dir),
-                    propagate=False,
-                )
-                annotator.extract_cdfg()
-                annotator.find_coverage_files()
-                annotator.annotate()
-                annotator.export_json(str(output_path))
-                generated.append(str(output_path))
-            except Exception as e:
-                logger.error(
-                    "标注失败 [%s/%s]: %s", test_dir.name, module_name, e
-                )
-
-        return generated
-
-    def _generate_asm_cdfg_json(self, test_dir: Path) -> Optional[str]:
-        """
-        为单个测试生成 ASM CDFG JSON
-
-        在 test_dir 中查找 {test_name}.S 文件，提取 ASM CDFG 并导出为
-        {test_name}.json（与 .S 文件同目录同名）。
-
-        Args:
-            test_dir: 测试目录 (simulation_results/{test_name}/)
-
-        Returns:
-            生成的 JSON 文件路径，失败返回 None
-        """
-        test_name = test_dir.name
-        s_file = test_dir / f"{test_name}.S"
-
-        if not s_file.exists():
-            logger.debug("未找到汇编文件: %s", s_file)
-            return None
-
-        output_path = test_dir / f"{test_name}.json"
+        # 跳过已标注的文件
+        if output_path.exists():
+            generated.append(str(output_path))
+            continue
 
         try:
-            extractor = AsmCDFGExtractor(verbose=False)
-            cdfg = extractor.extract_from_file(str(s_file))
-
-            # JSON 序列化
-            export_data = cdfg.to_dict()
-
-            with open(output_path, "w", encoding="utf-8") as f:
-                json.dump(export_data, f, indent=2, ensure_ascii=False)
-
-            logger.info("ASM CDFG 已生成: %s", output_path)
-            return str(output_path)
-
+            annotator = DataAnnotator.from_args(
+                design_json=str(json_file),
+                coverage_dir=str(coverage_report_dir),
+                propagate=False,
+            )
+            annotator.extract_cdfg()
+            annotator.find_coverage_files()
+            annotator.annotate()
+            annotator.export_json(str(output_path))
+            generated.append(str(output_path))
         except Exception as e:
-            logger.error("ASM CDFG 生成失败 [%s]: %s", test_name, e)
-            return None
+            logger.error(
+                "标注失败 [%s/%s]: %s", test_dir.name, module_name, e
+            )
 
-    def _build_dual_graph_data(
-        self, rtl_json_path: str, asm_json_path: str
-    ) -> Optional[DualGraphData]:
-        """
-        从标注 RTL JSON 和 ASM CDFG JSON 构建 DualGraphData 张量
+    return generated
 
-        Args:
-            rtl_json_path: 标注后的 RTL CDFG JSON 路径
-            asm_json_path: ASM CDFG JSON 路径
 
-        Returns:
-            DualGraphData 对象，失败返回 None
-        """
+def _generate_asm_cdfg_json(test_dir: Path) -> Optional[str]:
+    """为单个测试生成 ASM CDFG JSON（模块级函数，供多进程调用）"""
+    test_name = test_dir.name
+    s_file = test_dir / f"{test_name}.S"
+
+    if not s_file.exists():
+        logger.debug("未找到汇编文件: %s", s_file)
+        return None
+
+    output_path = test_dir / f"{test_name}.json"
+
+    try:
+        extractor = AsmCDFGExtractor(verbose=False)
+        cdfg = extractor.extract_from_file(str(s_file))
+        export_data = cdfg.to_dict()
+
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(export_data, f, indent=2, ensure_ascii=False)
+
+        logger.info("ASM CDFG 已生成: %s", output_path)
+        return str(output_path)
+
+    except Exception as e:
+        logger.error("ASM CDFG 生成失败 [%s]: %s", test_name, e)
+        return None
+
+
+def _process_single_test(
+    args: tuple[str, str, Optional[list[str]]],
+) -> list[tuple[str, Optional[str]]]:
+    """阶段 1 worker: 单个测试目录的 CPU 预处理（RTL 标注 + ASM 提取）
+
+    Args:
+        args: (rtlil_json_dir, test_dir, module_names)
+
+    Returns:
+        [(rtl_json_path, asm_json_path), ...] 列表
+    """
+    rtlil_json_dir_str, test_dir_str, module_names = args
+    rtlil_json_dir = Path(rtlil_json_dir_str)
+    test_dir = Path(test_dir_str)
+
+    # RTL 标注
+    rtl_files = _generate_annotated_json(rtlil_json_dir, test_dir, module_names)
+
+    # ASM CDFG 提取
+    asm_json = _generate_asm_cdfg_json(test_dir)
+
+    return [(rtl, asm_json) for rtl in rtl_files]
+
+
+def _build_and_save(
+    args: tuple[str, Optional[str], Optional["torch.Tensor"], str, int],
+) -> bool:
+    """阶段 3 worker: 构建 DualGraphData 并保存 .pt
+
+    Args:
+        args: (rtl_json_path, asm_json_path, asm_encoding, processed_dir, idx)
+
+    Returns:
+        True 成功, False 失败
+    """
+    rtl_json_path, asm_json_path, asm_encoding, processed_dir, idx = args
+
+    try:
         # ── RTL 图 ──
         with open(rtl_json_path, encoding="utf-8") as f:
             rtl = json.load(f)
@@ -327,7 +187,7 @@ class DualGraphDataset(Dataset):
             si = node_id_to_idx.get(e["source"])
             ti = node_id_to_idx.get(e["target"])
             if si is None or ti is None:
-                continue  # 跳过悬空边
+                continue
             src_list.append(si)
             tgt_list.append(ti)
             etype_list.append(_EDGE_TYPE_MAP.get(e["type"], 0))
@@ -368,7 +228,13 @@ class DualGraphDataset(Dataset):
                 asm_et.append(_ASM_EDGE_TYPE_MAP.get(ae["edge_type"], 0))
 
             asm_node_type = torch.tensor(asm_nt, dtype=torch.long)
-            asm_instr_enc = torch.zeros(len(asm_node_ids), 256)  # 占位
+
+            # 使用预计算的编码，或回退到零向量
+            if asm_encoding is not None:
+                asm_instr_enc = asm_encoding
+            else:
+                asm_instr_enc = torch.zeros(len(asm_node_ids), 256)
+
             if asm_src:
                 asm_edge_index = torch.tensor(
                     [asm_src, asm_tgt], dtype=torch.long
@@ -377,17 +243,14 @@ class DualGraphDataset(Dataset):
                 asm_edge_index = torch.empty((2, 0), dtype=torch.long)
             asm_edge_type = torch.tensor(asm_et, dtype=torch.long)
         else:
-            raise RuntimeError(f"ASM JSON 文件缺失，无法构建DualGraphData图: {asm_json_path}")
-            # 无 ASM 文件 → 空图
-            # asm_node_type = torch.empty(0, dtype=torch.long)
-            # asm_instr_enc = torch.empty((0, 256))
-            # asm_edge_index = torch.empty((2, 0), dtype=torch.long)
-            # asm_edge_type = torch.empty(0, dtype=torch.long)
+            raise RuntimeError(
+                f"ASM JSON 文件缺失，无法构建 DualGraphData: {asm_json_path}"
+            )
 
         # ── 图级标签 y ──
-        y = rtl.get("branch_coverage", 0.0) / 100.0  # 百分比 → [0, 1] 归一化
+        y = rtl.get("branch_coverage", 0.0) / 100.0
 
-        return DualGraphData(
+        data = DualGraphData(
             node_cell_type=torch.tensor(node_cell_type, dtype=torch.long),
             node_width=torch.tensor(node_width, dtype=torch.long),
             edge_index=edge_index,
@@ -401,6 +264,214 @@ class DualGraphDataset(Dataset):
             asm_edge_type=asm_edge_type,
             edge_labels=torch.tensor(elabel_list, dtype=torch.long),
             y=torch.tensor([[y]], dtype=torch.float),
+        )
+
+        pt_path = Path(processed_dir) / f"data_{idx}.pt"
+        torch.save(data, pt_path)
+        return True
+
+    except Exception as e:
+        logger.error("构建/保存 DualGraphData 失败 [%s]: %s", rtl_json_path, e)
+        return False
+
+
+class DualGraphDataset(Dataset):
+    """
+    双图数据集 - 继承自 PyG Dataset
+
+    支持磁盘持久化，数据按索引存储在 processed_dir 中。
+    通过 sim_results_dirs 指定原始数据路径，自动执行标注和张量构建。
+
+    Args:
+        root: 数据集根目录，包含 raw/ 和 processed/ 子目录
+        sim_results_dirs: simulation_results 目录路径列表
+        module_names: 要标注的模块名列表（不含 .json 后缀），None 表示全部
+        text_encoder_config: 文本编码器配置，None 时回退到零向量
+        transform: 每次获取数据时应用的变换
+        pre_transform: 处理前应用的变换（保存到磁盘）
+        pre_filter: 处理前的过滤函数
+
+    目录结构:
+        root/
+        ├── raw/              # 原始文件（可选）
+        └── processed/        # 处理后的 .pt 文件
+            ├── data_0.pt
+            ├── data_1.pt
+            └── ...
+
+    Example:
+        >>> # 首次创建数据集（处理并保存）
+        >>> dataset = DualGraphDataset(
+        ...     root='./data',
+        ...     sim_results_dirs=['designs/cv32e40p/simulation_results'],
+        ... )
+
+        >>> # 后续加载（从磁盘读取）
+        >>> dataset = DualGraphDataset(root='./data')
+        >>> len(dataset)
+        2
+        >>> dataset[0]
+        DualGraphData(...)
+    """
+
+    def __init__(
+        self,
+        root: Optional[str] = "dataset_root",
+        sim_results_dirs: Optional[List[str]] = None,
+        module_names: Optional[List[str]] = None,
+        text_encoder_config: Optional["TextEncoderConfig"] = None,
+        num_workers: int = 0,
+        transform: Optional[Callable] = None,
+        pre_transform: Optional[Callable] = None,
+        pre_filter: Optional[Callable] = None,
+    ):
+        """
+        Args:
+            root: 数据集根目录
+            sim_results_dirs: simulation_results 目录路径列表
+            module_names: 要标注的模块名列表（不含 .json 后缀），None 表示全部
+            text_encoder_config: 文本编码器配置，None 时回退到零向量
+            num_workers: CPU 并行进程数，0 = 自动检测 min(cpu_count, 32)
+            transform: 每次获取数据时应用的变换
+            pre_transform: 处理前应用的变换
+            pre_filter: 处理前的过滤函数
+        """
+        self.root = root
+        self._sim_results_dirs = sim_results_dirs or [
+            "designs/cv32e40p/simulation_results"
+        ]
+        self._module_names = module_names or [
+            "cv32e40p_int_controller",
+        ]
+        self._num_samples: Optional[int] = None
+        self._text_encoder_config = text_encoder_config
+        self._text_encoder: Optional["MultiGPUInstructionEncoder"] = None
+        self._num_workers = num_workers or min(os.cpu_count() or 1, 32)
+        super().__init__(root, transform, pre_transform, pre_filter)
+
+    @property
+    def raw_file_names(self) -> List[str]:
+        return self._sim_results_dirs
+
+    @property
+    def processed_file_names(self) -> List[str]:
+        """处理后的文件列表"""
+        # 动态读取 processed_dir 中的文件
+        if self._num_samples is not None:
+            return [f"data_{i}.pt" for i in range(self._num_samples)]
+
+        # 检查已存在的文件
+        processed_path = Path(self.processed_dir)
+        if processed_path.exists():
+            files = sorted(
+                f.name
+                for f in processed_path.iterdir()
+                if f.name.startswith("data_") and f.name.endswith(".pt")
+            )
+            if files:
+                self._num_samples = len(files)
+                return files
+
+        return []
+
+    def download(self):
+        pass
+
+    def process(self):
+        """三阶段流水线处理：多进程 CPU 预处理 → 批量 GPU 编码 → 多进程张量构建"""
+
+        # 收集所有 (rtlil_json_dir, test_dir, module_names) 任务
+        task_args: list[tuple[str, str, Optional[list[str]]]] = []
+
+        for raw_path in self.raw_file_names:
+            sim_results_dir = Path(raw_path)
+            if not sim_results_dir.is_dir():
+                logger.warning("simulation_results 目录不存在: %s", sim_results_dir)
+                continue
+
+            design_dir = sim_results_dir.parent
+            rtlil_json_dir = design_dir / "RTLIL_json"
+
+            if not rtlil_json_dir.is_dir():
+                try:
+                    rtlil_json_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info("已创建 RTLIL JSON 目录: %s", rtlil_json_dir)
+                except Exception as e:
+                    raise RuntimeError(f"无法创建 RTLIL JSON 目录: {rtlil_json_dir}") from e
+
+            for test_dir in sorted(sim_results_dir.iterdir()):
+                if not test_dir.is_dir():
+                    continue
+                task_args.append((
+                    str(rtlil_json_dir),
+                    str(test_dir),
+                    self._module_names,
+                ))
+
+        if not task_args:
+            logger.warning("未找到任何测试目录")
+            self._num_samples = 0
+            return
+
+        # ── 阶段 1: 多进程 CPU 预处理（RTL 标注 + ASM 提取）──
+        logger.info(
+            "阶段 1/3: 多进程 CPU 预处理 (%d 个测试, %d workers)",
+            len(task_args), self._num_workers,
+        )
+        with Pool(self._num_workers) as pool:
+            all_results = pool.map(_process_single_test, task_args)
+
+        # 展平结果: [(rtl_path, asm_path), ...]
+        flat_results: list[tuple[str, Optional[str]]] = []
+        for result_list in all_results:
+            flat_results.extend(result_list)
+
+        if not flat_results:
+            logger.warning("阶段 1 未产生任何有效结果")
+            self._num_samples = 0
+            return
+
+        logger.info("阶段 1 完成: %d 个 (rtl, asm) 对", len(flat_results))
+
+        # ── 阶段 2: 批量 GPU 编码（CodeBERT）──
+        asm_encodings: dict[str, "torch.Tensor"] = {}
+        unique_asm_paths = list({
+            asm for _, asm in flat_results if asm is not None
+        })
+
+        if self._text_encoder_config is not None and unique_asm_paths:
+            from text_encoder import MultiGPUInstructionEncoder
+
+            logger.info(
+                "阶段 2/3: 批量 GPU 编码 (%d 个 ASM 文件)", len(unique_asm_paths)
+            )
+            self._text_encoder = MultiGPUInstructionEncoder(self._text_encoder_config)
+            asm_encodings = self._text_encoder.encode_asm_jsons_batch(
+                unique_asm_paths
+            )
+            logger.info("阶段 2 完成: %d 个编码结果", len(asm_encodings))
+        else:
+            logger.info("阶段 2/3: 跳过 GPU 编码（无编码器配置或无 ASM 文件）")
+
+        # ── 阶段 3: 多进程张量构建 + 保存 ──
+        processed_dir = str(Path(self.processed_dir))
+        save_args: list[tuple[str, Optional[str], Optional["torch.Tensor"], str, int]] = []
+
+        for i, (rtl_path, asm_path) in enumerate(flat_results):
+            enc = asm_encodings.get(asm_path) if asm_path else None
+            save_args.append((rtl_path, asm_path, enc, processed_dir, i))
+
+        logger.info(
+            "阶段 3/3: 多进程张量构建 + 保存 (%d 个样本, %d workers)",
+            len(save_args), self._num_workers,
+        )
+        with Pool(self._num_workers) as pool:
+            results = pool.map(_build_and_save, save_args)
+
+        success_count = sum(1 for r in results if r)
+        self._num_samples = success_count
+        logger.info(
+            "数据处理完成: %d/%d 个样本成功", success_count, len(save_args)
         )
 
     def len(self) -> int:
@@ -435,9 +506,9 @@ class DualGraphDataModule(L.LightningDataModule):
     def __init__(
         self,
         root: str,
-        train_data: Optional[List[DualGraphData]] = None,
-        val_data: Optional[List[DualGraphData]] = None,
-        test_data: Optional[List[DualGraphData]] = None,
+        sim_results_dirs: Optional[List[str]] = None,
+        module_names: Optional[List[str]] = None,
+        text_encoder_config: Optional["TextEncoderConfig"] = None,
         batch_size: int = 32,
         num_workers: int = 4,
         transform: Optional[Callable] = None,
@@ -445,18 +516,18 @@ class DualGraphDataModule(L.LightningDataModule):
         """
         Args:
             root: 数据集根目录
-            train_data: 训练数据列表（首次运行时提供）
-            val_data: 验证数据列表（首次运行时提供）
-            test_data: 测试数据列表（首次运行时提供）
+            sim_results_dirs: simulation_results 目录路径列表
+            module_names: 要标注的模块名列表（不含 .json 后缀），None 表示全部
+            text_encoder_config: 文本编码器配置，None 时回退到零向量
             batch_size: 批大小
             num_workers: 数据加载线程数
             transform: 数据变换
         """
         super().__init__()
         self.root = root
-        self.train_data = train_data
-        self.val_data = val_data
-        self.test_data = test_data
+        self.sim_results_dirs = sim_results_dirs
+        self.module_names = module_names
+        self.text_encoder_config = text_encoder_config
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.transform = transform
@@ -471,21 +542,27 @@ class DualGraphDataModule(L.LightningDataModule):
         if stage == "fit" or stage is None:
             self.train_dataset = DualGraphDataset(
                 root=str(root_path / "train"),
-                data_list=self.train_data,
+                sim_results_dirs=self.sim_results_dirs,
+                module_names=self.module_names,
+                text_encoder_config=self.text_encoder_config,
                 transform=self.transform,
             )
-            if self.val_data is not None or (root_path / "val" / "processed").exists():
+            if (root_path / "val" / "processed").exists():
                 self.val_dataset = DualGraphDataset(
                     root=str(root_path / "val"),
-                    data_list=self.val_data,
+                    sim_results_dirs=self.sim_results_dirs,
+                    module_names=self.module_names,
+                    text_encoder_config=self.text_encoder_config,
                     transform=self.transform,
                 )
 
         if stage == "test" or stage is None:
-            if self.test_data is not None or (root_path / "test" / "processed").exists():
+            if (root_path / "test" / "processed").exists():
                 self.test_dataset = DualGraphDataset(
                     root=str(root_path / "test"),
-                    data_list=self.test_data,
+                    sim_results_dirs=self.sim_results_dirs,
+                    module_names=self.module_names,
+                    text_encoder_config=self.text_encoder_config,
                     transform=self.transform,
                 )
 

@@ -33,6 +33,8 @@ designs/openc910
 *.js
 *.html
 *.css
+tests/
+dataset_root/
 # 测试和设计文档
 trainer/test_trainer.py
 models/test_model.py
