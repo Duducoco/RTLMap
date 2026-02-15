@@ -19,7 +19,7 @@ from torch_geometric.loader import DataLoader as PyGDataLoader
 from cdfg_asm import AsmCDFGExtractor
 from cdfg_rtl.data_types import EdgeType, get_cell_type_index
 from cdfg_asm.data_types import AsmNodeType, AsmEdgeType
-from tools import YosysRunner
+from scripts.RTLIL_extract import extract_rtlil_json
 from .data_types import DualGraphData
 
 logger = logging.getLogger(__name__)
@@ -46,24 +46,17 @@ def _generate_annotated_json(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # 收集 RTLIL JSON 文件（按 module_names 过滤）
+    # RTLIL 生成已提取到 scripts.RTLIL_extract，此处假设文件已预先生成
     if module_names is not None:
-        design_dir = rtlil_json_dir.parent
-        flist = design_dir / f"{design_dir.name}.flist"
-
-        for name in module_names:
-            json_path = rtlil_json_dir / f"{name}.json"
-            if not json_path.exists():
-                logger.info("RTLIL JSON 不存在，尝试生成: %s", json_path)
-                try:
-                    runner = YosysRunner()
-                    runner.get_json(
-                        top_module=name,
-                        output_dir=rtlil_json_dir,
-                        flist=flist,
-                        files=None,
-                    )
-                except Exception as e:
-                    logger.error("YosysRunner 生成失败 [%s]: %s", name, e)
+        # 如果缺失则尝试通过 extract_rtlil_json 补充生成
+        sim_results_dir = rtlil_json_dir.parent / "simulation_results"
+        missing = [
+            name for name in module_names
+            if not (rtlil_json_dir / f"{name}.json").exists()
+        ]
+        if missing:
+            logger.info("检测到 %d 个缺失的 RTLIL JSON，尝试生成", len(missing))
+            extract_rtlil_json(sim_results_dir, missing)
 
         json_files = [
             rtlil_json_dir / f"{name}.json"
@@ -392,12 +385,8 @@ class DualGraphDataset(Dataset):
             design_dir = sim_results_dir.parent
             rtlil_json_dir = design_dir / "RTLIL_json"
 
-            if not rtlil_json_dir.is_dir():
-                try:
-                    rtlil_json_dir.mkdir(parents=True, exist_ok=True)
-                    logger.info("已创建 RTLIL JSON 目录: %s", rtlil_json_dir)
-                except Exception as e:
-                    raise RuntimeError(f"无法创建 RTLIL JSON 目录: {rtlil_json_dir}") from e
+            # RTLIL JSON 预生成（委托给 scripts.RTLIL_extract）
+            extract_rtlil_json(sim_results_dir, self._module_names)
 
             for test_dir in sorted(sim_results_dir.iterdir()):
                 if not test_dir.is_dir():
