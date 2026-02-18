@@ -336,6 +336,14 @@ class DualGraphDataset(Dataset):
             "designs/cv32e40p/simulation_results"
         ]
         self._module_names = module_names or [
+            "cv32e40p_alu_div",
+            "cv32e40p_ff_one",
+            "cv32e40p_mult",
+            "cv32e40p_register_file",
+            "cv32e40p_controller",
+            "cv32e40p_decoder",
+            "cv32e40p_aligner",
+            "cv32e40p_compressed_decoder",
             "cv32e40p_int_controller",
         ]
         self._num_samples: Optional[int] = None
