@@ -106,6 +106,11 @@ def _generate_asm_cdfg_json(test_dir: Path) -> Optional[str]:
 
     output_path = test_dir / f"{test_name}.json"
 
+    # 跳过已生成的 ASM CDFG JSON
+    if output_path.exists():
+        logger.debug("ASM CDFG JSON 已存在，跳过: %s", output_path)
+        return str(output_path)
+
     try:
         extractor = AsmCDFGExtractor(verbose=False)
         cdfg = extractor.extract_from_file(str(s_file))
@@ -382,8 +387,26 @@ class DualGraphDataset(Dataset):
             design_dir = sim_results_dir.parent
             rtlil_json_dir = design_dir / "RTLIL_json"
 
-            # RTLIL JSON 预生成（委托给 scripts.RTLIL_extract）
-            extract_rtlil_json(sim_results_dir, self._module_names)
+            # RTLIL JSON 预生成：仅当存在缺失的模块 JSON 时才调用
+            if self._module_names is not None:
+                missing = [
+                    name
+                    for name in self._module_names
+                    if not (rtlil_json_dir / f"{name}.json").exists()
+                ]
+                if missing:
+                    logger.info(
+                        "RTLIL JSON 缺失 %d/%d 个模块，开始生成",
+                        len(missing),
+                        len(self._module_names),
+                    )
+                    extract_rtlil_json(sim_results_dir, self._module_names)
+                else:
+                    logger.info(
+                        "所有 RTLIL JSON 已存在，跳过生成: %s", rtlil_json_dir
+                    )
+            else:
+                extract_rtlil_json(sim_results_dir, self._module_names)
 
             for test_dir in sorted(sim_results_dir.iterdir()):
                 if not test_dir.is_dir():
