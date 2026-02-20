@@ -316,6 +316,7 @@ class DualGraphDataset(Dataset):
         module_names: Optional[List[str]] = None,
         text_encoder_config: Optional["TextEncoderConfig"] = None,
         num_workers: int = 0,
+        preprocess_only: bool = False,
         transform: Optional[Callable] = None,
         pre_transform: Optional[Callable] = None,
         pre_filter: Optional[Callable] = None,
@@ -327,6 +328,7 @@ class DualGraphDataset(Dataset):
             module_names: 要标注的模块名列表（不含 .json 后缀），None 表示全部
             text_encoder_config: 文本编码器配置，None 时回退到零向量
             num_workers: CPU 并行进程数，0 = 自动检测 min(cpu_count, 32)
+            preprocess_only: 仅执行阶段 1 预处理（生成中间 JSON），跳过 GPU 编码和张量构建
             transform: 每次获取数据时应用的变换
             pre_transform: 处理前应用的变换
             pre_filter: 处理前的过滤函数
@@ -347,6 +349,7 @@ class DualGraphDataset(Dataset):
             "cv32e40p_int_controller",
         ]
         self._num_samples: Optional[int] = None
+        self._preprocess_only = preprocess_only
         self._text_encoder_config = text_encoder_config
         self._text_encoder: Optional["MultiGPUInstructionEncoder"] = None
         self._num_workers = num_workers or min(os.cpu_count() or 1, 32)
@@ -410,9 +413,7 @@ class DualGraphDataset(Dataset):
                     )
                     extract_rtlil_json(sim_results_dir, self._module_names)
                 else:
-                    logger.info(
-                        "所有 RTLIL JSON 已存在，跳过生成: %s", rtlil_json_dir
-                    )
+                    logger.info("所有 RTLIL JSON 已存在，跳过生成: %s", rtlil_json_dir)
             else:
                 extract_rtlil_json(sim_results_dir, self._module_names)
 
@@ -452,6 +453,12 @@ class DualGraphDataset(Dataset):
             return
 
         logger.info("阶段 1 完成: %d 个 (rtl, asm) 对", len(flat_results))
+
+        # preprocess_only 模式：仅执行阶段 1，跳过 GPU 编码和张量构建
+        if self._preprocess_only:
+            logger.info("preprocess_only 模式：跳过阶段 2/3，仅生成中间 JSON 文件")
+            self._num_samples = 0
+            return
 
         # ── 阶段 2: 批量 GPU 编码（CodeBERT）──
         asm_encodings: dict[str, "torch.Tensor"] = {}
@@ -528,6 +535,7 @@ class DualGraphDataModule(L.LightningDataModule):
         text_encoder_config: Optional["TextEncoderConfig"] = None,
         batch_size: int = 32,
         num_workers: int = 4,
+        preprocess_only: bool = False,
         transform: Optional[Callable] = None,
     ):
         """
@@ -538,6 +546,7 @@ class DualGraphDataModule(L.LightningDataModule):
             text_encoder_config: 文本编码器配置，None 时回退到零向量
             batch_size: 批大小
             num_workers: 数据加载线程数
+            preprocess_only: 仅执行阶段 1 预处理（生成中间 JSON），跳过 GPU 编码和张量构建
             transform: 数据变换
         """
         super().__init__()
@@ -547,6 +556,7 @@ class DualGraphDataModule(L.LightningDataModule):
         self.text_encoder_config = text_encoder_config
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.preprocess_only = preprocess_only
         self.transform = transform
 
         self.train_dataset = None
@@ -562,6 +572,7 @@ class DualGraphDataModule(L.LightningDataModule):
                 sim_results_dirs=self.sim_results_dirs,
                 module_names=self.module_names,
                 text_encoder_config=self.text_encoder_config,
+                preprocess_only=self.preprocess_only,
                 transform=self.transform,
             )
             if (root_path / "val" / "processed").exists():
@@ -570,6 +581,7 @@ class DualGraphDataModule(L.LightningDataModule):
                     sim_results_dirs=self.sim_results_dirs,
                     module_names=self.module_names,
                     text_encoder_config=self.text_encoder_config,
+                    preprocess_only=self.preprocess_only,
                     transform=self.transform,
                 )
 
@@ -580,6 +592,7 @@ class DualGraphDataModule(L.LightningDataModule):
                     sim_results_dirs=self.sim_results_dirs,
                     module_names=self.module_names,
                     text_encoder_config=self.text_encoder_config,
+                    preprocess_only=self.preprocess_only,
                     transform=self.transform,
                 )
 

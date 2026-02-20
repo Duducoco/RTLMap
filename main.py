@@ -49,26 +49,34 @@ def parse_args() -> argparse.Namespace:
     data = p.add_argument_group("数据")
     data.add_argument("--data-root", type=str, required=True, help="数据集根目录")
     data.add_argument(
-        "--sim-results-dirs", nargs="*", default=None,
+        "--sim-results-dirs",
+        nargs="*",
+        default=None,
         help="simulation_results 目录路径列表",
     )
     data.add_argument(
-        "--module-names", nargs="*", default=None,
+        "--module-names",
+        nargs="*",
+        default=None,
         help="要标注的模块名列表（不含 .json 后缀）",
     )
 
     # ── 模型架构 ──────────────────────────────────────────
     model = p.add_argument_group("模型架构")
     model.add_argument("--hidden-dim", type=int, default=256)
-    model.add_argument("--num-gnn-layers", type=int, default=4)
+    model.add_argument("--num-gnn-layers", type=int, default=6)
     model.add_argument("--dropout", type=float, default=0.1)
     model.add_argument(
-        "--fusion-type", choices=["film", "ssm_film"], default="ssm_film",
+        "--fusion-type",
+        choices=["film", "ssm_film"],
+        default="ssm_film",
         help="融合模式",
     )
-    model.add_argument("--ssm-d-state", type=int, default=16, help="SSM 状态空间维度")
+    model.add_argument("--ssm-d-state", type=int, default=64, help="SSM 状态空间维度")
     model.add_argument(
-        "--ssm-pool-mode", choices=["last", "mean", "attention"], default="last",
+        "--ssm-pool-mode",
+        choices=["last", "mean", "attention"],
+        default="last",
     )
 
     # ── 训练超参数 ────────────────────────────────────────
@@ -82,7 +90,9 @@ def parse_args() -> argparse.Namespace:
     train_g.add_argument("--accumulate-grad-batches", type=int, default=1)
     train_g.add_argument("--warmup-steps", type=int, default=100)
     train_g.add_argument(
-        "--scheduler", choices=["cosine", "linear", "none"], default="cosine",
+        "--scheduler",
+        choices=["cosine", "linear", "none"],
+        default="cosine",
     )
     train_g.add_argument("--edge-loss-weight", type=float, default=1.0)
     train_g.add_argument("--graph-loss-weight", type=float, default=1.0)
@@ -91,37 +101,45 @@ def parse_args() -> argparse.Namespace:
     # ── 设备与精度 ────────────────────────────────────────
     device = p.add_argument_group("设备")
     device.add_argument(
-        "--accelerator", choices=["auto", "gpu", "cpu"], default="auto",
+        "--accelerator",
+        choices=["auto", "gpu", "cpu"],
+        default="auto",
     )
     device.add_argument("--devices", default="auto", help="设备数量或 ID")
     device.add_argument(
         "--precision",
         choices=["32-true", "16-mixed", "bf16-mixed"],
-        default="32-true",
+        default="16-mixed",
     )
 
     # ── 文本编码器 ────────────────────────────────────────
     text = p.add_argument_group("文本编码器 (CodeBERT)")
     text.add_argument(
-        "--use-text-encoder", action="store_true",
+        "--use-text-encoder",
+        action="store_true",
         help="启用 CodeBERT 指令编码（默认回退到零向量）",
     )
     text.add_argument(
-        "--text-model-name", default="microsoft/codebert-base",
+        "--text-model-name",
+        default="microsoft/codebert-base",
         help="HuggingFace 模型名称",
     )
     text.add_argument("--text-output-dim", type=int, default=256)
     text.add_argument("--text-max-length", type=int, default=512)
     text.add_argument("--text-batch-size", type=int, default=256)
     text.add_argument(
-        "--text-pooling", choices=["mean", "cls"], default="mean",
+        "--text-pooling",
+        choices=["mean", "cls"],
+        default="mean",
     )
 
     # ── 实验管理 ──────────────────────────────────────────
     exp = p.add_argument_group("实验")
     exp.add_argument("--experiment-name", default="dual_graph_gnn")
     exp.add_argument(
-        "--logger-type", choices=["tensorboard", "csv"], default="tensorboard",
+        "--logger-type",
+        choices=["tensorboard", "csv"],
+        default="tensorboard",
     )
     exp.add_argument("--checkpoint-dir", default="checkpoints")
     exp.add_argument("--save-top-k", type=int, default=3)
@@ -132,7 +150,14 @@ def parse_args() -> argparse.Namespace:
     mode = p.add_argument_group("运行模式")
     mode.add_argument("--ckpt-path", default=None, help="检查点路径（恢复训练或测试）")
     mode.add_argument("--test-only", action="store_true", help="仅运行测试")
-    mode.add_argument("--fast-dev-run", action="store_true", help="快速调试（单 batch）")
+    mode.add_argument(
+        "--preprocess-only",
+        action="store_true",
+        help="仅执行阶段 1 预处理（生成中间 JSON），跳过 GPU 编码和训练",
+    )
+    mode.add_argument(
+        "--fast-dev-run", action="store_true", help="快速调试（单 batch）"
+    )
     mode.add_argument("--seed", type=int, default=None, help="全局随机种子")
 
     return p.parse_args()
@@ -216,21 +241,41 @@ def main() -> None:
     text_encoder_config = build_text_encoder_config(args)
 
     logger.info("实验: %s", args.experiment_name)
-    logger.info("模型: hidden_dim=%d, gnn_layers=%d, fusion=%s",
-                model_config.hidden_dim, model_config.num_gnn_layers,
-                model_config.fusion_type)
-    logger.info("训练: epochs=%d, lr=%.1e, batch_size=%d",
-                trainer_config.max_epochs, trainer_config.learning_rate,
-                trainer_config.batch_size)
+    logger.info(
+        "模型: hidden_dim=%d, gnn_layers=%d, fusion=%s",
+        model_config.hidden_dim,
+        model_config.num_gnn_layers,
+        model_config.fusion_type,
+    )
+    logger.info(
+        "训练: epochs=%d, lr=%.1e, batch_size=%d",
+        trainer_config.max_epochs,
+        trainer_config.learning_rate,
+        trainer_config.batch_size,
+    )
 
-    if args.test_only:
+    if args.preprocess_only:
+        # 仅预处理模式：执行阶段 1 生成中间 JSON 文件
+        logger.info("预处理模式：仅执行阶段 1（生成中间 JSON）")
+        datamodule = DualGraphDataModule(
+            root=args.data_root,
+            sim_results_dirs=args.sim_results_dirs,
+            module_names=args.module_names,
+            preprocess_only=True,
+            batch_size=trainer_config.batch_size,
+            num_workers=trainer_config.num_workers,
+        )
+        datamodule.setup("fit")
+        logger.info("预处理完成")
+    elif args.test_only:
         # 仅测试模式
         if args.ckpt_path is None:
             logger.error("--test-only 需要指定 --ckpt-path")
             sys.exit(1)
 
         module = DualGraphLightningModule.load_from_checkpoint(
-            args.ckpt_path, model_config=model_config,
+            args.ckpt_path,
+            model_config=model_config,
         )
         datamodule = DualGraphDataModule(
             root=args.data_root,

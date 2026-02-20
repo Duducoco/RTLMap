@@ -196,7 +196,7 @@ class DataAnnotator:
             if node.source_file:
                 cdfg_source_files.add(node.source_file)
 
-        print(f"\nCDFG 中包含 {len(cdfg_source_files)} 个源文件的节点")
+        # print(f"\nCDFG 中包含 {len(cdfg_source_files)} 个源文件的节点")
 
         # 获取源文件到 HTML 的映射（优先使用缓存）
         source_to_html = self._build_source_to_html_cache(design_dir, coverage_dir)
@@ -216,7 +216,7 @@ class DataAnnotator:
                     coverage_files.append(str(html_path))
                     matched_sources.append(source_file)
 
-        print(f"匹配到 {len(coverage_files)} 个覆盖率报告文件")
+        # print(f"匹配到 {len(coverage_files)} 个覆盖率报告文件")
 
         if self.config.verbose and matched_sources:
             for src in matched_sources:
@@ -262,15 +262,15 @@ class DataAnnotator:
         if not design_json_path.exists():
             raise FileNotFoundError(f"设计文件不存在: {self.config.design_json}")
 
-        print(f"正在从 {self.config.design_json} 提取 CDFG...")
+        # print(f"正在从 {self.config.design_json} 提取 CDFG...")
         extractor = CDFGExtractor(self.config.design_json)
         self.cdfg = extractor.extract()
 
-        print(f"模块: {self.cdfg.module_name}")
-        print(f"节点数: {len(self.cdfg.nodes)}")
-        print(f"边数: {len(self.cdfg.edges)}")
+        # print(f"模块: {self.cdfg.module_name}")
+        # print(f"节点数: {len(self.cdfg.nodes)}")
+        # print(f"边数: {len(self.cdfg.edges)}")
 
-        self._print_verbose_info()
+        # self._print_verbose_info()
 
         return self.cdfg
 
@@ -319,14 +319,14 @@ class DataAnnotator:
             self.stats = total_stats
             return total_stats
 
-        print(f"\n找到 {len(self.coverage_files)} 个覆盖率报告文件")
+        # print(f"\n找到 {len(self.coverage_files)} 个覆盖率报告文件")
 
         # 分支覆盖率汇总累加器
         total_branches_sum = 0
         covered_branches_sum = 0
 
         for html_path in self.coverage_files:
-            print(f"\n--- 正在处理: {Path(html_path).name} ---")
+            # print(f"\n--- 正在处理: {Path(html_path).name} ---")
 
             # 解析覆盖率
             try:
@@ -339,17 +339,17 @@ class DataAnnotator:
             module_name = cov_parser.get_module_name()
             source_file = cov_parser.get_source_file()
 
-            if module_name:
-                print(f"  模块: {module_name}")
-            if source_file:
-                print(f"  源文件: {source_file}")
+            # if module_name:
+            #     print(f"  模块: {module_name}")
+            # if source_file:
+            #     print(f"  源文件: {source_file}")
 
             # 获取实例标签
             instance_tag = self.config.instance
             if instance_tag is None:
                 instance_tag = cov_parser.get_last_instance()
-                if instance_tag:
-                    print(f"  实例: {instance_tag}")
+                # if instance_tag:
+                #     print(f"  实例: {instance_tag}")
 
             # 提取分支覆盖率汇总
             total_br, covered_br, _ = cov_parser.parse_branch_summary(instance_tag)

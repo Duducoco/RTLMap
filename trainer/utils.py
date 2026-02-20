@@ -28,6 +28,7 @@ def train_model(
     experiment_name: str = "dual_graph_gnn",
     extra_callbacks: Optional[List[Callback]] = None,
     ckpt_path: Optional[str] = None,
+    preprocess_only: bool = False,
 ) -> Tuple[DualGraphLightningModule, L.Trainer]:
     """
     便捷训练函数
@@ -45,6 +46,7 @@ def train_model(
         experiment_name: 实验名称
         extra_callbacks: 额外的自定义 callbacks（可选）
         ckpt_path: 检查点路径（用于恢复训练）
+        preprocess_only: 仅执行阶段 1 预处理，跳过 GPU 编码和张量构建
 
     Returns:
         (module, trainer): 训练后的模块和 Trainer
@@ -69,6 +71,7 @@ def train_model(
         text_encoder_config=text_encoder_config,
         batch_size=trainer_config.batch_size,
         num_workers=trainer_config.num_workers,
+        preprocess_only=preprocess_only,
     )
 
     # 使用 LightningTrainer
