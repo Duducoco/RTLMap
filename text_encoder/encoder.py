@@ -1,18 +1,44 @@
 """CodeBERT 指令文本编码器"""
 
-import json
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy
 
+import orjson
 import torch
 from torch import nn
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoModel, AutoTokenizer
 
 from .config import TextEncoderConfig
 from .formatter import InstructionFormatter
 
 logger = logging.getLogger(__name__)
+
+# I/O 并行化的默认线程数（受限于 GIL，主要加速文件 I/O + orjson 解析）
+_IO_WORKERS = min(8, (os.cpu_count() or 1) + 4)
+
+
+def _load_and_format_asm(path: str) -> tuple[str, list[str]]:
+    """读取 ASM JSON 并格式化节点文本（I/O + 解析并行化单元）
+
+    纯函数，无副作用，线程安全。
+
+    Args:
+        path: ASM CDFG JSON 文件路径
+
+    Returns:
+        (path, texts) 元组，texts 为各节点格式化后的指令文本
+    """
+    with open(path, "rb") as f:
+        asm = orjson.loads(f.read())
+
+    node_ids = list(asm["nodes"].keys())
+    texts = [
+        InstructionFormatter.format_block(asm["nodes"][nid].get("instructions", []))
+        for nid in node_ids
+    ]
+    return path, texts
 
 
 class InstructionEncoder:
@@ -94,14 +120,7 @@ class InstructionEncoder:
         Returns:
             [M, output_dim] 张量
         """
-        with open(asm_json_path, encoding="utf-8") as f:
-            asm = json.load(f)
-
-        node_ids = list(asm["nodes"].keys())
-        texts = [
-            InstructionFormatter.format_block(asm["nodes"][nid].get("instructions", []))
-            for nid in node_ids
-        ]
+        _, texts = _load_and_format_asm(asm_json_path)
 
         logger.debug("编码 %d 个 ASM 节点: %s", len(texts), asm_json_path)
         return self.encode_texts(texts)
@@ -111,6 +130,7 @@ class InstructionEncoder:
     ) -> dict[str, torch.Tensor]:
         """批量编码多个 ASM JSON 文件
 
+        使用 ThreadPoolExecutor 并行加载 + 解析 + 格式化，
         合并所有文件的文本为一个大列表，一次性编码后按文件切分。
         相比逐文件调用 encode_asm_json()，减少 GPU kernel launch 开销，
         充分利用大 batch 提升吞吐。
@@ -125,19 +145,11 @@ class InstructionEncoder:
         # (path, node_count) 记录每个文件的节点数，用于切分
         file_slices: list[tuple[str, int]] = []
 
-        for path in asm_json_paths:
-            with open(path, encoding="utf-8") as f:
-                asm = json.load(f)
-
-            node_ids = list(asm["nodes"].keys())
-            texts = [
-                InstructionFormatter.format_block(
-                    asm["nodes"][nid].get("instructions", [])
-                )
-                for nid in node_ids
-            ]
-            file_slices.append((path, len(texts)))
-            all_texts.extend(texts)
+        # 并行 I/O：orjson 解析 + 文本格式化
+        with ThreadPoolExecutor(max_workers=_IO_WORKERS) as pool:
+            for path, texts in pool.map(_load_and_format_asm, asm_json_paths):
+                file_slices.append((path, len(texts)))
+                all_texts.extend(texts)
 
         if not all_texts:
             return {}
@@ -221,24 +233,17 @@ class MultiGPUInstructionEncoder:
     ) -> dict[str, torch.Tensor]:
         """批量编码多个 ASM JSON 文件
 
+        使用 ThreadPoolExecutor 并行加载 + 解析 + 格式化，
         合并所有文件的文本，调用并行 encode_texts 后按文件切分。
         """
         all_texts: list[str] = []
         file_slices: list[tuple[str, int]] = []
 
-        for path in asm_json_paths:
-            with open(path, encoding="utf-8") as f:
-                asm = json.load(f)
-
-            node_ids = list(asm["nodes"].keys())
-            texts = [
-                InstructionFormatter.format_block(
-                    asm["nodes"][nid].get("instructions", [])
-                )
-                for nid in node_ids
-            ]
-            file_slices.append((path, len(texts)))
-            all_texts.extend(texts)
+        # 并行 I/O：orjson 解析 + 文本格式化
+        with ThreadPoolExecutor(max_workers=_IO_WORKERS) as pool:
+            for path, texts in pool.map(_load_and_format_asm, asm_json_paths):
+                file_slices.append((path, len(texts)))
+                all_texts.extend(texts)
 
         if not all_texts:
             return {}
