@@ -35,20 +35,16 @@ def _generate_annotated_json(
     test_dir: Path,
     module_names: Optional[list[str]],
 ) -> list[str]:
-    """为单个测试生成所有模块的标注 JSON（模块级函数，供多进程调用）"""
-    from annotation.data_annotate import DataAnnotator
+    """为单个测试生成所有模块的标注 JSON（模块级函数，供多进程调用）
 
-    coverage_report_dir = test_dir / "coverage" / "report"
-    if not coverage_report_dir.is_dir():
-        return []
-
+    两遍扫描策略：
+    1. 第一遍：检查已存在的标注文件，直接收集路径
+    2. 第二遍：仅当存在缺失文件时，才检查覆盖率目录并执行标注
+    """
     output_dir = test_dir / "annotated"
-    output_dir.mkdir(parents=True, exist_ok=True)
 
     # 收集 RTLIL JSON 文件（按 module_names 过滤）
-    # RTLIL 生成已提取到 scripts.RTLIL_extract，此处假设文件已预先生成
     if module_names is not None:
-        # 如果缺失则尝试通过 extract_rtlil_json 补充生成
         sim_results_dir = rtlil_json_dir.parent / "simulation_results"
         missing = [
             name
@@ -67,16 +63,40 @@ def _generate_annotated_json(
     else:
         json_files = sorted(rtlil_json_dir.glob("*.json"))
 
+    # ── 第一遍：收集已存在的标注文件，记录缺失项 ──
     generated: list[str] = []
+    need_annotate: list[Path] = []
 
     for json_file in json_files:
         module_name = json_file.stem
         output_path = output_dir / f"{module_name}.json"
 
-        # 跳过已标注的文件
         if output_path.exists():
             generated.append(str(output_path))
-            continue
+        else:
+            need_annotate.append(json_file)
+
+    # ── 第二遍：仅当存在缺失文件时执行标注 ──
+    if not need_annotate:
+        return generated
+
+    coverage_report_dir = test_dir / "coverage" / "report"
+    if not coverage_report_dir.is_dir():
+        logger.warning(
+            "覆盖率目录不存在 [%s]，跳过 %d 个待标注模块（已收集 %d 个已有文件）",
+            coverage_report_dir,
+            len(need_annotate),
+            len(generated),
+        )
+        return generated
+
+    from annotation.data_annotate import DataAnnotator
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for json_file in need_annotate:
+        module_name = json_file.stem
+        output_path = output_dir / f"{module_name}.json"
 
         try:
             annotator = DataAnnotator.from_args(
