@@ -544,7 +544,7 @@ class AsmCDFGExtractor:
                     return
 
     def _detect_back_edges(self, cdfg: AsmCDFG):
-        """检测回边（使用 DFS），覆盖不可达区域"""
+        """检测回边（使用迭代式 DFS），覆盖不可达区域"""
         # 构建 (source, target) -> edges 索引，避免 DFS 中 O(E) 线性扫描
         edge_index: Dict[tuple, List[AsmEdge]] = {}
         for edge in cdfg.edges:
@@ -556,34 +556,50 @@ class AsmCDFGExtractor:
         visited: Set[str] = set()
         in_stack: Set[str] = set()
 
-        def dfs(node_id: str):
-            visited.add(node_id)
-            in_stack.add(node_id)
+        def dfs_iterative(start_id: str):
+            """迭代式 DFS，使用显式栈避免递归深度限制"""
+            # 栈元素: (node_id, successor_iterator, is_entering)
+            # is_entering=True 表示首次进入节点，False 表示从子节点返回
+            stack: list = [(start_id, None, True)]
+            while stack:
+                node_id, succ_iter, is_entering = stack[-1]
 
-            node = cdfg.nodes.get(node_id)
-            if node:
-                for succ_id in node.successors:
+                if is_entering:
+                    visited.add(node_id)
+                    in_stack.add(node_id)
+                    node = cdfg.nodes.get(node_id)
+                    succ_iter = iter(node.successors) if node else iter([])
+                    stack[-1] = (node_id, succ_iter, False)
+
+                # 尝试访问下一个后继节点
+                advanced = False
+                for succ_id in succ_iter:
                     if succ_id in in_stack:
                         # 找到回边，标记对应的控制流边
                         for edge in edge_index.get((node_id, succ_id), []):
                             edge.is_back_edge = True
-                            # 标记目标节点为循环头
                             target_node = cdfg.nodes.get(succ_id)
                             if target_node:
                                 target_node.is_loop_header = True
                     elif succ_id not in visited:
-                        dfs(succ_id)
+                        stack.append((succ_id, None, True))
+                        advanced = True
+                        break
+                    # succ_id in visited but not in_stack: 跨边/前向边，跳过
 
-            in_stack.remove(node_id)
+                if not advanced:
+                    # 所有后继已处理完毕，回溯
+                    in_stack.remove(node_id)
+                    stack.pop()
 
         # 从入口节点开始 DFS
         if cdfg.entry_node:
-            dfs(cdfg.entry_node)
+            dfs_iterative(cdfg.entry_node)
 
         # 对未访问的节点启动新的 DFS（覆盖不可达区域）
         for node_id in list(cdfg.nodes.keys()):
             if node_id not in visited:
-                dfs(node_id)
+                dfs_iterative(node_id)
 
     def extract_from_file(
         self, filepath: str, module_name: Optional[str] = None
