@@ -30,6 +30,13 @@ _ASM_NODE_TYPE_MAP = {e.name: e.value - 1 for e in AsmNodeType}
 _ASM_EDGE_TYPE_MAP = {e.name: e.value - 1 for e in AsmEdgeType}
 
 
+def _make_edge_index(src: list, tgt: list) -> torch.Tensor:
+    """构建 edge_index 张量，空列表时返回 shape=(2,0) 的空张量"""
+    if src:
+        return torch.tensor([src, tgt], dtype=torch.long)
+    return torch.empty((2, 0), dtype=torch.long)
+
+
 def _generate_annotated_json(
     rtlil_json_dir: Path,
     test_dir: Path,
@@ -45,36 +52,25 @@ def _generate_annotated_json(
 
     # 收集 RTLIL JSON 文件（按 module_names 过滤）
     if module_names is not None:
-        sim_results_dir = rtlil_json_dir.parent / "simulation_results"
-        missing = [
-            name
-            for name in module_names
-            if not (rtlil_json_dir / f"{name}.json").exists()
-        ]
-        if missing:
-            logger.info("检测到 %d 个缺失的 RTLIL JSON，尝试生成", len(missing))
-            extract_rtlil_json(sim_results_dir, missing)
-
         json_files = [
-            rtlil_json_dir / f"{name}.json"
+            p
             for name in module_names
-            if (rtlil_json_dir / f"{name}.json").exists()
+            if (p := rtlil_json_dir / f"{name}.json").exists()
         ]
     else:
         json_files = sorted(rtlil_json_dir.glob("*.json"))
 
     # ── 第一遍：收集已存在的标注文件，记录缺失项 ──
     generated: list[str] = []
-    need_annotate: list[Path] = []
+    need_annotate: list[tuple[Path, Path]] = []
 
     for json_file in json_files:
-        module_name = json_file.stem
-        output_path = output_dir / f"{module_name}.json"
+        output_path = output_dir / f"{json_file.stem}.json"
 
         if output_path.exists():
             generated.append(str(output_path))
         else:
-            need_annotate.append(json_file)
+            need_annotate.append((json_file, output_path))
 
     # ── 第二遍：仅当存在缺失文件时执行标注 ──
     if not need_annotate:
@@ -94,10 +90,7 @@ def _generate_annotated_json(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for json_file in need_annotate:
-        module_name = json_file.stem
-        output_path = output_dir / f"{module_name}.json"
-
+    for json_file, output_path in need_annotate:
         try:
             annotator = DataAnnotator.from_args(
                 design_json=str(json_file),
@@ -110,7 +103,7 @@ def _generate_annotated_json(
             annotator.export_json(str(output_path))
             generated.append(str(output_path))
         except Exception as e:
-            logger.error("标注失败 [%s/%s]: %s", test_dir.name, module_name, e)
+            logger.error("标注失败 [%s/%s]: %s", test_dir.name, json_file.stem, e)
 
     return generated
 
@@ -184,6 +177,11 @@ def _build_and_save(
     """
     rtl_json_path, asm_json_path, asm_encoding, processed_dir, idx = args
 
+    # ASM 缺失提前返回，避免白费 RTL 解析开销
+    if asm_json_path is None:
+        logger.error("ASM JSON 文件缺失，跳过构建: rtl=%s", rtl_json_path)
+        return False
+
     try:
         # ── RTL 图 ──
         with open(rtl_json_path, encoding="utf-8") as f:
@@ -213,54 +211,43 @@ def _build_and_save(
             etgt_port_list.append(e["target_port_idx"])
             elabel_list.append(e["coverage_label"])
 
-        if src_list:
-            edge_index = torch.tensor([src_list, tgt_list], dtype=torch.long)
-        else:
-            edge_index = torch.empty((2, 0), dtype=torch.long)
+        edge_index = _make_edge_index(src_list, tgt_list)
 
-        # ── ASM 图 ──
-        if asm_json_path is not None:
-            with open(asm_json_path, encoding="utf-8") as f:
-                asm = json.load(f)
+        # ── ASM 图 ──（asm_json_path 已保证非 None）
+        with open(asm_json_path, encoding="utf-8") as f:
+            asm = json.load(f)
 
-            asm_node_ids = list(asm["nodes"].keys())
-            asm_id_to_idx = {nid: i for i, nid in enumerate(asm_node_ids)}
+        asm_node_ids = list(asm["nodes"].keys())
+        asm_id_to_idx = {nid: i for i, nid in enumerate(asm_node_ids)}
 
-            asm_nt = [
-                _ASM_NODE_TYPE_MAP.get(
-                    asm["nodes"][nid]["node_type"],
-                    AsmNodeType.UNKNOWN.value - 1,
-                )
-                for nid in asm_node_ids
-            ]
-
-            asm_src, asm_tgt, asm_et = [], [], []
-            for ae in asm["edges"]:
-                s = asm_id_to_idx.get(ae["source"])
-                t = asm_id_to_idx.get(ae["target"])
-                if s is None or t is None:
-                    continue
-                asm_src.append(s)
-                asm_tgt.append(t)
-                asm_et.append(_ASM_EDGE_TYPE_MAP.get(ae["edge_type"], 0))
-
-            asm_node_type = torch.tensor(asm_nt, dtype=torch.long)
-
-            # 使用预计算的编码，或回退到零向量
-            if asm_encoding is not None:
-                asm_instr_enc = asm_encoding
-            else:
-                asm_instr_enc = torch.zeros(len(asm_node_ids), 256)
-
-            if asm_src:
-                asm_edge_index = torch.tensor([asm_src, asm_tgt], dtype=torch.long)
-            else:
-                asm_edge_index = torch.empty((2, 0), dtype=torch.long)
-            asm_edge_type = torch.tensor(asm_et, dtype=torch.long)
-        else:
-            raise RuntimeError(
-                f"ASM JSON 文件缺失，无法构建 DualGraphData: {asm_json_path}"
+        asm_nt = [
+            _ASM_NODE_TYPE_MAP.get(
+                asm["nodes"][nid]["node_type"],
+                AsmNodeType.UNKNOWN.value - 1,
             )
+            for nid in asm_node_ids
+        ]
+
+        asm_src, asm_tgt, asm_et = [], [], []
+        for ae in asm["edges"]:
+            s = asm_id_to_idx.get(ae["source"])
+            t = asm_id_to_idx.get(ae["target"])
+            if s is None or t is None:
+                continue
+            asm_src.append(s)
+            asm_tgt.append(t)
+            asm_et.append(_ASM_EDGE_TYPE_MAP.get(ae["edge_type"], 0))
+
+        asm_node_type = torch.tensor(asm_nt, dtype=torch.long)
+
+        # 使用预计算的编码，或回退到零向量
+        if asm_encoding is not None:
+            asm_instr_enc = asm_encoding
+        else:
+            asm_instr_enc = torch.zeros(len(asm_node_ids), 256)
+
+        asm_edge_index = _make_edge_index(asm_src, asm_tgt)
+        asm_edge_type = torch.tensor(asm_et, dtype=torch.long)
 
         # ── 图级标签 y ──
         y = rtl.get("branch_coverage", 0.0) / 100.0
@@ -371,7 +358,6 @@ class DualGraphDataset(Dataset):
         self._num_samples: Optional[int] = None
         self._preprocess_only = preprocess_only
         self._text_encoder_config = text_encoder_config
-        self._text_encoder: Optional["MultiGPUInstructionEncoder"] = None
         self._num_workers = num_workers or min(os.cpu_count() or 1, 32)
         super().__init__(root, transform, pre_transform, pre_filter)
 
@@ -379,14 +365,8 @@ class DualGraphDataset(Dataset):
     def raw_file_names(self) -> List[str]:
         return self._sim_results_dirs
 
-    @property
-    def processed_file_names(self) -> List[str]:
-        """处理后的文件列表"""
-        # 动态读取 processed_dir 中的文件
-        if self._num_samples is not None:
-            return [f"data_{i}.pt" for i in range(self._num_samples)]
-
-        # 检查已存在的文件
+    def _scan_processed_files(self) -> list[str]:
+        """扫描 processed_dir 中的 data_*.pt 文件并更新缓存"""
         processed_path = Path(self.processed_dir)
         if processed_path.exists():
             files = sorted(
@@ -397,8 +377,14 @@ class DualGraphDataset(Dataset):
             if files:
                 self._num_samples = len(files)
                 return files
-
         return []
+
+    @property
+    def processed_file_names(self) -> List[str]:
+        """处理后的文件列表"""
+        if self._num_samples is not None:
+            return [f"data_{i}.pt" for i in range(self._num_samples)]
+        return self._scan_processed_files()
 
     def download(self):
         pass
@@ -431,7 +417,7 @@ class DualGraphDataset(Dataset):
                         len(missing),
                         len(self._module_names),
                     )
-                    extract_rtlil_json(sim_results_dir, self._module_names)
+                    extract_rtlil_json(sim_results_dir, missing)
                 else:
                     logger.info("所有 RTLIL JSON 已存在，跳过生成: %s", rtlil_json_dir)
             else:
@@ -490,14 +476,14 @@ class DualGraphDataset(Dataset):
             logger.info(
                 "阶段 2/3: 批量 GPU 编码 (%d 个 ASM 文件)", len(unique_asm_paths)
             )
-            self._text_encoder = MultiGPUInstructionEncoder(self._text_encoder_config)
-            asm_encodings = self._text_encoder.encode_asm_jsons_batch(unique_asm_paths)
+            text_encoder = MultiGPUInstructionEncoder(self._text_encoder_config)
+            asm_encodings = text_encoder.encode_asm_jsons_batch(unique_asm_paths)
             logger.info("阶段 2 完成: %d 个编码结果", len(asm_encodings))
         else:
             logger.info("阶段 2/3: 跳过 GPU 编码（无编码器配置或无 ASM 文件）")
 
         # ── 阶段 3: 多进程张量构建 + 保存 ──
-        processed_dir = str(Path(self.processed_dir))
+        processed_dir = self.processed_dir
         save_args: list[
             tuple[str, Optional[str], Optional["torch.Tensor"], str, int]
         ] = []
@@ -522,19 +508,8 @@ class DualGraphDataset(Dataset):
         """返回数据集大小"""
         if self._num_samples is not None:
             return self._num_samples
-
-        # 从磁盘统计文件数量
-        processed_path = Path(self.processed_dir)
-        if processed_path.exists():
-            files = [
-                f.name
-                for f in processed_path.iterdir()
-                if f.name.startswith("data_") and f.name.endswith(".pt")
-            ]
-            self._num_samples = len(files)
-            return self._num_samples
-
-        return 0
+        files = self._scan_processed_files()
+        return len(files)
 
     def get(self, idx: int) -> DualGraphData:
         """从磁盘加载指定索引的数据"""
@@ -583,38 +558,28 @@ class DualGraphDataModule(L.LightningDataModule):
         self.val_dataset = None
         self.test_dataset = None
 
+    def _make_dataset(self, split: str) -> DualGraphDataset:
+        """创建指定 split 的 DualGraphDataset"""
+        return DualGraphDataset(
+            root=str(Path(self.root) / split),
+            sim_results_dirs=self.sim_results_dirs,
+            module_names=self.module_names,
+            text_encoder_config=self.text_encoder_config,
+            preprocess_only=self.preprocess_only,
+            transform=self.transform,
+        )
+
     def setup(self, stage: Optional[str] = None):
         """初始化数据集"""
         root_path = Path(self.root)
         if stage == "fit" or stage is None:
-            self.train_dataset = DualGraphDataset(
-                root=str(root_path / "train"),
-                sim_results_dirs=self.sim_results_dirs,
-                module_names=self.module_names,
-                text_encoder_config=self.text_encoder_config,
-                preprocess_only=self.preprocess_only,
-                transform=self.transform,
-            )
+            self.train_dataset = self._make_dataset("train")
             if (root_path / "val" / "processed").exists():
-                self.val_dataset = DualGraphDataset(
-                    root=str(root_path / "val"),
-                    sim_results_dirs=self.sim_results_dirs,
-                    module_names=self.module_names,
-                    text_encoder_config=self.text_encoder_config,
-                    preprocess_only=self.preprocess_only,
-                    transform=self.transform,
-                )
+                self.val_dataset = self._make_dataset("val")
 
         if stage == "test" or stage is None:
             if (root_path / "test" / "processed").exists():
-                self.test_dataset = DualGraphDataset(
-                    root=str(root_path / "test"),
-                    sim_results_dirs=self.sim_results_dirs,
-                    module_names=self.module_names,
-                    text_encoder_config=self.text_encoder_config,
-                    preprocess_only=self.preprocess_only,
-                    transform=self.transform,
-                )
+                self.test_dataset = self._make_dataset("test")
 
     def _create_loader(self, dataset, shuffle: bool) -> PyGDataLoader:
         """创建 PyG DataLoader"""
