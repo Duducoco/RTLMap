@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """数据加载模块"""
 
+import hashlib
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import Pool
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Callable
 
 if TYPE_CHECKING:
-    from text_encoder import MultiGPUInstructionEncoder, TextEncoderConfig
+    from text_encoder import TextEncoderConfig
 
 import torch
 import lightning as L
@@ -277,6 +279,24 @@ def _build_and_save(
         return False
 
 
+def _compute_asm_cache_key(asm_path: str, config_fingerprint: str) -> str:
+    """计算 ASM 文件的缓存键（基于文件内容 + 编码器配置指纹）
+
+    Args:
+        asm_path: ASM JSON 文件路径
+        config_fingerprint: TextEncoderConfig.cache_fingerprint
+
+    Returns:
+        32 字符的十六进制缓存键
+    """
+    h = hashlib.sha256()
+    with open(asm_path, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    h.update(config_fingerprint.encode("utf-8"))
+    return h.hexdigest()[:32]
+
+
 class DualGraphDataset(Dataset):
     """
     双图数据集 - 继承自 PyG Dataset
@@ -466,18 +486,81 @@ class DualGraphDataset(Dataset):
             self._num_samples = 0
             return
 
-        # ── 阶段 2: 批量 GPU 编码（CodeBERT）──
+        # ── 阶段 2: 批量 GPU 编码（CodeBERT）+ 磁盘缓存 ──
         asm_encodings: dict[str, "torch.Tensor"] = {}
         unique_asm_paths = list({asm for _, asm in flat_results if asm is not None})
 
         if self._text_encoder_config is not None and unique_asm_paths:
-            from text_encoder import MultiGPUInstructionEncoder
+            cache_dir = Path(self.root) / "asm_encoding_cache"
+            config_fp = self._text_encoder_config.cache_fingerprint
+
+            # ── 2a: 分离缓存命中 vs 未命中 ──
+            cached_pooled: dict[str, torch.Tensor] = {}  # path → [M, 768]
+            uncached_paths: list[str] = []
+
+            for asm_path in unique_asm_paths:
+                cache_key = _compute_asm_cache_key(asm_path, config_fp)
+                cache_file = cache_dir / f"{cache_key}.pt"
+
+                if cache_file.exists():
+                    try:
+                        cached_pooled[asm_path] = torch.load(
+                            cache_file, weights_only=True
+                        )
+                        continue
+                    except Exception as e:
+                        logger.warning(
+                            "缓存文件损坏，将重新编码: %s (%s)", cache_file, e
+                        )
+
+                uncached_paths.append(asm_path)
 
             logger.info(
-                "阶段 2/3: 批量 GPU 编码 (%d 个 ASM 文件)", len(unique_asm_paths)
+                "阶段 2/3: ASM 编码 — %d 缓存命中, %d 待编码",
+                len(cached_pooled),
+                len(uncached_paths),
             )
-            text_encoder = MultiGPUInstructionEncoder(self._text_encoder_config)
-            asm_encodings = text_encoder.encode_asm_jsons_batch(unique_asm_paths)
+
+            # ── 2b: 对未命中部分批量编码 ──
+            from text_encoder import MultiGPUInstructionEncoder
+            from text_encoder.encoder import _load_and_format_asm, _IO_WORKERS
+
+            if uncached_paths:
+                text_encoder = MultiGPUInstructionEncoder(self._text_encoder_config)
+
+                all_texts: list[str] = []
+                file_slices: list[tuple[str, int]] = []
+
+                with ThreadPoolExecutor(max_workers=_IO_WORKERS) as pool:
+                    for path, texts in pool.map(
+                        _load_and_format_asm, uncached_paths
+                    ):
+                        file_slices.append((path, len(texts)))
+                        all_texts.extend(texts)
+
+                if all_texts:
+                    all_pooled = text_encoder.encode_texts_pooled(all_texts)
+
+                    # 按文件切分并写入缓存
+                    cache_dir.mkdir(parents=True, exist_ok=True)
+                    offset = 0
+                    for path, count in file_slices:
+                        pooled_tensor = all_pooled[offset : offset + count]
+                        cached_pooled[path] = pooled_tensor
+
+                        cache_key = _compute_asm_cache_key(path, config_fp)
+                        torch.save(pooled_tensor, cache_dir / f"{cache_key}.pt")
+                        offset += count
+
+                    logger.info("编码完成，已缓存 %d 个新文件", len(file_slices))
+            else:
+                # 全部缓存命中，仍需创建编码器以获取投影层
+                text_encoder = MultiGPUInstructionEncoder(self._text_encoder_config)
+
+            # ── 2c: 在线投影 768 → output_dim ──
+            for asm_path, pooled in cached_pooled.items():
+                asm_encodings[asm_path] = text_encoder.project(pooled)
+
             logger.info("阶段 2 完成: %d 个编码结果", len(asm_encodings))
         else:
             logger.info("阶段 2/3: 跳过 GPU 编码（无编码器配置或无 ASM 文件）")

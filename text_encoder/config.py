@@ -22,3 +22,11 @@ class TextEncoderConfig:
     batch_size: int = 256
     device: str = "cpu"
     pooling: str = "mean"
+
+    @property
+    def cache_fingerprint(self) -> str:
+        """影响 CodeBERT 768 维 pooled 输出的参数指纹
+
+        output_dim / batch_size / device 不影响 pooled 输出，不纳入指纹。
+        """
+        return f"{self.model_name}|{self.max_length}|{self.pooling}"

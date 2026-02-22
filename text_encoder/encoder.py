@@ -71,6 +71,62 @@ class InstructionEncoder:
             config.output_dim,
         )
 
+    def _pool_batch(self, batch_texts: list[str]) -> torch.Tensor:
+        """单 batch tokenize + CodeBERT forward + pooling → [B, hidden_size]
+
+        纯推理，不经过投影层。结果保留在 GPU 上。
+        """
+        tokens = self.tokenizer(
+            batch_texts,
+            padding=True,
+            truncation=True,
+            max_length=self.config.max_length,
+            return_tensors="pt",
+        )
+        tokens = {k: v.to(self.config.device) for k, v in tokens.items()}
+
+        with torch.no_grad():
+            outputs = self.model(**tokens)
+
+            if self.config.pooling == "cls":
+                return outputs.last_hidden_state[:, 0, :]
+
+            # mean pooling: 仅对非 padding token 取均值
+            mask = tokens["attention_mask"].unsqueeze(-1).float()
+            return (outputs.last_hidden_state * mask).sum(1) / mask.sum(1).clamp(
+                min=1e-9
+            )
+
+    def encode_texts_pooled(self, texts: list[str]) -> torch.Tensor:
+        """批量编码文本列表 → [N, hidden_size] pooled 张量（投影前）
+
+        用于缓存场景：缓存与投影层权重无关的 CodeBERT 原始输出。
+
+        Args:
+            texts: 待编码的文本列表
+
+        Returns:
+            [N, hidden_size] 张量（hidden_size=768 for CodeBERT）
+        """
+        all_pooled = []
+        for i in range(0, len(texts), self.config.batch_size):
+            batch_texts = texts[i : i + self.config.batch_size]
+            pooled = self._pool_batch(batch_texts)
+            all_pooled.append(pooled.cpu())
+        return torch.cat(all_pooled, dim=0)
+
+    def project(self, pooled: torch.Tensor) -> torch.Tensor:
+        """将 pooled 输出通过投影层 → [N, output_dim]
+
+        Args:
+            pooled: [N, hidden_size] CodeBERT pooled 输出
+
+        Returns:
+            [N, output_dim] 投影后的张量
+        """
+        with torch.no_grad():
+            return self.projection(pooled.to(self.config.device)).cpu()
+
     def encode_texts(self, texts: list[str]) -> torch.Tensor:
         """批量编码文本列表 → [N, output_dim] 张量
 
@@ -83,27 +139,8 @@ class InstructionEncoder:
         all_embeddings = []
         for i in range(0, len(texts), self.config.batch_size):
             batch_texts = texts[i : i + self.config.batch_size]
-            tokens = self.tokenizer(
-                batch_texts,
-                padding=True,
-                truncation=True,
-                max_length=self.config.max_length,
-                return_tensors="pt",
-            )
-            tokens = {k: v.to(self.config.device) for k, v in tokens.items()}
-
+            pooled = self._pool_batch(batch_texts)
             with torch.no_grad():
-                outputs = self.model(**tokens)
-
-                if self.config.pooling == "cls":
-                    pooled = outputs.last_hidden_state[:, 0, :]
-                else:
-                    # mean pooling: 仅对非 padding token 取均值
-                    mask = tokens["attention_mask"].unsqueeze(-1).float()
-                    pooled = (outputs.last_hidden_state * mask).sum(1) / mask.sum(
-                        1
-                    ).clamp(min=1e-9)
-
                 projected = self.projection(pooled)
             all_embeddings.append(projected.cpu())
 
@@ -198,6 +235,37 @@ class MultiGPUInstructionEncoder:
         logger.info("多 GPU 编码器就绪: %d 个设备", len(self._encoders))
 
     # --- PLACEHOLDER_ENCODE_TEXTS ---
+
+    def encode_texts_pooled(self, texts: list[str]) -> torch.Tensor:
+        """批量编码文本列表 → [N, hidden_size] pooled 张量（投影前）
+
+        单设备直接委托；多设备均匀切分后线程并行。
+        """
+        if not texts:
+            return torch.empty(0, self._encoders[0].model.config.hidden_size)
+
+        n_enc = len(self._encoders)
+        if n_enc == 1:
+            return self._encoders[0].encode_texts_pooled(texts)
+
+        chunk_size = (len(texts) + n_enc - 1) // n_enc
+        chunks = [texts[i * chunk_size : (i + 1) * chunk_size] for i in range(n_enc)]
+        work = [(self._encoders[i], chunks[i]) for i in range(n_enc) if chunks[i]]
+
+        def _encode_pooled(
+            args: tuple[InstructionEncoder, list[str]],
+        ) -> torch.Tensor:
+            enc, chunk = args
+            return enc.encode_texts_pooled(chunk)
+
+        with ThreadPoolExecutor(max_workers=len(work)) as pool:
+            results = list(pool.map(_encode_pooled, work))
+
+        return torch.cat(results, dim=0)
+
+    def project(self, pooled: torch.Tensor) -> torch.Tensor:
+        """将 pooled 输出通过投影层（使用第一个编码器的投影层）"""
+        return self._encoders[0].project(pooled)
 
     def encode_texts(self, texts: list[str]) -> torch.Tensor:
         """批量编码文本列表 → [N, output_dim] 张量
