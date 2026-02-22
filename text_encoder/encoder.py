@@ -1,6 +1,7 @@
 """CodeBERT 指令文本编码器"""
 
 import logging
+import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from copy import copy
@@ -62,7 +63,17 @@ class InstructionEncoder:
             param.requires_grad = False
 
         # 768 → output_dim 线性投影
+        # 正交初始化：保持 CodeBERT 嵌入的几何结构（向量间角度和相对距离）
+        # 此层不参与梯度优化，初始化即最终权重
         self.projection = nn.Linear(self.model.config.hidden_size, config.output_dim)
+        rng_state = torch.random.get_rng_state()
+        torch.manual_seed(42)
+        nn.init.orthogonal_(
+            self.projection.weight,
+            gain=math.sqrt(self.model.config.hidden_size / config.output_dim),
+        )
+        nn.init.zeros_(self.projection.bias)
+        torch.random.set_rng_state(rng_state)
         self.projection.to(config.device)
 
         logger.info(
