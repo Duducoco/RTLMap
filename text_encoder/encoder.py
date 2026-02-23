@@ -119,6 +119,9 @@ class InstructionEncoder:
         Returns:
             [N, hidden_size] 张量（hidden_size=768 for CodeBERT）
         """
+        if not texts:
+            return torch.empty(0, self.model.config.hidden_size)
+
         all_pooled = []
         for i in range(0, len(texts), self.config.batch_size):
             batch_texts = texts[i : i + self.config.batch_size]
@@ -137,84 +140,6 @@ class InstructionEncoder:
         """
         with torch.no_grad():
             return self.projection(pooled.to(self.config.device)).cpu()
-
-    def encode_texts(self, texts: list[str]) -> torch.Tensor:
-        """批量编码文本列表 → [N, output_dim] 张量
-
-        Args:
-            texts: 待编码的文本列表
-
-        Returns:
-            [N, output_dim] 张量
-        """
-        all_embeddings = []
-        for i in range(0, len(texts), self.config.batch_size):
-            batch_texts = texts[i : i + self.config.batch_size]
-            pooled = self._pool_batch(batch_texts)
-            with torch.no_grad():
-                projected = self.projection(pooled)
-            all_embeddings.append(projected.cpu())
-
-        return torch.cat(all_embeddings, dim=0)
-
-    def encode_asm_json(self, asm_json_path: str) -> torch.Tensor:
-        """编码 ASM JSON 文件中所有节点 → [M, output_dim] 张量
-
-        节点顺序与 datamodule.py 中 list(asm["nodes"].keys()) 一致。
-
-        Args:
-            asm_json_path: ASM CDFG JSON 文件路径
-
-        Returns:
-            [M, output_dim] 张量
-        """
-        _, texts = _load_and_format_asm(asm_json_path)
-
-        logger.debug("编码 %d 个 ASM 节点: %s", len(texts), asm_json_path)
-        return self.encode_texts(texts)
-
-    def encode_asm_jsons_batch(
-        self, asm_json_paths: list[str]
-    ) -> dict[str, torch.Tensor]:
-        """批量编码多个 ASM JSON 文件
-
-        使用 ThreadPoolExecutor 并行加载 + 解析 + 格式化，
-        合并所有文件的文本为一个大列表，一次性编码后按文件切分。
-        相比逐文件调用 encode_asm_json()，减少 GPU kernel launch 开销，
-        充分利用大 batch 提升吞吐。
-
-        Args:
-            asm_json_paths: ASM CDFG JSON 文件路径列表
-
-        Returns:
-            {asm_path: [M, output_dim] tensor} 映射
-        """
-        all_texts: list[str] = []
-        # (path, node_count) 记录每个文件的节点数，用于切分
-        file_slices: list[tuple[str, int]] = []
-
-        # 并行 I/O：orjson 解析 + 文本格式化
-        with ThreadPoolExecutor(max_workers=_IO_WORKERS) as pool:
-            for path, texts in pool.map(_load_and_format_asm, asm_json_paths):
-                file_slices.append((path, len(texts)))
-                all_texts.extend(texts)
-
-        if not all_texts:
-            return {}
-
-        logger.info(
-            "批量编码 %d 个文件，共 %d 个节点", len(file_slices), len(all_texts)
-        )
-        all_embeddings = self.encode_texts(all_texts)
-
-        # 按文件切分
-        result: dict[str, torch.Tensor] = {}
-        offset = 0
-        for path, count in file_slices:
-            result[path] = all_embeddings[offset : offset + count]
-            offset += count
-
-        return result
 
 
 class MultiGPUInstructionEncoder:
@@ -244,8 +169,6 @@ class MultiGPUInstructionEncoder:
             self._encoders.append(InstructionEncoder(per_dev_config))
 
         logger.info("多 GPU 编码器就绪: %d 个设备", len(self._encoders))
-
-    # --- PLACEHOLDER_ENCODE_TEXTS ---
 
     def encode_texts_pooled(self, texts: list[str]) -> torch.Tensor:
         """批量编码文本列表 → [N, hidden_size] pooled 张量（投影前）
@@ -278,42 +201,19 @@ class MultiGPUInstructionEncoder:
         """将 pooled 输出通过投影层（使用第一个编码器的投影层）"""
         return self._encoders[0].project(pooled)
 
-    def encode_texts(self, texts: list[str]) -> torch.Tensor:
-        """批量编码文本列表 → [N, output_dim] 张量
-
-        单设备直接委托；多设备均匀切分后线程并行。
-        """
-        if not texts:
-            return torch.empty(0, self._encoders[0].config.output_dim)
-
-        n_enc = len(self._encoders)
-        if n_enc == 1:
-            return self._encoders[0].encode_texts(texts)
-
-        # 均匀切分
-        chunk_size = (len(texts) + n_enc - 1) // n_enc
-        chunks = [texts[i * chunk_size : (i + 1) * chunk_size] for i in range(n_enc)]
-        # 过滤空 chunk（文本数 < 设备数时）
-        work = [(self._encoders[i], chunks[i]) for i in range(n_enc) if chunks[i]]
-
-        def _encode(args: tuple[InstructionEncoder, list[str]]) -> torch.Tensor:
-            enc, chunk = args
-            return enc.encode_texts(chunk)
-
-        with ThreadPoolExecutor(max_workers=len(work)) as pool:
-            results = list(pool.map(_encode, work))
-
-        return torch.cat(results, dim=0)
-
-    # --- PLACEHOLDER_BATCH ---
-
-    def encode_asm_jsons_batch(
+    def encode_asm_jsons_pooled_batch(
         self, asm_json_paths: list[str]
     ) -> dict[str, torch.Tensor]:
-        """批量编码多个 ASM JSON 文件
+        """批量编码多个 ASM JSON → {path: [M, 768] pooled tensor}
 
-        使用 ThreadPoolExecutor 并行加载 + 解析 + 格式化，
-        合并所有文件的文本，调用并行 encode_texts 后按文件切分。
+        并行 I/O 加载 + 合并文本 + 多 GPU encode_pooled + 按文件切分。
+        返回投影前的 768 维 pooled 输出，适合与磁盘缓存配合使用。
+
+        Args:
+            asm_json_paths: ASM CDFG JSON 文件路径列表
+
+        Returns:
+            {asm_path: [M, hidden_size] tensor} 映射，空输入返回 {}
         """
         all_texts: list[str] = []
         file_slices: list[tuple[str, int]] = []
@@ -333,12 +233,13 @@ class MultiGPUInstructionEncoder:
             len(all_texts),
             len(self._encoders),
         )
-        all_embeddings = self.encode_texts(all_texts)
+        all_pooled = self.encode_texts_pooled(all_texts)
 
+        # 按文件切分
         result: dict[str, torch.Tensor] = {}
         offset = 0
         for path, count in file_slices:
-            result[path] = all_embeddings[offset : offset + count]
+            result[path] = all_pooled[offset : offset + count]
             offset += count
 
         return result

@@ -2,11 +2,9 @@
 
 from .config import TextEncoderConfig
 from .encoder import InstructionEncoder, MultiGPUInstructionEncoder
-from .formatter import InstructionFormatter
 
 __all__ = [
     "TextEncoderConfig",
     "InstructionEncoder",
     "MultiGPUInstructionEncoder",
-    "InstructionFormatter",
 ]

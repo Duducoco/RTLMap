@@ -5,7 +5,6 @@ import hashlib
 import json
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import Pool
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Callable
@@ -523,36 +522,21 @@ class DualGraphDataset(Dataset):
 
             # ── 2b: 对未命中部分批量编码 ──
             from text_encoder import MultiGPUInstructionEncoder
-            from text_encoder.encoder import _load_and_format_asm, _IO_WORKERS
 
             if uncached_paths:
                 text_encoder = MultiGPUInstructionEncoder(self._text_encoder_config)
 
-                all_texts: list[str] = []
-                file_slices: list[tuple[str, int]] = []
+                new_pooled = text_encoder.encode_asm_jsons_pooled_batch(uncached_paths)
 
-                with ThreadPoolExecutor(max_workers=_IO_WORKERS) as pool:
-                    for path, texts in pool.map(
-                        _load_and_format_asm, uncached_paths
-                    ):
-                        file_slices.append((path, len(texts)))
-                        all_texts.extend(texts)
-
-                if all_texts:
-                    all_pooled = text_encoder.encode_texts_pooled(all_texts)
-
-                    # 按文件切分并写入缓存
+                if new_pooled:
+                    # 写入缓存
                     cache_dir.mkdir(parents=True, exist_ok=True)
-                    offset = 0
-                    for path, count in file_slices:
-                        pooled_tensor = all_pooled[offset : offset + count]
+                    for path, pooled_tensor in new_pooled.items():
                         cached_pooled[path] = pooled_tensor
-
                         cache_key = _compute_asm_cache_key(path, config_fp)
                         torch.save(pooled_tensor, cache_dir / f"{cache_key}.pt")
-                        offset += count
 
-                    logger.info("编码完成，已缓存 %d 个新文件", len(file_slices))
+                    logger.info("编码完成，已缓存 %d 个新文件", len(new_pooled))
             else:
                 # 全部缓存命中，仍需创建编码器以获取投影层
                 text_encoder = MultiGPUInstructionEncoder(self._text_encoder_config)
