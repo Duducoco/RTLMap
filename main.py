@@ -3,26 +3,26 @@
 
 用法示例:
     # 基础训练
-    python main.py --data-root ./data
+    uv run python main.py --data-root ./data
 
     # 指定模块和仿真目录
-    python main.py --data-root ./data \
+    uv run python main.py --data-root ./data \
         --sim-results-dirs ./sim_a ./sim_b \
         --module-names alu decoder
 
     # 启用 CodeBERT 文本编码
-    python main.py --data-root ./data --use-text-encoder
+    uv run python main.py --data-root ./data --use-text-encoder
 
     # 自定义超参数
-    python main.py --data-root ./data \
+    uv run python main.py --data-root ./data \
         --max-epochs 200 --lr 3e-4 --batch-size 16 \
         --fusion-type ssm_film --precision bf16-mixed
 
     # 从检查点恢复训练
-    python main.py --data-root ./data --ckpt-path checkpoints/last.ckpt
+    uv run python main.py --data-root ./data --ckpt-path checkpoints/last.ckpt
 
     # 仅测试
-    python main.py --data-root ./data --test-only --ckpt-path checkpoints/best.ckpt
+    uv run python main.py --data-root ./data --test-only --ckpt-path checkpoints/best.ckpt
 """
 
 import argparse
@@ -126,7 +126,7 @@ def parse_args() -> argparse.Namespace:
     )
     text.add_argument("--text-output-dim", type=int, default=256)
     text.add_argument("--text-max-length", type=int, default=512)
-    text.add_argument("--text-batch-size", type=int, default=256)
+    text.add_argument("--text-batch-size", type=int, default=1024)
     text.add_argument(
         "--text-pooling",
         choices=["mean", "cls"],

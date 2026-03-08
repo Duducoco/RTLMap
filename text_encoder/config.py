@@ -19,7 +19,7 @@ class TextEncoderConfig:
     model_name: str = "microsoft/codebert-base"
     output_dim: int = 256
     max_length: int = 512
-    batch_size: int = 256
+    batch_size: int = 512
     device: str = "cpu"
     pooling: str = "mean"
 

@@ -3,11 +3,15 @@
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
+
+import orjson
+from tqdm import tqdm
 import logging
 import os
 from multiprocessing import Pool
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional, Callable
+from typing import TYPE_CHECKING, List, Optional, Callable, Union
 
 if TYPE_CHECKING:
     from text_encoder import TextEncoderConfig
@@ -120,10 +124,15 @@ def _generate_asm_cdfg_json(test_dir: Path) -> Optional[str]:
 
     output_path = test_dir / f"{test_name}.json"
 
-    # 跳过已生成的 ASM CDFG JSON
+    # 跳过已生成的 ASM CDFG JSON（验证完整性）
     if output_path.exists():
-        logger.debug("ASM CDFG JSON 已存在，跳过: %s", output_path)
-        return str(output_path)
+        try:
+            with open(output_path, "rb") as f:
+                orjson.loads(f.read())
+            return str(output_path)
+        except Exception:
+            logger.warning("ASM CDFG JSON 损坏，将重新生成: %s", output_path)
+            output_path.unlink()
 
     try:
         extractor = AsmCDFGExtractor(verbose=False)
@@ -132,6 +141,10 @@ def _generate_asm_cdfg_json(test_dir: Path) -> Optional[str]:
 
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(export_data, f, indent=2, ensure_ascii=False)
+
+        # 写后验证：确保生成的 JSON 可正常解析
+        with open(output_path, "rb") as f:
+            orjson.loads(f.read())
 
         logger.info("ASM CDFG 已生成: %s", output_path)
         return str(output_path)
@@ -338,7 +351,7 @@ class DualGraphDataset(Dataset):
     def __init__(
         self,
         root: Optional[str] = "dataset_root",
-        sim_results_dirs: Optional[List[str]] = None,
+        sim_results_dirs: Optional[List[Union[str, Path]]] = None,
         module_names: Optional[List[str]] = None,
         text_encoder_config: Optional["TextEncoderConfig"] = None,
         num_workers: int = 0,
@@ -409,7 +422,20 @@ class DualGraphDataset(Dataset):
         pass
 
     def process(self):
-        """三阶段流水线处理：多进程 CPU 预处理 → 批量 GPU 编码 → 多进程张量构建"""
+        """三阶段流水线处理：多进程 CPU 预处理 → 批量 GPU 编码 → 多进程张量构建
+
+        DDP 安全：仅 rank 0 执行处理，其余 rank 通过 barrier 等待。
+        """
+        # DDP rank 隔离：仅 rank 0 执行数据处理
+        is_distributed = torch.distributed.is_initialized()
+        rank = torch.distributed.get_rank() if is_distributed else 0
+
+        if rank != 0:
+            logger.info("rank %d: 等待 rank 0 完成数据处理…", rank)
+            torch.distributed.barrier()
+            # rank 0 完成后，扫描已生成文件更新 _num_samples
+            self._scan_processed_files()
+            return
 
         # 收集所有 (rtlil_json_dir, test_dir, module_names) 任务
         task_args: list[tuple[str, str, Optional[list[str]]]] = []
@@ -493,26 +519,33 @@ class DualGraphDataset(Dataset):
             cache_dir = Path(self.root) / "asm_encoding_cache"
             config_fp = self._text_encoder_config.cache_fingerprint
 
-            # ── 2a: 分离缓存命中 vs 未命中 ──
+            # ── 2a: 并发加载缓存，分离命中 vs 未命中 ──
             cached_pooled: dict[str, torch.Tensor] = {}  # path → [M, 768]
             uncached_paths: list[str] = []
 
-            for asm_path in unique_asm_paths:
+            def _load_cache_entry(asm_path: str):
+                """加载单个缓存条目，返回 (asm_path, tensor|None)"""
                 cache_key = _compute_asm_cache_key(asm_path, config_fp)
                 cache_file = cache_dir / f"{cache_key}.pt"
-
                 if cache_file.exists():
                     try:
-                        cached_pooled[asm_path] = torch.load(
-                            cache_file, weights_only=True
-                        )
-                        continue
+                        return asm_path, torch.load(cache_file, weights_only=True)
                     except Exception as e:
                         logger.warning(
                             "缓存文件损坏，将重新编码: %s (%s)", cache_file, e
                         )
+                return asm_path, None
 
-                uncached_paths.append(asm_path)
+            n_workers = os.cpu_count() or 1
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
+                futures = pool.map(_load_cache_entry, unique_asm_paths)
+                for asm_path, tensor in tqdm(
+                    futures, total=len(unique_asm_paths), desc="加载 ASM 编码缓存"
+                ):
+                    if tensor is not None:
+                        cached_pooled[asm_path] = tensor
+                    else:
+                        uncached_paths.append(asm_path)
 
             logger.info(
                 "阶段 2/3: ASM 编码 — %d 缓存命中, %d 待编码",
@@ -520,23 +553,21 @@ class DualGraphDataset(Dataset):
                 len(uncached_paths),
             )
 
-            # ── 2b: 对未命中部分批量编码 ──
+            # ── 2b: 逐文件编码 + 即时缓存 ──
             from text_encoder import MultiGPUInstructionEncoder
 
             if uncached_paths:
                 text_encoder = MultiGPUInstructionEncoder(self._text_encoder_config)
+                cache_dir.mkdir(parents=True, exist_ok=True)
 
-                new_pooled = text_encoder.encode_asm_jsons_pooled_batch(uncached_paths)
+                new_count = 0
+                for path, pooled_tensor in text_encoder.encode_asm_jsons_pooled_iter(uncached_paths):
+                    cached_pooled[path] = pooled_tensor
+                    cache_key = _compute_asm_cache_key(path, config_fp)
+                    torch.save(pooled_tensor, cache_dir / f"{cache_key}.pt")
+                    new_count += 1
 
-                if new_pooled:
-                    # 写入缓存
-                    cache_dir.mkdir(parents=True, exist_ok=True)
-                    for path, pooled_tensor in new_pooled.items():
-                        cached_pooled[path] = pooled_tensor
-                        cache_key = _compute_asm_cache_key(path, config_fp)
-                        torch.save(pooled_tensor, cache_dir / f"{cache_key}.pt")
-
-                    logger.info("编码完成，已缓存 %d 个新文件", len(new_pooled))
+                logger.info("编码完成，已缓存 %d 个新文件", new_count)
             else:
                 # 全部缓存命中，仍需创建编码器以获取投影层
                 text_encoder = MultiGPUInstructionEncoder(self._text_encoder_config)
@@ -568,8 +599,23 @@ class DualGraphDataset(Dataset):
             results = pool.map(_build_and_save, save_args)
 
         success_count = sum(1 for r in results if r)
+
+        # 紧缩索引，消除失败样本导致的缺口
+        actual_idx = 0
+        for i, r in enumerate(results):
+            if r and i != actual_idx:
+                src = Path(processed_dir) / f"data_{i}.pt"
+                dst = Path(processed_dir) / f"data_{actual_idx}.pt"
+                src.rename(dst)
+            if r:
+                actual_idx += 1
+
         self._num_samples = success_count
         logger.info("数据处理完成: %d/%d 个样本成功", success_count, len(save_args))
+
+        # DDP barrier：通知其他 rank 数据处理已完成
+        if is_distributed:
+            torch.distributed.barrier()
 
     def len(self) -> int:
         """返回数据集大小"""
