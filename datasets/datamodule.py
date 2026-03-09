@@ -424,19 +424,9 @@ class DualGraphDataset(Dataset):
     def process(self):
         """三阶段流水线处理：多进程 CPU 预处理 → 批量 GPU 编码 → 多进程张量构建
 
-        DDP 安全：仅 rank 0 执行处理，其余 rank 通过 barrier 等待。
+        应通过 DualGraphDataModule.prepare_data() 在 DDP 初始化之前调用，
+        避免 NCCL barrier 超时。
         """
-        # DDP rank 隔离：仅 rank 0 执行数据处理
-        is_distributed = torch.distributed.is_initialized()
-        rank = torch.distributed.get_rank() if is_distributed else 0
-
-        if rank != 0:
-            logger.info("rank %d: 等待 rank 0 完成数据处理…", rank)
-            torch.distributed.barrier()
-            # rank 0 完成后，扫描已生成文件更新 _num_samples
-            self._scan_processed_files()
-            return
-
         # 收集所有 (rtlil_json_dir, test_dir, module_names) 任务
         task_args: list[tuple[str, str, Optional[list[str]]]] = []
 
@@ -613,10 +603,6 @@ class DualGraphDataset(Dataset):
         self._num_samples = success_count
         logger.info("数据处理完成: %d/%d 个样本成功", success_count, len(save_args))
 
-        # DDP barrier：通知其他 rank 数据处理已完成
-        if is_distributed:
-            torch.distributed.barrier()
-
     def len(self) -> int:
         """返回数据集大小"""
         if self._num_samples is not None:
@@ -681,6 +667,15 @@ class DualGraphDataModule(L.LightningDataModule):
             preprocess_only=self.preprocess_only,
             transform=self.transform,
         )
+
+    def prepare_data(self):
+        """在 DDP 初始化之前完成全部数据处理（仅 rank 0）
+
+        PyTorch Lightning 保证 prepare_data() 仅在主进程调用，
+        且在 DDP 进程组创建之前执行，因此不存在 NCCL barrier 超时问题。
+        所有 GPU 编码和磁盘持久化在此阶段完成。
+        """
+        self._make_dataset("train")
 
     def setup(self, stage: Optional[str] = None):
         """初始化数据集"""
