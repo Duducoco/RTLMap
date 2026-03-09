@@ -324,7 +324,7 @@ class MultiGPUInstructionEncoder:
         return self._encoders[0].project(pooled)
 
     def encode_asm_jsons_pooled_iter(
-        self, asm_json_paths: list[str], *, chunk_files: int = 64
+        self, asm_json_paths: list[str], *, chunk_files: int = 8
     ) -> Iterator[tuple[str, torch.Tensor]]:
         """逐文件编码并 yield (path, pooled_tensor)
 
