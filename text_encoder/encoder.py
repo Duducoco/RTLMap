@@ -119,39 +119,57 @@ class InstructionEncoder:
 
     加载预训练 CodeBERT，冻结参数，通过线性投影层将 768 维输出
     映射到 output_dim 维。仅用于特征提取，不支持微调。
+
+    Args:
+        config: 文本编码器配置
+        projection_only: 仅初始化投影层，跳过 CodeBERT 模型和 tokenizer 加载。
+            用于全缓存命中场景，仅需投影功能时节省约 500MB×GPU数 的显存。
     """
 
-    def __init__(self, config: TextEncoderConfig):
+    # CodeBERT 固定隐藏维度
+    HIDDEN_SIZE = 768
+
+    def __init__(self, config: TextEncoderConfig, *, projection_only: bool = False):
         self.config = config
-        logger.info("加载文本编码器: %s", config.model_name)
+        self._projection_only = projection_only
 
-        self.tokenizer = AutoTokenizer.from_pretrained(config.model_name)
-        self.model = AutoModel.from_pretrained(config.model_name)
-        self.model.eval()
-        self.model.to(config.device)
+        if projection_only:
+            logger.info("仅加载投影层: %d → %d 维", self.HIDDEN_SIZE, config.output_dim)
+            self.tokenizer = None
+            self.model = None
+            hidden_size = self.HIDDEN_SIZE
+        else:
+            logger.info("加载文本编码器: %s", config.model_name)
+            self.tokenizer = AutoTokenizer.from_pretrained(config.model_name)
+            self.model = AutoModel.from_pretrained(config.model_name)
+            self.model.eval()
+            self.model.to(config.device)
 
-        # 冻结 CodeBERT 参数
-        for param in self.model.parameters():
-            param.requires_grad = False
+            # 冻结 CodeBERT 参数
+            for param in self.model.parameters():
+                param.requires_grad = False
+
+            hidden_size = self.model.config.hidden_size
 
         # 768 → output_dim 线性投影
         # 正交初始化：保持 CodeBERT 嵌入的几何结构（向量间角度和相对距离）
         # 此层不参与梯度优化，初始化即最终权重
-        self.projection = nn.Linear(self.model.config.hidden_size, config.output_dim)
+        self.projection = nn.Linear(hidden_size, config.output_dim)
         rng_state = torch.random.get_rng_state()
         torch.manual_seed(42)
         nn.init.orthogonal_(
             self.projection.weight,
-            gain=math.sqrt(self.model.config.hidden_size / config.output_dim),
+            gain=math.sqrt(hidden_size / config.output_dim),
         )
         nn.init.zeros_(self.projection.bias)
         torch.random.set_rng_state(rng_state)
         self.projection.to(config.device)
 
         logger.info(
-            "文本编码器就绪: %d → %d 维",
-            self.model.config.hidden_size,
+            "文本编码器就绪: %d → %d 维%s",
+            hidden_size,
             config.output_dim,
+            "（仅投影）" if projection_only else "",
         )
 
     def _tokenize_batch(self, batch_texts: list[str]) -> dict[str, torch.Tensor]:
@@ -221,6 +239,8 @@ class InstructionEncoder:
         Returns:
             [N, hidden_size] 张量（hidden_size=768 for CodeBERT）
         """
+        if self._projection_only:
+            raise RuntimeError("projection_only 模式下不支持编码操作")
         if not texts:
             return torch.empty(0, self.model.config.hidden_size)
 
@@ -274,21 +294,30 @@ class MultiGPUInstructionEncoder:
     单设备时直接委托给内部唯一的 InstructionEncoder，零开销。
     """
 
-    def __init__(self, config: TextEncoderConfig):
-        # 自动检测可用 GPU：有几张用几张，没有则回退 CPU
-        gpu_count = torch.cuda.device_count()
-        if gpu_count > 0:
-            devices = [f"cuda:{i}" for i in range(gpu_count)]
-        else:
-            devices = ["cpu"]
+    def __init__(self, config: TextEncoderConfig, *, projection_only: bool = False):
+        self._projection_only = projection_only
 
-        logger.info("初始化多 GPU 编码器: %s", devices)
-
-        self._encoders: list[InstructionEncoder] = []
-        for dev in devices:
+        if projection_only:
+            # 仅投影模式：单实例即可，无需多 GPU
+            logger.info("初始化多 GPU 编码器（仅投影模式）")
             per_dev_config = copy(config)
-            per_dev_config.device = dev
-            self._encoders.append(InstructionEncoder(per_dev_config))
+            per_dev_config.device = "cpu"
+            self._encoders = [InstructionEncoder(per_dev_config, projection_only=True)]
+        else:
+            # 自动检测可用 GPU：有几张用几张，没有则回退 CPU
+            gpu_count = torch.cuda.device_count()
+            if gpu_count > 0:
+                devices = [f"cuda:{i}" for i in range(gpu_count)]
+            else:
+                devices = ["cpu"]
+
+            logger.info("初始化多 GPU 编码器: %s", devices)
+
+            self._encoders: list[InstructionEncoder] = []
+            for dev in devices:
+                per_dev_config = copy(config)
+                per_dev_config.device = dev
+                self._encoders.append(InstructionEncoder(per_dev_config))
 
         logger.info("多 GPU 编码器就绪: %d 个设备", len(self._encoders))
 
@@ -297,6 +326,8 @@ class MultiGPUInstructionEncoder:
 
         单设备直接委托；多设备均匀切分后线程并行。
         """
+        if self._projection_only:
+            raise RuntimeError("projection_only 模式下不支持编码操作")
         if not texts:
             return torch.empty(0, self._encoders[0].model.config.hidden_size)
 
@@ -328,8 +359,9 @@ class MultiGPUInstructionEncoder:
     ) -> Iterator[tuple[str, torch.Tensor]]:
         """逐文件编码并 yield (path, pooled_tensor)
 
-        多进程加载 + 分块批量编码 + 逐文件 yield。
+        分块惰性加载 + 分块批量编码 + 逐文件 yield。
         每个 chunk 编码完即可持久化，中断后只需重编未完成的文件。
+        文本内存从 O(所有未缓存文件) 降到 O(chunk_files)。
 
         Args:
             asm_json_paths: ASM CDFG JSON 文件路径列表
@@ -338,32 +370,40 @@ class MultiGPUInstructionEncoder:
         Yields:
             (asm_path, [M, hidden_size] tensor) 元组
         """
-        # 1. 多进程 I/O + 解析
-        file_data: list[tuple[str, list[str]]] = []
-        with ProcessPoolExecutor(max_workers=_IO_WORKERS) as pool:
-            results = pool.map(_load_and_format_asm, asm_json_paths)
-            for path, texts in tqdm(
-                results, total=len(asm_json_paths), desc="加载 ASM JSON"
-            ):
-                if texts:
-                    file_data.append((path, texts))
-
-        if not file_data:
+        if not asm_json_paths:
             return
 
-        total_nodes = sum(len(texts) for _, texts in file_data)
-        logger.info(
-            "批量编码 %d 个文件，共 %d 个节点（%d GPU，每 %d 文件一批）",
-            len(file_data), total_nodes, len(self._encoders), chunk_files,
-        )
+        total_files = len(asm_json_paths)
+        total_nodes = 0
 
-        # 2. 分块编码，每块完成后逐文件 yield
-        for chunk_start in range(0, len(file_data), chunk_files):
-            chunk = file_data[chunk_start : chunk_start + chunk_files]
+        # 按 chunk_files 分批路径，每批独立加载文本 + 编码
+        for chunk_start in range(0, total_files, chunk_files):
+            chunk_paths = asm_json_paths[chunk_start : chunk_start + chunk_files]
 
+            # 仅加载当前批次的文本（避免一次性预加载所有文件）
+            chunk_data: list[tuple[str, list[str]]] = []
+            with ProcessPoolExecutor(max_workers=_IO_WORKERS) as pool:
+                results = pool.map(_load_and_format_asm, chunk_paths)
+                for path, texts in results:
+                    if texts:
+                        chunk_data.append((path, texts))
+
+            if not chunk_data:
+                continue
+
+            chunk_nodes = sum(len(texts) for _, texts in chunk_data)
+            total_nodes += chunk_nodes
+
+            if chunk_start == 0:
+                logger.info(
+                    "批量编码 %d 个文件（%d GPU，每 %d 文件一批）",
+                    total_files, len(self._encoders), chunk_files,
+                )
+
+            # 编码当前批次
             chunk_texts: list[str] = []
             chunk_slices: list[tuple[str, int]] = []
-            for path, texts in chunk:
+            for path, texts in chunk_data:
                 chunk_slices.append((path, len(texts)))
                 chunk_texts.extend(texts)
 
@@ -373,4 +413,9 @@ class MultiGPUInstructionEncoder:
             for path, count in chunk_slices:
                 yield path, chunk_pooled[offset : offset + count]
                 offset += count
+
+            # 释放当前批次的文本和编码结果
+            del chunk_data, chunk_texts, chunk_pooled
+
+        logger.info("批量编码完成，共 %d 个节点", total_nodes)
 

@@ -3,7 +3,6 @@
 
 import hashlib
 import json
-from concurrent.futures import ThreadPoolExecutor
 
 import orjson
 from tqdm import tqdm
@@ -178,23 +177,44 @@ def _process_single_test(
     return [(rtl, asm_json) for rtl in rtl_files]
 
 
+# ── 阶段 3 worker 共享内存支持 ──
+_save_worker_packed: Optional["torch.Tensor"] = None  # 合并后的共享内存 tensor
+_save_worker_slices: dict[str, tuple[int, int]] = {}  # path → (offset, count)
+
+
+def _init_save_worker(
+    packed: "torch.Tensor", slices: dict[str, tuple[int, int]]
+) -> None:
+    """Pool initializer: 注入合并的共享内存 tensor 和偏移索引"""
+    global _save_worker_packed, _save_worker_slices
+    _save_worker_packed = packed
+    _save_worker_slices = slices
+
+
 def _build_and_save(
-    args: tuple[str, Optional[str], Optional["torch.Tensor"], str, int],
+    args: tuple[str, Optional[str], str, int],
 ) -> bool:
     """阶段 3 worker: 构建 DualGraphData 并保存 .pt
 
+    通过 _save_worker_packed 共享内存 tensor 和偏移索引获取编码，
+    避免 pickle 序列化导致的 tensor 深拷贝和内存放大。
+
     Args:
-        args: (rtl_json_path, asm_json_path, asm_encoding, processed_dir, idx)
+        args: (rtl_json_path, asm_json_path, processed_dir, idx)
 
     Returns:
         True 成功, False 失败
     """
-    rtl_json_path, asm_json_path, asm_encoding, processed_dir, idx = args
+    rtl_json_path, asm_json_path, processed_dir, idx = args
 
     # ASM 缺失提前返回，避免白费 RTL 解析开销
     if asm_json_path is None:
         logger.error("ASM JSON 文件缺失，跳过构建: rtl=%s", rtl_json_path)
         return False
+
+    # 从共享内存合并 tensor 中按偏移切片
+    slice_info = _save_worker_slices.get(asm_json_path)
+    asm_encoding = _save_worker_packed[slice_info[0] : slice_info[0] + slice_info[1]] if slice_info else None
 
     try:
         # ── RTL 图 ──
@@ -388,6 +408,7 @@ class DualGraphDataset(Dataset):
             "cv32e40p_int_controller",
         ]
         self._num_samples: Optional[int] = None
+        self._idx_to_file: list[str] = []  # 逻辑索引 → 实际文件名
         self._preprocess_only = preprocess_only
         self._text_encoder_config = text_encoder_config
         self._num_workers = num_workers or min(os.cpu_count() or 1, 32)
@@ -398,7 +419,10 @@ class DualGraphDataset(Dataset):
         return self._sim_results_dirs
 
     def _scan_processed_files(self) -> list[str]:
-        """扫描 processed_dir 中的 data_*.pt 文件并更新缓存"""
+        """扫描 processed_dir 中的 data_*.pt 文件并更新缓存
+
+        建立逻辑索引 → 实际文件名的映射，支持非连续索引。
+        """
         processed_path = Path(self.processed_dir)
         if processed_path.exists():
             files = sorted(
@@ -408,14 +432,15 @@ class DualGraphDataset(Dataset):
             )
             if files:
                 self._num_samples = len(files)
+                self._idx_to_file = files
                 return files
         return []
 
     @property
     def processed_file_names(self) -> List[str]:
         """处理后的文件列表"""
-        if self._num_samples is not None:
-            return [f"data_{i}.pt" for i in range(self._num_samples)]
+        if self._idx_to_file:
+            return self._idx_to_file
         return self._scan_processed_files()
 
     def download(self):
@@ -509,62 +534,68 @@ class DualGraphDataset(Dataset):
             cache_dir = Path(self.root) / "asm_encoding_cache"
             config_fp = self._text_encoder_config.cache_fingerprint
 
-            # ── 2a: 并发加载缓存，分离命中 vs 未命中 ──
-            cached_pooled: dict[str, torch.Tensor] = {}  # path → [M, 768]
+            # 延迟创建编码器：全缓存命中时仅加载投影层，节省显存
+            text_encoder = None
+
+            def _get_encoder(*, projection_only: bool = False):
+                nonlocal text_encoder
+                if text_encoder is None:
+                    from text_encoder import MultiGPUInstructionEncoder
+
+                    text_encoder = MultiGPUInstructionEncoder(
+                        self._text_encoder_config,
+                        projection_only=projection_only,
+                    )
+                return text_encoder
+
+            # ── 2a: 串行加载缓存 + 即时投影 ──
+            # 加载一个 768 维 tensor 后立即投影为 256 维并释放，
+            # 避免全量 768 维 tensor 驻留内存 + 并发 torch.load 碎片化
             uncached_paths: list[str] = []
 
-            def _load_cache_entry(asm_path: str):
-                """加载单个缓存条目，返回 (asm_path, tensor|None)"""
+            for asm_path in tqdm(unique_asm_paths, desc="加载 ASM 编码缓存"):
                 cache_key = _compute_asm_cache_key(asm_path, config_fp)
                 cache_file = cache_dir / f"{cache_key}.pt"
                 if cache_file.exists():
                     try:
-                        return asm_path, torch.load(cache_file, weights_only=True)
+                        pooled = torch.load(cache_file, weights_only=True)
+                        asm_encodings[asm_path] = _get_encoder(
+                            projection_only=True
+                        ).project(pooled)
+                        del pooled  # 立即释放 768 维 tensor
+                        continue
                     except Exception as e:
                         logger.warning(
                             "缓存文件损坏，将重新编码: %s (%s)", cache_file, e
                         )
-                return asm_path, None
-
-            n_workers = os.cpu_count() or 1
-            with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                futures = pool.map(_load_cache_entry, unique_asm_paths)
-                for asm_path, tensor in tqdm(
-                    futures, total=len(unique_asm_paths), desc="加载 ASM 编码缓存"
-                ):
-                    if tensor is not None:
-                        cached_pooled[asm_path] = tensor
-                    else:
-                        uncached_paths.append(asm_path)
+                uncached_paths.append(asm_path)
 
             logger.info(
                 "阶段 2/3: ASM 编码 — %d 缓存命中, %d 待编码",
-                len(cached_pooled),
+                len(asm_encodings),
                 len(uncached_paths),
             )
 
-            # ── 2b: 逐文件编码 + 即时缓存 ──
-            from text_encoder import MultiGPUInstructionEncoder
-
+            # ── 2b: 编码未缓存项 + 即时投影 + 即时缓存 ──
             if uncached_paths:
-                text_encoder = MultiGPUInstructionEncoder(self._text_encoder_config)
+                # 需要完整编码器（含 CodeBERT 模型）
+                if text_encoder is not None and text_encoder._projection_only:
+                    # 之前只加载了投影层，需要重建完整编码器
+                    text_encoder = None
+                encoder = _get_encoder(projection_only=False)
                 cache_dir.mkdir(parents=True, exist_ok=True)
 
                 new_count = 0
-                for path, pooled_tensor in text_encoder.encode_asm_jsons_pooled_iter(uncached_paths):
-                    cached_pooled[path] = pooled_tensor
+                for path, pooled_tensor in encoder.encode_asm_jsons_pooled_iter(
+                    uncached_paths
+                ):
                     cache_key = _compute_asm_cache_key(path, config_fp)
                     torch.save(pooled_tensor, cache_dir / f"{cache_key}.pt")
+                    asm_encodings[path] = encoder.project(pooled_tensor)
+                    del pooled_tensor  # 立即释放 768 维 tensor
                     new_count += 1
 
                 logger.info("编码完成，已缓存 %d 个新文件", new_count)
-            else:
-                # 全部缓存命中，仍需创建编码器以获取投影层
-                text_encoder = MultiGPUInstructionEncoder(self._text_encoder_config)
-
-            # ── 2c: 在线投影 768 → output_dim ──
-            for asm_path, pooled in cached_pooled.items():
-                asm_encodings[asm_path] = text_encoder.project(pooled)
 
             logger.info("阶段 2 完成: %d 个编码结果", len(asm_encodings))
         else:
@@ -572,20 +603,40 @@ class DualGraphDataset(Dataset):
 
         # ── 阶段 3: 多进程张量构建 + 保存 ──
         processed_dir = self.processed_dir
-        save_args: list[
-            tuple[str, Optional[str], Optional["torch.Tensor"], str, int]
-        ] = []
+
+        # 合并所有编码 tensor 为单个共享内存 tensor（仅 1 个 fd）
+        if asm_encodings:
+            packed_parts = []
+            encoding_slices: dict[str, tuple[int, int]] = {}
+            offset = 0
+            for path, enc in asm_encodings.items():
+                n = enc.shape[0]
+                packed_parts.append(enc)
+                encoding_slices[path] = (offset, n)
+                offset += n
+            packed_tensor = torch.cat(packed_parts, dim=0)
+            packed_tensor.share_memory_()
+            del asm_encodings, packed_parts  # 释放原始 tensor
+        else:
+            packed_tensor = torch.empty(0)
+            encoding_slices = {}
+
+        # save_args 不再包含 tensor，通过 initializer 传入共享内存
+        save_args: list[tuple[str, Optional[str], str, int]] = []
 
         for i, (rtl_path, asm_path) in enumerate(flat_results):
-            enc = asm_encodings.get(asm_path) if asm_path else None
-            save_args.append((rtl_path, asm_path, enc, processed_dir, i))
+            save_args.append((rtl_path, asm_path, processed_dir, i))
 
         logger.info(
             "阶段 3/3: 多进程张量构建 + 保存 (%d 个样本, %d workers)",
             len(save_args),
             self._num_workers,
         )
-        with Pool(self._num_workers) as pool:
+        with Pool(
+            self._num_workers,
+            initializer=_init_save_worker,
+            initargs=(packed_tensor, encoding_slices),
+        ) as pool:
             results = pool.map(_build_and_save, save_args)
 
         success_count = sum(1 for r in results if r)
@@ -601,6 +652,7 @@ class DualGraphDataset(Dataset):
                 actual_idx += 1
 
         self._num_samples = success_count
+        self._idx_to_file = [f"data_{i}.pt" for i in range(success_count)]
         logger.info("数据处理完成: %d/%d 个样本成功", success_count, len(save_args))
 
     def len(self) -> int:
@@ -612,8 +664,12 @@ class DualGraphDataset(Dataset):
 
     def get(self, idx: int) -> DualGraphData:
         """从磁盘加载指定索引的数据"""
+        if self._idx_to_file:
+            filename = self._idx_to_file[idx]
+        else:
+            filename = f"data_{idx}.pt"
         data = torch.load(
-            Path(self.processed_dir) / f"data_{idx}.pt", weights_only=False
+            Path(self.processed_dir) / filename, weights_only=False
         )
         return data
 
@@ -678,12 +734,27 @@ class DualGraphDataModule(L.LightningDataModule):
         self._make_dataset("train")
 
     def setup(self, stage: Optional[str] = None):
-        """初始化数据集"""
+        """初始化数据集
+
+        val 集缺失时自动从 train 集按 9:1 划分，确保 Lightning sanity check 通过。
+        """
         root_path = Path(self.root)
         if stage == "fit" or stage is None:
             self.train_dataset = self._make_dataset("train")
             if (root_path / "val" / "processed").exists():
                 self.val_dataset = self._make_dataset("val")
+            else:
+                # 自动划分：90% train, 10% val
+                from torch.utils.data import random_split
+                full_len = len(self.train_dataset)
+                val_len = max(1, int(full_len * 0.1))
+                train_len = full_len - val_len
+                self.train_dataset, self.val_dataset = random_split(
+                    self.train_dataset, [train_len, val_len]
+                )
+                logger.info(
+                    "val 集缺失，自动划分: train=%d, val=%d", train_len, val_len
+                )
 
         if stage == "test" or stage is None:
             if (root_path / "test" / "processed").exists():
