@@ -41,6 +41,7 @@ class TrainerConfig:
     accelerator: str = "auto"  # auto / gpu / cpu
     devices: Union[int, str] = "auto"
     precision: str = "32-true"  # 32-true / 16-mixed / bf16-mixed
+    strategy: str = "ddp_find_unused_parameters_true"  # auto / ddp / ddp_find_unused_parameters_true
 
     # 训练控制
     min_epochs: int = 1
@@ -56,8 +57,10 @@ class TrainerConfig:
     benchmark: bool = True
     gradient_clip_algorithm: str = "norm"
 
+    num_sanity_val_steps: int = 0  # DDP 小数据集下跳过 sanity check 避免挂起
+
     # 日志
-    log_every_n_steps: int = 10
+    log_every_n_steps: int = 1
     enable_checkpointing: bool = True
     enable_progress_bar: bool = True
     enable_model_summary: bool = True

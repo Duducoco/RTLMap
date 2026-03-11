@@ -63,6 +63,7 @@ class LightningTrainer:
             accelerator=config.accelerator,
             devices=config.devices,
             precision=config.precision,
+            strategy=config.strategy,
             # 回调和日志
             callbacks=self.callbacks,
             logger=self.logger,
@@ -85,6 +86,8 @@ class LightningTrainer:
             benchmark=config.benchmark,
             # 日志
             log_every_n_steps=config.log_every_n_steps,
+            # sanity check
+            num_sanity_val_steps=config.num_sanity_val_steps,
         )
 
     def _create_logger(self, logger_type: str):

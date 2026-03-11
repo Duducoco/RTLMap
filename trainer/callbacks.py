@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """训练回调函数"""
 
+from __future__ import annotations
+
 from typing import List, Optional, Union
+
+import lightning as L
 from lightning.pytorch.callbacks import (
     Callback,
     ModelCheckpoint,
@@ -29,6 +33,46 @@ except ImportError:
     _RICH_AVAILABLE = False
 
 
+if _RICH_AVAILABLE:
+
+    class _SafeRichProgressBar(RichProgressBar):
+        """DDP 安全的 RichProgressBar
+
+        DDP 多进程下 rich.Console._live_stack 可能为空，
+        导致 _init_progress → clear_live() 时 pop from empty list，
+        且后续回调断言 self.progress is not None 失败。
+        检测到异常时禁用自身，避免级联错误。
+        """
+
+        _disabled: bool = False
+
+        def _init_progress(self, trainer: L.Trainer) -> None:
+            try:
+                super()._init_progress(trainer)
+            except IndexError:
+                self._disabled = True
+
+        def on_validation_batch_start(self, *args, **kwargs) -> None:
+            if self._disabled:
+                return
+            super().on_validation_batch_start(*args, **kwargs)
+
+        def on_validation_batch_end(self, *args, **kwargs) -> None:
+            if self._disabled:
+                return
+            super().on_validation_batch_end(*args, **kwargs)
+
+        def on_train_batch_start(self, *args, **kwargs) -> None:
+            if self._disabled:
+                return
+            super().on_train_batch_start(*args, **kwargs)
+
+        def on_train_batch_end(self, *args, **kwargs) -> None:
+            if self._disabled:
+                return
+            super().on_train_batch_end(*args, **kwargs)
+
+
 class CallbackFactory:
     """Callback 工厂类 - 根据配置创建 Lightning callbacks"""
 
@@ -38,7 +82,7 @@ class CallbackFactory:
         return LearningRateMonitor(logging_interval="step")
 
     @staticmethod
-    def create_progress_bar(use_rich: bool = True) -> Union[ProgressBar, Callback]:
+    def create_progress_bar(use_rich: bool = True) -> Union[ProgressBar, Callback, None]:
         """
         创建进度条 callback
 
@@ -49,7 +93,9 @@ class CallbackFactory:
             进度条 callback，如果 rich 不可用则返回 None（使用默认进度条）
         """
         if use_rich and _RICH_AVAILABLE:
-            return RichProgressBar()
+            # DDP 下 RichProgressBar 的 live display 与多进程 stdout 冲突，
+            # 回退到 Lightning 默认 TQDM 进度条
+            return _SafeRichProgressBar()
         # 返回 None 表示使用 Lightning 默认进度条
         return None
 
@@ -108,8 +154,12 @@ class CallbackFactory:
             enable_progress_bar = config.enable_progress_bar
 
         # 添加进度条（如果启用且可用）
+        # DDP 下 RichProgressBar 的 live display 与多进程 stdout 冲突，回退到 TQDM
+        is_ddp = "ddp" in getattr(config, "strategy", "")
         if enable_progress_bar:
-            progress_bar = cls.create_progress_bar(use_rich_progress)
+            progress_bar = cls.create_progress_bar(
+                use_rich=use_rich_progress and not is_ddp,
+            )
             if progress_bar is not None:
                 callbacks.append(progress_bar)
 
