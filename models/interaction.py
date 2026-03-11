@@ -21,6 +21,7 @@ import torch.nn.functional as F
 from torch import Tensor
 from typing import Tuple, Literal
 from torch_geometric.nn import global_mean_pool
+from torch_geometric.utils import to_dense_batch
 
 
 class FiLMInjection(nn.Module):
@@ -137,6 +138,33 @@ class SimpleSSM(nn.Module):
         nn.init.xavier_uniform_(self.C_proj.weight)
         nn.init.zeros_(self.C_proj.bias)
 
+        # torch.compile 编译缓存（首次 forward 时初始化）
+        self._compiled_scan = None
+
+    def _scan(self, A_bar: Tensor, delta: Tensor, B_t: Tensor, C_t: Tensor, x: Tensor) -> Tensor:
+        """
+        SSM 状态递推（独立方法，可被 torch.compile 优化 kernel 融合）
+
+        Args:
+            A_bar: [B, T, D, d_state] 离散化状态矩阵
+            delta: [B, T, D] 步长
+            B_t: [B, T, d_state] 输入门
+            C_t: [B, T, d_state] 输出门
+            x: [B, T, D] 输入序列
+
+        Returns:
+            y: [B, T, D] 输出序列
+        """
+        B, T, D = x.shape
+        h = x.new_zeros(B, D, self.d_state)
+        outputs = []
+        for t in range(T):
+            delta_B_x = delta[:, t, :, None] * B_t[:, t, None, :] * x[:, t, :, None]
+            h = A_bar[:, t] * h + delta_B_x
+            y_t = (h * C_t[:, t, None, :]).sum(-1)
+            outputs.append(y_t)
+        return torch.stack(outputs, dim=1)
+
     def forward(self, x: Tensor, mask: Tensor = None) -> Tensor:
         """
         前向传播
@@ -159,32 +187,17 @@ class SimpleSSM(nn.Module):
         C_t = self.C_proj(x)  # [B, T, d_state] 输出门
 
         # 离散化：Ā = exp(Δ · A)
-        # delta: [B, T, D], A: [D, d_state] -> delta_A: [B, T, D, d_state]
-        delta_A = delta.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(
-            0
-        )  # [B, T, D, d_state]
+        delta_A = delta.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0)
         A_bar = torch.exp(delta_A)  # [B, T, D, d_state]
 
-        # 状态递推
-        h = x.new_zeros(B, D, self.d_state)  # [B, D, d_state] 初始状态
-        outputs = []
-
-        for t in range(T):
-            # 状态更新: h_t = Ā · h_{t-1} + Δ · B · x_t
-            # A_bar[:, t]: [B, D, d_state]
-            # delta[:, t]: [B, D]
-            # B_t[:, t]: [B, d_state]
-            # x[:, t]: [B, D]
-            delta_B_x = delta[:, t, :, None] * B_t[:, t, None, :] * x[:, t, :, None]
-            # delta_B_x: [B, D, d_state]
-            h = A_bar[:, t] * h + delta_B_x
-
-            # 输出: y_t = C · h_t
-            # h: [B, D, d_state], C_t[:, t]: [B, d_state]
-            y_t = (h * C_t[:, t, None, :]).sum(-1)  # [B, D]
-            outputs.append(y_t)
-
-        y = torch.stack(outputs, dim=1)  # [B, T, D]
+        # 状态递推（首次调用时尝试 torch.compile）
+        if self._compiled_scan is None:
+            if hasattr(torch, "compile"):
+                self._compiled_scan = torch.compile(self._scan)
+            else:
+                # torch < 2.0 fallback
+                self._compiled_scan = self._scan
+        y = self._compiled_scan(A_bar, delta, B_t, C_t, x)
 
         # 输出投影
         y = self.out_proj(y)
@@ -293,7 +306,7 @@ class SSMFiLMInjection(nn.Module):
 
     def _batch_to_sequence(self, h: Tensor, batch: Tensor) -> Tuple[Tensor, Tensor]:
         """
-        将 batch 格式转换为 padding 序列格式
+        将 batch 格式转换为 padding 序列格式（使用 PyG to_dense_batch 向量化实现）
 
         Args:
             h: [N, D] 节点特征
@@ -303,24 +316,7 @@ class SSMFiLMInjection(nn.Module):
             seq: [B, T_max, D] padding 后的序列
             mask: [B, T_max] 有效位置 mask（True 表示有效）
         """
-        device = h.device
-        batch_size = batch.max().item() + 1
-
-        # 计算每个 batch 的节点数
-        counts = torch.bincount(batch, minlength=batch_size)
-        max_len = counts.max().item()
-
-        # 初始化
-        seq = h.new_zeros(batch_size, max_len, h.size(-1))
-        mask = h.new_zeros(batch_size, max_len, dtype=torch.bool)
-
-        # 填充（使用向量化操作优化）
-        for b in range(batch_size):
-            idx = (batch == b).nonzero(as_tuple=True)[0]
-            length = len(idx)
-            seq[b, :length] = h[idx]
-            mask[b, :length] = True
-
+        seq, mask = to_dense_batch(h, batch)  # [B, T_max, D], [B, T_max]
         return seq, mask
 
     def _aggregate(

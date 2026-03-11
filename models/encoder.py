@@ -408,20 +408,14 @@ class ControlGatedGNNLayer(MessagePassing):
             messages: [E, D] 边消息
         """
         is_ctrl = edge_type == EDGE_TYPE_CONTROL
-        messages = x_j.new_zeros(x_j.size(0), self.hidden_dim)
-
-        # 控制边消息 φ_ctrl
-        if is_ctrl.any():
-            ctrl_input = torch.cat([x_j[is_ctrl], edge_attr[is_ctrl]], dim=-1)
-            messages[is_ctrl] = self.ctrl_message_mlp(ctrl_input)
-
-        # 数据边消息 φ（包括 DATA, DATA_TRUE, DATA_FALSE, CLOCK, RESET, ENABLE）
         is_data = ~is_ctrl
-        if is_data.any():
-            data_input = torch.cat([x_j[is_data], edge_attr[is_data]], dim=-1)
-            messages[is_data] = self.data_message_mlp(data_input)
 
-        return messages
+        # 无条件计算所有边消息，用 torch.where 按类型选择（避免 .any() GPU-CPU 同步）
+        ctrl_input = torch.cat([x_j, edge_attr], dim=-1)
+        ctrl_msg = self.ctrl_message_mlp(ctrl_input).to(x_j.dtype)
+        data_msg = self.data_message_mlp(ctrl_input).to(x_j.dtype)
+
+        return torch.where(is_ctrl.unsqueeze(-1), ctrl_msg, data_msg)
 
     def aggregate(
         self,
@@ -465,20 +459,15 @@ class ControlGatedGNNLayer(MessagePassing):
         def expand_idx(mask: Tensor) -> Tensor:
             return index[mask].unsqueeze(-1).expand(-1, D)
 
-        # 分类聚合消息（scatter_add_ 支持多条同类型边的 sum 聚合）
-        if is_ctrl.any():
-            agg_ctrl.scatter_add_(0, expand_idx(is_ctrl), inputs[is_ctrl])
-        if is_true.any():
-            agg_true.scatter_add_(0, expand_idx(is_true), inputs[is_true])
-        if is_false.any():
-            agg_false.scatter_add_(0, expand_idx(is_false), inputs[is_false])
-        if is_other.any():
-            agg_other.scatter_add_(0, expand_idx(is_other), inputs[is_other])
+        # 分类聚合消息（scatter_add_ 对空 tensor 是安全 no-op，无需 .any() 保护）
+        agg_ctrl.scatter_add_(0, expand_idx(is_ctrl), inputs[is_ctrl])
+        agg_true.scatter_add_(0, expand_idx(is_true), inputs[is_true])
+        agg_false.scatter_add_(0, expand_idx(is_false), inputs[is_false])
+        agg_other.scatter_add_(0, expand_idx(is_other), inputs[is_other])
 
         # 检测哪些节点有 CONTROL 边（MUX 节点）
         has_ctrl = inputs.new_zeros(num_nodes, dtype=torch.bool)
-        if is_ctrl.any():
-            has_ctrl.scatter_(0, index[is_ctrl], True)
+        has_ctrl.scatter_(0, index[is_ctrl], True)
 
         # 生成门控权重 [α_true, α_false]
         gate_logits = self.gate_mlp(agg_ctrl)  # [N, 2]
