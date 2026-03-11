@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+import warnings
 
 import orjson
 from tqdm import tqdm
@@ -483,6 +484,7 @@ class DualGraphDataset(Dataset):
             else:
                 extract_rtlil_json(sim_results_dir, self._module_names)
 
+            idx = 0
             for test_dir in sorted(sim_results_dir.iterdir()):
                 if not test_dir.is_dir():
                     continue
@@ -493,6 +495,10 @@ class DualGraphDataset(Dataset):
                         self._module_names,
                     )
                 )
+
+                idx = idx + 1
+                if idx >10:
+                    break
 
         if not task_args:
             logger.warning("未找到任何测试目录")
@@ -745,12 +751,15 @@ class DualGraphDataModule(L.LightningDataModule):
                 self.val_dataset = self._make_dataset("val")
             else:
                 # 自动划分：90% train, 10% val
+                # 固定种子确保 DDP 各 rank 划分一致
                 from torch.utils.data import random_split
                 full_len = len(self.train_dataset)
                 val_len = max(1, int(full_len * 0.1))
                 train_len = full_len - val_len
+                split_gen = torch.Generator().manual_seed(42)
                 self.train_dataset, self.val_dataset = random_split(
-                    self.train_dataset, [train_len, val_len]
+                    self.train_dataset, [train_len, val_len],
+                    generator=split_gen,
                 )
                 logger.info(
                     "val 集缺失，自动划分: train=%d, val=%d", train_len, val_len
@@ -761,15 +770,39 @@ class DualGraphDataModule(L.LightningDataModule):
                 self.test_dataset = self._make_dataset("test")
 
     def _create_loader(self, dataset, shuffle: bool) -> PyGDataLoader:
-        """创建 PyG DataLoader"""
+        """创建 PyG DataLoader
+
+        DDP 下每 GPU 仅分到 len(dataset)/world_size 个样本，
+        当 per-GPU 样本数不足 batch_size×2 时将 num_workers 置 0，
+        避免 fork+CUDA 上下文竞争导致死锁。
+        """
+        n_samples = len(dataset)
+        world_size = 1
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            world_size = torch.distributed.get_world_size()
+        per_gpu = n_samples // max(world_size, 1)
+
+        # per-GPU 样本太少时关闭多进程加载
+        if per_gpu < self.batch_size * 2:
+            effective_workers = 0
+            # 小数据集下 num_workers=0 是有意为之，抑制 Lightning 误报警告
+            warnings.filterwarnings(
+                "ignore",
+                message=".*does not have many workers.*",
+                module=r"lightning\.pytorch\.trainer\.connectors\.data_connector",
+            )
+        else:
+            effective_workers = min(self.num_workers, per_gpu)
+        persistent = effective_workers > 0 and n_samples > effective_workers
+
         return PyGDataLoader(
             dataset,
             batch_size=self.batch_size,
             shuffle=shuffle,
-            num_workers=self.num_workers,
+            num_workers=effective_workers,
             follow_batch=["asm_node_type"],  # 为 ASM 图生成 batch 索引
             pin_memory=True,
-            persistent_workers=self.num_workers > 0,
+            persistent_workers=persistent,
         )
 
     def train_dataloader(self) -> PyGDataLoader:

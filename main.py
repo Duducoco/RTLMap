@@ -29,12 +29,17 @@ import argparse
 import logging
 import sys
 
+import torch
+
 from datasets import DualGraphDataModule
 from models.data_types import ModelConfig
 from trainer.config import TrainerConfig
 from trainer.lightning_module import DualGraphLightningModule
 from trainer.lightning_trainer import LightningTrainer
 from trainer.utils import train_model
+
+# A100 等支持 Tensor Core 的 GPU 启用 TF32 加速
+torch.set_float32_matmul_precision("high")
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +74,7 @@ def parse_args() -> argparse.Namespace:
     model.add_argument(
         "--fusion-type",
         choices=["film", "ssm_film"],
-        default="ssm_film",
+        default="film",
         help="融合模式",
     )
     model.add_argument("--ssm-d-state", type=int, default=64, help="SSM 状态空间维度")
@@ -84,7 +89,7 @@ def parse_args() -> argparse.Namespace:
     train_g.add_argument("--max-epochs", type=int, default=100)
     train_g.add_argument("--lr", type=float, default=1e-4, help="学习率")
     train_g.add_argument("--weight-decay", type=float, default=1e-5)
-    train_g.add_argument("--batch-size", type=int, default=32)
+    train_g.add_argument("--batch-size", type=int, default=16)
     train_g.add_argument("--num-workers", type=int, default=4)
     train_g.add_argument("--gradient-clip-val", type=float, default=1.0)
     train_g.add_argument("--accumulate-grad-batches", type=int, default=1)
@@ -109,7 +114,7 @@ def parse_args() -> argparse.Namespace:
     device.add_argument(
         "--precision",
         choices=["32-true", "16-mixed", "bf16-mixed"],
-        default="16-mixed",
+        default="bf16-mixed",
     )
 
     # ── 文本编码器 ────────────────────────────────────────
@@ -144,7 +149,7 @@ def parse_args() -> argparse.Namespace:
     exp.add_argument("--checkpoint-dir", default="checkpoints")
     exp.add_argument("--save-top-k", type=int, default=3)
     exp.add_argument("--early-stopping-patience", type=int, default=10)
-    exp.add_argument("--log-every-n-steps", type=int, default=10)
+    exp.add_argument("--log-every-n-steps", type=int, default=1)
 
     # ── 运行模式 ──────────────────────────────────────────
     mode = p.add_argument_group("运行模式")
