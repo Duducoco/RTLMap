@@ -12,6 +12,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from cdfg_rtl import CDFGExtractor, CDFGExporter, CDFG
 from annotation.parser import CoverageParser
 from annotation.annotator import annotate_cdfg_with_coverage, AnnotationStats
@@ -585,16 +587,13 @@ def main():
         epilog="""
 示例:
   # 指定设计 JSON 和覆盖率目录，自动匹配模块
-  uv run data_annotate.py --design_name cv32e40p --module_name cv32e40p_core -c designs/cv32e40p/coverage_reports/coverage_report1
+  uv run annotation/data_annotate.py --design_name cv32e40p --module_name cv32e40p_core -c designs/cv32e40p/coverage_reports/coverage_report1
 
   # 仅提取 CDFG（不标注覆盖率）
-  uv run data_annotate.py --design_name cv32e40p --module_name cv32e40p_core --no-coverage
+  uv run annotation/data_annotate.py --design_name cv32e40p --module_name cv32e40p_core --no-coverage
 
   # 生成 SVG 可视化
-  uv run data_annotate.py --design_name cv32e40p --module_name cv32e40p_core -c designs/cv32e40p/coverage_reports/coverage_report1 --svg
-
-  # 启用覆盖率传播（标注所有可达边）
-  uv run data_annotate.py --design_name cv32e40p --module_name cv32e40p_core -c designs/cv32e40p/coverage_reports/coverage_report1 --propagate
+  uv run annotation/data_annotate.py --design_name cv32e40p --module_name cv32e40p_core -c designs/cv32e40p/coverage_reports/coverage_report1 --svg
         """,
     )
     parser.add_argument("--design_name", required=True, help="Design name")
