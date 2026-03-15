@@ -323,6 +323,11 @@ class DataAnnotator:
 
         # print(f"\n找到 {len(self.coverage_files)} 个覆盖率报告文件")
 
+        # 构建源码目录路径（用于精确范围匹配）
+        design_json_path = Path(self.config.design_json)
+        design_dir = design_json_path.parent.parent
+        source_dir = str(design_dir / "source" / "rtl")
+
         # 分支覆盖率汇总累加器
         total_branches_sum = 0
         covered_branches_sum = 0
@@ -338,8 +343,8 @@ class DataAnnotator:
                 continue
 
             # 获取模块信息
-            module_name = cov_parser.get_module_name()
-            source_file = cov_parser.get_source_file()
+            # module_name = cov_parser.get_module_name()
+            # source_file = cov_parser.get_source_file()
 
             # if module_name:
             #     print(f"  模块: {module_name}")
@@ -365,7 +370,11 @@ class DataAnnotator:
 
             # 执行标注（不传播，最后统一传播）
             stats = annotate_cdfg_with_coverage(
-                self.cdfg, html_path, instance_tag, propagate=False
+                self.cdfg,
+                html_path,
+                instance_tag,
+                propagate=False,
+                source_dir=source_dir,
             )
 
             # 累积统计
@@ -394,7 +403,9 @@ class DataAnnotator:
             print("\n正在传播覆盖率...")
             from annotation.annotator import CoverageAnnotator
 
-            annotator = CoverageAnnotator(self.cdfg, {})  # 空覆盖数据，只做传播
+            annotator = CoverageAnnotator(
+                self.cdfg, [], source_dir=source_dir
+            )  # 空覆盖数据，只做传播
             annotator.propagate_coverage()
 
         # 从 CDFG 边的实际状态统计

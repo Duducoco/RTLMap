@@ -38,6 +38,7 @@ class CoverageAnnotator:
         cdfg: CDFG,
         coverage_data: List[BranchCoverage],
         source_file: str = None,
+        source_dir: str = None,
     ):
         """
         初始化标注器
@@ -46,10 +47,12 @@ class CoverageAnnotator:
             cdfg: CDFG 对象
             coverage_data: BranchCoverage 列表（支持同行多实例）
             source_file: 覆盖率报告对应的源文件名（用于过滤 MUX 节点）
+            source_dir: 设计源码目录路径（用于精确范围匹配）
         """
         self.cdfg = cdfg
         self.coverage_data = coverage_data
         self.source_file = source_file
+        self.source_dir = source_dir
         self.stats = AnnotationStats()
 
         # 追踪已标注的 MUX 节点（避免重复计数）
@@ -58,6 +61,44 @@ class CoverageAnnotator:
         # 建立行号到 MUX 节点的映射
         self.line_to_mux_nodes: Dict[int, List[str]] = defaultdict(list)
         self._build_line_mapping()
+
+    def _apply_edge_label(
+        self,
+        edge,
+        coverage_line: int,
+        branch_index: int,
+        is_covered: bool,
+        coverage_type: str,
+    ):
+        """
+        标注单条边并更新统计计数器（带覆盖状态保护）
+
+        - 首次标注（coverage_label == -1）：设置标签并计数
+        - 升级（0 → 1）：仅当新状态为已覆盖时更新
+        - 其他情况：跳过（防止降级）
+        """
+        coverage_label = 1 if is_covered else 0
+
+        if edge.coverage_label == -1:
+            edge.source_line = coverage_line
+            edge.branch_index = branch_index
+            edge.coverage_label = coverage_label
+            edge.coverage_type = coverage_type
+            self.stats.annotated_edges += 1
+            if coverage_type == "control":
+                self.stats.control_edges += 1
+            elif coverage_type == "data_true":
+                self.stats.data_true_edges += 1
+            elif coverage_type == "data_false":
+                self.stats.data_false_edges += 1
+            if is_covered:
+                self.stats.covered_edges += 1
+            else:
+                self.stats.uncovered_edges += 1
+        elif edge.coverage_label == 0 and is_covered:
+            edge.coverage_label = 1
+            self.stats.covered_edges += 1
+            self.stats.uncovered_edges -= 1
 
     def _build_line_mapping(self):
         """建立行号到 MUX/时序节点的映射"""
@@ -796,14 +837,14 @@ class CoverageAnnotator:
         import re
 
         # 检查 if 语句是否包含 begin
-        if_line_content = lines[if_line].strip().lower()
+        if_line_content = lines[if_line].split("//")[0].strip().lower()
         has_begin = "begin" in if_line_content
 
         # 如果没有 begin，可能是单行 if、三元表达式，或 if-else-if 链
         if not has_begin:
             # 检查下一行是否有 begin
             if if_line + 1 < len(lines):
-                next_line = lines[if_line + 1].strip().lower()
+                next_line = lines[if_line + 1].split("//")[0].strip().lower()
                 if "begin" in next_line:
                     has_begin = True
                 elif "else" in next_line:
@@ -814,7 +855,7 @@ class CoverageAnnotator:
                     # 检查是否是单行 if 后面跟着 else if
                     # 例如: if (cond) val = x; else if (cond2) val = y;
                     # 在同一行上可能有 else if
-                    if "else" in if_line_content.split("//")[-1]:  # 排除注释
+                    if "else" in if_line_content:  # 注释已在第840行排除
                         # 当前行就有 else，检查是否是 if-else-if 链的一部分
                         return self._find_if_else_chain_end(lines, if_line)
 
@@ -1047,28 +1088,15 @@ class CoverageAnnotator:
         if not self.source_file:
             return None
 
-        # 尝试从 CDFG 节点中获取源文件路径
-        for node in self.cdfg.nodes.values():
-            if node.source_file == self.source_file:
-                # 尝试构建完整路径
-                # 假设源文件在 designs/<design_name>/source/rtl/ 目录下
-                import os
+        import os
 
-                # 尝试几种可能的路径
-                possible_paths = [
-                    # 直接使用源文件名
-                    self.source_file,
-                    # 在当前目录下查找
-                    os.path.join(
-                        "designs", "cv32e40p", "source", "rtl", self.source_file
-                    ),
-                ]
+        possible_paths = [self.source_file]
+        if self.source_dir:
+            possible_paths.append(os.path.join(self.source_dir, self.source_file))
 
-                for path in possible_paths:
-                    if os.path.exists(path):
-                        return path
-
-                break
+        for path in possible_paths:
+            if os.path.exists(path):
+                return path
 
         return None
 
@@ -1457,50 +1485,27 @@ class CoverageAnnotator:
             is_reset_branch: 是否是复位分支
             coverage_line: 覆盖率报告中的行号
         """
-        coverage_label = 1 if is_covered else 0
-
         for edge in self.cdfg.edges:
             if edge.target != seq_node_id:
                 continue
 
-            # ALOAD/ARST 端口 - 复位控制信号
-            if edge.target_port in ("ALOAD", "ARST", "SRST", "RST"):
-                edge.source_line = coverage_line
-                edge.branch_index = branch_index
-                edge.coverage_label = coverage_label
-                edge.coverage_type = "control"
-                self.stats.annotated_edges += 1
-                self.stats.control_edges += 1
-                if is_covered:
-                    self.stats.covered_edges += 1
-                else:
-                    self.stats.uncovered_edges += 1
+            # ALOAD/ARST 端口 - 复位控制信号（仅复位分支标注）
+            if edge.target_port in ("ALOAD", "ARST", "SRST", "RST") and is_reset_branch:
+                self._apply_edge_label(
+                    edge, coverage_line, branch_index, is_covered, "control"
+                )
 
             # AD 端口 - 复位值（复位分支）
             elif edge.target_port == "AD" and is_reset_branch:
-                edge.source_line = coverage_line
-                edge.branch_index = branch_index
-                edge.coverage_label = coverage_label
-                edge.coverage_type = "data_true"  # 复位分支 = true 分支
-                self.stats.annotated_edges += 1
-                self.stats.data_true_edges += 1
-                if is_covered:
-                    self.stats.covered_edges += 1
-                else:
-                    self.stats.uncovered_edges += 1
+                self._apply_edge_label(
+                    edge, coverage_line, branch_index, is_covered, "data_true"
+                )
 
             # D 端口 - 正常数据（非复位分支）
             elif edge.target_port == "D" and not is_reset_branch:
-                edge.source_line = coverage_line
-                edge.branch_index = branch_index
-                edge.coverage_label = coverage_label
-                edge.coverage_type = "data_false"  # 正常分支 = false 分支
-                self.stats.annotated_edges += 1
-                self.stats.data_false_edges += 1
-                if is_covered:
-                    self.stats.covered_edges += 1
-                else:
-                    self.stats.uncovered_edges += 1
+                self._apply_edge_label(
+                    edge, coverage_line, branch_index, is_covered, "data_false"
+                )
 
     def _sort_mux_nodes_topologically(self, mux_nodes: List[str]) -> List[str]:
         """
@@ -2184,7 +2189,7 @@ class CoverageAnnotator:
                         ranges[current_label] = (
                             current_start,
                             i,
-                        )  # i 是 0-based，转为 1-based 后是 i+1-1=i
+                        )  # i 是下一个标签的 0-based 索引，数值上等于前一行的 1-based 行号
 
                     current_label = label_name
                     current_start = i + 1  # 1-based 行号（包含标签行本身）
@@ -2285,8 +2290,6 @@ class CoverageAnnotator:
             is_true_branch: 是 true 分支还是 false 分支
             coverage_line: 覆盖率报告中的行号
         """
-        coverage_label = 1 if is_covered else 0
-
         for edge in self.cdfg.edges:
             if edge.target != mux_node_id:
                 continue
@@ -2295,59 +2298,21 @@ class CoverageAnnotator:
             # 控制边的覆盖状态反映"这个条件的真分支是否被执行过"
             # 只有当 is_true_branch=True 时才更新 S 端口的覆盖状态
             if edge.target_port == "S" and is_true_branch:
-                if edge.coverage_label == -1:
-                    # 首次标注
-                    edge.source_line = coverage_line
-                    edge.branch_index = branch_index
-                    edge.coverage_label = coverage_label
-                    edge.coverage_type = "control"
-                    self.stats.annotated_edges += 1
-                    self.stats.control_edges += 1
-                    if is_covered:
-                        self.stats.covered_edges += 1
-                    else:
-                        self.stats.uncovered_edges += 1
-                elif edge.coverage_label == 0 and is_covered:
-                    # 之前标注为未覆盖，现在发现有覆盖，更新为已覆盖
-                    edge.coverage_label = 1
-                    self.stats.covered_edges += 1
-                    self.stats.uncovered_edges -= 1
+                self._apply_edge_label(
+                    edge, coverage_line, branch_index, is_covered, "control"
+                )
 
             # A 端口 - false 分支
             elif edge.target_port == "A" and not is_true_branch:
-                if edge.coverage_label == -1:
-                    edge.source_line = coverage_line
-                    edge.branch_index = branch_index
-                    edge.coverage_label = coverage_label
-                    edge.coverage_type = "data_false"
-                    self.stats.annotated_edges += 1
-                    self.stats.data_false_edges += 1
-                    if is_covered:
-                        self.stats.covered_edges += 1
-                    else:
-                        self.stats.uncovered_edges += 1
-                elif edge.coverage_label == 0 and is_covered:
-                    edge.coverage_label = 1
-                    self.stats.covered_edges += 1
-                    self.stats.uncovered_edges -= 1
+                self._apply_edge_label(
+                    edge, coverage_line, branch_index, is_covered, "data_false"
+                )
 
             # B 端口 - true 分支
             elif edge.target_port == "B" and is_true_branch:
-                if edge.coverage_label == -1:
-                    edge.source_line = coverage_line
-                    edge.branch_index = branch_index
-                    edge.coverage_label = coverage_label
-                    edge.coverage_type = "data_true"
-                    self.stats.annotated_edges += 1
-                    self.stats.data_true_edges += 1
-                    if is_covered:
-                        self.stats.covered_edges += 1
-                    else:
-                        self.stats.uncovered_edges += 1
-                elif edge.coverage_label == 0 and is_covered:
-                    edge.coverage_label = 1
-                    self.stats.covered_edges += 1
-                    self.stats.uncovered_edges -= 1
+                self._apply_edge_label(
+                    edge, coverage_line, branch_index, is_covered, "data_true"
+                )
 
         # 只在第一次标注该 MUX 时计数
         if mux_node_id not in self._annotated_mux_set:
@@ -2360,6 +2325,7 @@ def annotate_cdfg_with_coverage(
     html_path: str,
     instance_tag: str = None,
     propagate: bool = False,
+    source_dir: str = None,
 ) -> AnnotationStats:
     """
     便捷函数：用覆盖率数据标注 CDFG
@@ -2369,6 +2335,7 @@ def annotate_cdfg_with_coverage(
         html_path: 覆盖率报告 HTML 文件路径
         instance_tag: 实例标签，None 则使用第一个实例
         propagate: 是否启用覆盖率传播（标注非分支边）
+        source_dir: 设计源码目录路径（用于精确范围匹配）
 
     Returns:
         标注统计信息
@@ -2386,7 +2353,9 @@ def annotate_cdfg_with_coverage(
     source_file = parser.get_source_file()
 
     # 执行标注
-    annotator = CoverageAnnotator(cdfg, coverage_data, source_file=source_file)
+    annotator = CoverageAnnotator(
+        cdfg, coverage_data, source_file=source_file, source_dir=source_dir
+    )
     stats = annotator.annotate()
 
     # 可选：传播覆盖率到非分支边
