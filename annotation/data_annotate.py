@@ -29,7 +29,6 @@ class DataAnnotatorConfig:
     output: str = "cdfg_annotated.json"
     instance: Optional[str] = None
     no_coverage: bool = False
-    propagate: bool = True
     svg: bool = False
     svg_output: str = "cdfg_output.svg"
     verbose: bool = False
@@ -64,7 +63,6 @@ class DataAnnotator:
         output: str = "cdfg_annotated.json",
         instance: Optional[str] = None,
         no_coverage: bool = False,
-        propagate: bool = False,
         svg: bool = False,
         svg_output: str = "cdfg_output.svg",
         verbose: bool = False,
@@ -78,7 +76,6 @@ class DataAnnotator:
             output: 输出 JSON 文件路径
             instance: 覆盖率实例标签
             no_coverage: 是否仅提取 CDFG 不标注覆盖率
-            propagate: 是否启用覆盖率传播
             svg: 是否生成 SVG 可视化
             svg_output: SVG 输出文件路径
             verbose: 是否显示详细信息
@@ -92,7 +89,6 @@ class DataAnnotator:
             output=output,
             instance=instance,
             no_coverage=no_coverage,
-            propagate=propagate,
             svg=svg,
             svg_output=svg_output,
             verbose=verbose,
@@ -373,7 +369,6 @@ class DataAnnotator:
                 self.cdfg,
                 html_path,
                 instance_tag,
-                propagate=False,
                 source_dir=source_dir,
             )
 
@@ -397,16 +392,6 @@ class DataAnnotator:
             if total_branches_sum > 0
             else 0.0
         )
-
-        # 如果需要传播，在所有标注完成后统一传播
-        if self.config.propagate:
-            print("\n正在传播覆盖率...")
-            from annotation.annotator import CoverageAnnotator
-
-            annotator = CoverageAnnotator(
-                self.cdfg, [], source_dir=source_dir
-            )  # 空覆盖数据，只做传播
-            annotator.propagate_coverage()
 
         # 从 CDFG 边的实际状态统计
         self.stats = self._calculate_final_stats(total_stats)
@@ -443,10 +428,6 @@ class DataAnnotator:
                     final_stats.data_true_edges += 1
                 elif edge.coverage_type == "data_false":
                     final_stats.data_false_edges += 1
-                elif edge.coverage_type == "always":
-                    final_stats.always_executed_edges += 1
-                elif edge.coverage_type == "propagated":
-                    final_stats.propagated_edges += 1
 
         return final_stats
 
@@ -469,10 +450,6 @@ class DataAnnotator:
             print(f"  控制边: {self.stats.control_edges}")
             print(f"  data_true 边: {self.stats.data_true_edges}")
             print(f"  data_false 边: {self.stats.data_false_edges}")
-
-            if self.config.propagate:
-                print(f"  必然执行边: {self.stats.always_executed_edges}")
-                print(f"  传播标注边: {self.stats.propagated_edges}")
 
         # 计算覆盖率
         if self.stats.annotated_edges > 0:
@@ -628,11 +605,6 @@ def main():
     parser.add_argument(
         "--no-coverage", action="store_true", help="仅提取 CDFG，不标注覆盖率"
     )
-    parser.add_argument(
-        "--propagate",
-        action="store_true",
-        help="启用覆盖率传播，标注所有可达边（非分支边）",
-    )
     parser.add_argument("--svg", action="store_true", help="生成 SVG 可视化图")
     parser.add_argument(
         "--svg-output",
@@ -661,16 +633,15 @@ def main():
             print(f"Failed to run Yosys: {e}")
     if not rtlil_json_path.exists():
         print("没有找到rtlil文件")
-        exit()
+        exit(1)
 
     # 创建配置
     config = DataAnnotatorConfig(
-        design_json=rtlil_json_path,
+        design_json=str(rtlil_json_path),
         coverage_dir=args.coverage_dir,
         output=args.output,
         instance=args.instance,
         no_coverage=args.no_coverage,
-        propagate=args.propagate,
         svg=args.svg,
         svg_output=args.svg_output,
         verbose=args.verbose,

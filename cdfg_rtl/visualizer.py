@@ -382,11 +382,9 @@ class CDFGVisualizer:
         if show_coverage and edge.coverage_type:
             # 简化标签
             ctype_short = {
-                "always": "A",
                 "control": "C",
                 "data_true": "T",
                 "data_false": "F",
-                "propagated": "P",
             }.get(edge.coverage_type, edge.coverage_type[0].upper())
             parts.append(f"({ctype_short})")
 
@@ -430,11 +428,9 @@ class CDFGVisualizer:
 
             if edge.coverage_type:
                 ctype_full = {
-                    "always": "必然执行",
                     "control": "控制边",
                     "data_true": "真分支数据",
                     "data_false": "假分支数据",
-                    "propagated": "传播标注",
                 }.get(edge.coverage_type, edge.coverage_type)
                 lines.append(f"覆盖类型: {ctype_full}")
 

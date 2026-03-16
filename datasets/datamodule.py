@@ -100,7 +100,6 @@ def _generate_annotated_json(
             annotator = DataAnnotator.from_args(
                 design_json=str(json_file),
                 coverage_dir=str(coverage_report_dir),
-                propagate=False,
             )
             annotator.extract_cdfg()
             annotator.find_coverage_files()

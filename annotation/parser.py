@@ -78,7 +78,7 @@ class CoverageParser:
         # 找到 Branch 部分的起始位置
         start_match = re.search(re.escape(anchor_pattern), self.html_content)
         if not start_match:
-            return {}
+            return []
 
         start_pos = start_match.end()
 
