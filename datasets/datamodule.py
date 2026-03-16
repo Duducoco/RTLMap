@@ -394,7 +394,7 @@ class DualGraphDataset(Dataset):
         """
         self.root = root
         self._sim_results_dirs = sim_results_dirs or [
-            "designs/cv32e40p/simulation_results"
+            "designs/cv32e40p/simulation_results_2"
         ]
         self._module_names = module_names or [
             "cv32e40p_alu_div",
@@ -483,7 +483,7 @@ class DualGraphDataset(Dataset):
             else:
                 extract_rtlil_json(sim_results_dir, self._module_names)
 
-            idx = 0
+            # idx = 0
             for test_dir in sorted(sim_results_dir.iterdir()):
                 if not test_dir.is_dir():
                     continue
@@ -495,9 +495,9 @@ class DualGraphDataset(Dataset):
                     )
                 )
 
-                idx = idx + 1
-                if idx >10:
-                    break
+                # idx = idx + 1
+                # if idx >10:
+                #     break
 
         if not task_args:
             logger.warning("未找到任何测试目录")
