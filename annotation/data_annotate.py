@@ -42,6 +42,9 @@ class DataAnnotator:
     支持从 VCS/URG 覆盖率报告解析分支覆盖率并映射到 CDFG 边。
     """
 
+    # 进程内缓存：coverage_dir 路径 -> {source_file: html_file} 映射
+    _source_to_html_cache: dict[str, dict[str, str]] = {}
+
     def __init__(self, config: DataAnnotatorConfig):
         """
         初始化 DataAnnotator
@@ -99,79 +102,41 @@ class DataAnnotator:
         self, design_dir: Path, coverage_dir: Path
     ) -> dict[str, str]:
         """
-        构建或加载 源文件名 -> HTML文件名 的缓存
+        构建或加载 源文件名 -> HTML文件名 的映射
 
-        缓存文件 source2html.json 保存在设计目录下（与 module2html.json 同级），格式：
-        {
-            "_meta": {"html_count": 33, "generated_at": "2024-01-16T12:00:00"},
-            "cv32e40p_sleep_unit.sv": "mod17.html",
-            "cv32e40p_sim_clock_gate.sv": "mod3.html",
-            ...
-        }
-
-        缓存失效条件：HTML 文件数量变化
+        使用类级别内存缓存，以 coverage_dir 路径为 key。
+        同一进程内相同 coverage_dir 直接命中，无磁盘 I/O。
 
         Args:
-            design_dir: 设计目录（与 module2html.json 同级）
+            design_dir: 设计目录（保留参数兼容性，未使用）
             coverage_dir: 覆盖率报告目录
 
         Returns:
             源文件名 -> HTML文件名 的映射字典
         """
-        cache_file = design_dir / "source2html.json"
-        html_files = list(coverage_dir.glob("mod*.html"))
-        current_html_count = len(html_files)
+        cache_key = str(coverage_dir.resolve())
 
-        # 尝试加载缓存
-        if cache_file.exists():
-            try:
-                with open(cache_file, "r", encoding="utf-8") as f:
-                    cached_data = json.load(f)
-
-                # 检查缓存是否有效（HTML 文件数量一致）
-                meta = cached_data.get("_meta", {})
-                if meta.get("html_count") == current_html_count:
-                    # 移除 _meta 键，返回纯映射
-                    cached_data.pop("_meta", None)
-                    if self.config.verbose:
-                        print(f"使用缓存的源文件映射 ({len(cached_data)} 条)")
-                    return cached_data
-                else:
-                    if self.config.verbose:
-                        print(
-                            f"缓存失效: HTML 文件数量变化 ({meta.get('html_count')} -> {current_html_count})"
-                        )
-            except (json.JSONDecodeError, KeyError):
-                pass  # 缓存损坏，重新生成
+        if cache_key in DataAnnotator._source_to_html_cache:
+            cached = DataAnnotator._source_to_html_cache[cache_key]
+            if self.config.verbose:
+                print(f"使用内存缓存的源文件映射 ({len(cached)} 条)")
+            return cached
 
         # 遍历 HTML 文件，解析源文件名
         source_to_html: dict[str, str] = {}
-        for html_path in html_files:
+        for html_path in sorted(coverage_dir.glob("mod*.html")):
             try:
                 parser = CoverageParser(str(html_path))
                 source_file = parser.get_source_file()
                 if source_file and source_file not in source_to_html:
-                    # 只保存文件名，不保存完整路径
                     source_to_html[source_file] = html_path.name
             except Exception:
                 continue
 
-        # 保存缓存
-        cache_data = {
-            "_meta": {
-                "html_count": current_html_count,
-                "generated_at": __import__("datetime").datetime.now().isoformat(),
-            },
-            **source_to_html,
-        }
-        try:
-            with open(cache_file, "w", encoding="utf-8") as f:
-                json.dump(cache_data, f, indent=2, ensure_ascii=False)
-            if self.config.verbose:
-                print(f"已生成源文件映射缓存: {cache_file}")
-        except Exception as e:
-            if self.config.verbose:
-                print(f"警告: 无法保存缓存文件: {e}")
+        DataAnnotator._source_to_html_cache[cache_key] = source_to_html
+
+        if self.config.verbose:
+            print(f"已构建源文件映射 ({len(source_to_html)} 条)")
 
         return source_to_html
 
