@@ -36,6 +36,7 @@ designs/openc910
 tests/
 dataset_root/
 data/
+data
 # 测试和设计文档
 trainer/test_trainer.py
 models/test_model.py

@@ -397,15 +397,14 @@ class DualGraphDataset(Dataset):
             "designs/cv32e40p/simulation_results_2"
         ]
         self._module_names = module_names or [
-            "cv32e40p_alu_div",
-            "cv32e40p_ff_one",
-            "cv32e40p_mult",
-            "cv32e40p_register_file",
-            "cv32e40p_controller",
+            "cv32e40p_alu",
             "cv32e40p_decoder",
-            "cv32e40p_aligner",
-            "cv32e40p_compressed_decoder",
-            "cv32e40p_int_controller",
+            "cv32e40p_load_store_unit",
+            "cv32e40p_id_stage",
+            "cv32e40p_prefetch_controller",
+            "cv32e40p_decoder",
+            "cv32e40p_ex_stage",
+            # "cv32e40p_compressed_decoder",
         ]
         self._num_samples: Optional[int] = None
         self._idx_to_file: list[str] = []  # 逻辑索引 → 实际文件名
