@@ -1230,7 +1230,6 @@ def plot_distributions(
     """生成 matplotlib 图表"""
     try:
         import matplotlib
-
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError:
@@ -1369,7 +1368,7 @@ def plot_distributions(
         fig, ax = plt.subplots(figsize=(12, 6))
         mod_names = sorted(by_module.keys())
         data = [by_module[m] for m in mod_names]
-        ax.boxplot(data, labels=[m.replace("cv32e40p_", "") for m in mod_names])
+        ax.boxplot(data, tick_labels=[m.replace("cv32e40p_", "") for m in mod_names])
         ax.set_ylabel("Branch Coverage (%)")
         ax.set_title("Coverage by Module")
         plt.xticks(rotation=30, ha="right")
