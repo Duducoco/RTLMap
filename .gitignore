@@ -41,4 +41,7 @@ data
 trainer/test_trainer.py
 models/test_model.py
 models/模型设计.md
-
+# 分析产物
+analysis_output/
+analysis_report.md
+stats.jso
