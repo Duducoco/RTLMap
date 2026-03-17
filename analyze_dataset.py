@@ -6,10 +6,10 @@
 输出分布特征、覆盖率标签统计、图结构特征和数据质量检查。
 
 使用示例：
-    uv run python analyze_dataset.py --sim-dir designs/cv32e40p/simulation_results
-    uv run python analyze_dataset.py --sim-dir designs/cv32e40p/simulation_results --sample 500
-    uv run python analyze_dataset.py --sim-dir designs/cv32e40p/simulation_results --plot --output-dir analysis_output
-    uv run python analyze_dataset.py --sim-dir designs/cv32e40p/simulation_results --json stats.json
+    uv run python analyze_dataset.py --sim-dir designs/cv32e40p/simulation_results_2
+    uv run python analyze_dataset.py --sim-dir designs/cv32e40p/simulation_results_2 --sample 500
+    uv run python analyze_dataset.py --sim-dir designs/cv32e40p/simulation_results_2 --plot --output-dir analysis_output
+    uv run python analyze_dataset.py --sim-dir designs/cv32e40p/simulation_results_2 --json c
 """
 
 from __future__ import annotations
@@ -835,12 +835,7 @@ def print_structure_stats(
 
     if len(pairs_x) > 2:
         n = len(pairs_x)
-        mx = sum(pairs_x) / n
-        my = sum(pairs_y) / n
-        cov_xy = sum((x - mx) * (y - my) for x, y in zip(pairs_x, pairs_y)) / n
-        sx = math.sqrt(sum((x - mx) ** 2 for x in pairs_x) / n)
-        sy = math.sqrt(sum((y - my) ** 2 for y in pairs_y) / n)
-        r_val = cov_xy / (sx * sy) if sx > 0 and sy > 0 else 0
+        r_val = _pearson(pairs_x, pairs_y)
         console.print(
             f"ASM 指令数 vs RTL branch_coverage Pearson r = [bold]{r_val:.4f}[/bold] "
             f"(n={n})"
@@ -1218,6 +1213,184 @@ def print_per_module_detail(rtl_stats: list[RTLStats]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# 覆盖率 vs ASM 指令数（逐模块）
+# ---------------------------------------------------------------------------
+
+
+import re
+
+
+def _extract_instr_count_from_name(test_case: str) -> int | None:
+    """从测试用例名称中提取指令数量。
+
+    命名模式: {test_type}_{instr_count}_{seed_index}
+    例如 arithmetic_base_200_0000 -> 200
+         debug_single_step_400_0008 -> 400
+    """
+    # 匹配倒数第二个 _ 分隔的数字段
+    m = re.match(r"^(.+)_(\d+)_(\d+)$", test_case)
+    if m:
+        return int(m.group(2))
+    return None
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float:
+    """计算 Pearson 相关系数，样本不足时返回 0"""
+    n = len(xs)
+    if n < 3:
+        return 0.0
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    cov_xy = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / n
+    sx = math.sqrt(sum((x - mx) ** 2 for x in xs) / n)
+    sy = math.sqrt(sum((y - my) ** 2 for y in ys) / n)
+    return cov_xy / (sx * sy) if sx > 0 and sy > 0 else 0.0
+
+
+def print_coverage_vs_asm_per_module(
+    rtl_stats: list[RTLStats],
+    asm_stats: list[ASMStats],
+    max_instructions: int | None = None,
+) -> list[str]:
+    """逐模块分析覆盖率与 ASM 指令数量（从测试名称提取）的关系"""
+    lines: list[str] = []
+    filter_label = f"（指令数 <= {max_instructions}）" if max_instructions else ""
+    console.rule(f"[bold]8. 覆盖率 vs 指令数（逐模块）{filter_label}[/bold]")
+    lines.append(f"## 8. 覆盖率 vs 指令数（逐模块）{filter_label}\n")
+
+    # 按模块分组，构建 (instr_count_from_name, branch_coverage) 配对
+    by_module: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    skipped = 0
+    for r in rtl_stats:
+        if r.error or r.branch_coverage < 0:
+            continue
+        instr_count = _extract_instr_count_from_name(r.test_case)
+        if instr_count is None:
+            skipped += 1
+            continue
+        if max_instructions and instr_count > max_instructions:
+            continue
+        by_module[r.module_name].append(
+            (float(instr_count), r.branch_coverage)
+        )
+
+    if skipped:
+        console.print(f"[dim]跳过 {skipped} 个无法从名称提取指令数的样本[/dim]")
+
+    if not by_module:
+        console.print("[yellow]无有效配对数据[/yellow]")
+        lines.append("无有效配对数据\n")
+        return lines
+
+    # 汇总表格
+    summary_table = Table(title="覆盖率 vs 指令数（逐模块相关性）")
+    summary_table.add_column("模块", style="cyan")
+    summary_table.add_column("样本数", style="green")
+    summary_table.add_column("Pearson r", style="yellow")
+    summary_table.add_column("指令数 mean", style="green")
+    summary_table.add_column("指令数 std", style="green")
+    summary_table.add_column("Coverage mean", style="green")
+    summary_table.add_column("Coverage std", style="green")
+
+    lines.append(
+        "| 模块 | 样本数 | Pearson r | 指令数 mean | 指令数 std "
+        "| Coverage mean | Coverage std |"
+    )
+    lines.append(
+        "|------|--------|-----------|-------------|------------|"
+        "---------------|--------------|"
+    )
+
+    for mod in sorted(by_module):
+        pairs = by_module[mod]
+        n = len(pairs)
+        xs = [p[0] for p in pairs]
+        ys = [p[1] for p in pairs]
+        r_val = _pearson(xs, ys)
+        d_x = _describe(xs)
+        d_y = _describe(ys)
+
+        r_str = f"{r_val:.4f}" if n >= 3 else "N/A"
+        summary_table.add_row(
+            mod,
+            str(n),
+            r_str,
+            str(d_x["mean"]),
+            str(d_x["std"]),
+            str(d_y["mean"]),
+            str(d_y["std"]),
+        )
+        lines.append(
+            f"| {mod} | {n} | {r_str} | {d_x['mean']} | {d_x['std']} "
+            f"| {d_y['mean']} | {d_y['std']} |"
+        )
+
+    console.print(summary_table)
+    lines.append("")
+
+    # 逐模块详细：按指令数分桶统计覆盖率
+    for mod in sorted(by_module):
+        pairs = by_module[mod]
+        if len(pairs) < 10:
+            continue
+
+        xs = [p[0] for p in pairs]
+        ys = [p[1] for p in pairs]
+
+        # 等频分桶（四分位）
+        sorted_pairs = sorted(pairs, key=lambda p: p[0])
+        n = len(sorted_pairs)
+        quartile_size = n // 4
+        if quartile_size < 2:
+            continue
+
+        console.print(f"\n[bold cyan]{mod}[/bold cyan] — 指令数分桶覆盖率统计")
+        lines.append(f"### {mod} — 指令数分桶覆盖率统计\n")
+
+        bucket_table = Table(title=f"{mod} 分桶统计")
+        bucket_table.add_column("分桶", style="cyan")
+        bucket_table.add_column("样本数", style="green")
+        bucket_table.add_column("指令数范围", style="green")
+        bucket_table.add_column("Coverage mean", style="yellow")
+        bucket_table.add_column("Coverage median", style="yellow")
+        bucket_table.add_column("Coverage std", style="dim")
+
+        lines.append(
+            "| 分桶 | 样本数 | ASM指令范围 | Coverage mean | Coverage median | Coverage std |"
+        )
+        lines.append(
+            "|------|--------|------------|---------------|-----------------|--------------|"
+        )
+
+        quartile_labels = ["Q1 (最少)", "Q2", "Q3", "Q4 (最多)"]
+        for qi in range(4):
+            start = qi * quartile_size
+            end = (qi + 1) * quartile_size if qi < 3 else n
+            bucket = sorted_pairs[start:end]
+            bx = [p[0] for p in bucket]
+            by_ = [p[1] for p in bucket]
+            d_by = _describe(by_)
+            x_range = f"[{min(bx):.0f}, {max(bx):.0f}]"
+            bucket_table.add_row(
+                quartile_labels[qi],
+                str(len(bucket)),
+                x_range,
+                str(d_by["mean"]),
+                str(d_by["median"]),
+                str(d_by["std"]),
+            )
+            lines.append(
+                f"| {quartile_labels[qi]} | {len(bucket)} | {x_range} "
+                f"| {d_by['mean']} | {d_by['median']} | {d_by['std']} |"
+            )
+
+        console.print(bucket_table)
+        lines.append("")
+
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # 可视化
 # ---------------------------------------------------------------------------
 
@@ -1226,6 +1399,7 @@ def plot_distributions(
     rtl_stats: list[RTLStats],
     asm_stats: list[ASMStats],
     output_dir: str,
+    max_instructions: int | None = None,
 ) -> list[str]:
     """生成 matplotlib 图表"""
     try:
@@ -1378,6 +1552,55 @@ def plot_distributions(
         console.print(f"  已保存: {path}")
         lines.append(f"![Coverage by Module]({path})\n")
 
+    # 6. 覆盖率 vs 指令数散点图（逐模块，指令数从测试名称提取）
+    mod_pairs: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for r in valid_rtl:
+        if r.branch_coverage < 0:
+            continue
+        instr_count = _extract_instr_count_from_name(r.test_case)
+        if instr_count is None:
+            continue
+        if max_instructions and instr_count > max_instructions:
+            continue
+        mod_pairs[r.module_name].append(
+            (float(instr_count), r.branch_coverage)
+        )
+
+    if mod_pairs:
+        # 筛选有足够样本的模块
+        plot_mods = {m: ps for m, ps in mod_pairs.items() if len(ps) >= 10}
+        if plot_mods:
+            n_mods = len(plot_mods)
+            cols = min(n_mods, 3)
+            rows = math.ceil(n_mods / cols)
+            fig, axes = plt.subplots(
+                rows, cols, figsize=(6 * cols, 5 * rows), squeeze=False
+            )
+
+            for idx, mod in enumerate(sorted(plot_mods)):
+                ax = axes[idx // cols][idx % cols]
+                pairs = plot_mods[mod]
+                xs = [p[0] for p in pairs]
+                ys = [p[1] for p in pairs]
+                ax.scatter(xs, ys, alpha=0.3, s=8, color="#4C72B0")
+                ax.set_xlabel("Instructions (from test name)")
+                ax.set_ylabel("Branch Coverage (%)")
+                r_val = _pearson(xs, ys)
+                short_name = mod.replace("cv32e40p_", "")
+                ax.set_title(f"{short_name} (r={r_val:.3f}, n={len(pairs)})")
+
+            # 隐藏多余子图
+            for idx in range(n_mods, rows * cols):
+                axes[idx // cols][idx % cols].set_visible(False)
+
+            fig.suptitle("Coverage vs Instructions (per Module)", fontsize=14)
+            fig.tight_layout()
+            path = os.path.join(output_dir, "coverage_vs_asm_per_module.png")
+            fig.savefig(path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            console.print(f"  已保存: {path}")
+            lines.append(f"![Coverage vs ASM per Module]({path})\n")
+
     return lines
 
 
@@ -1508,6 +1731,13 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="启用逐模块详细分析",
     )
+    parser.add_argument(
+        "--max-instructions",
+        type=int,
+        default=None,
+        metavar="N",
+        help="覆盖率 vs ASM 分析仅包含指令数 <= N 的测试用例",
+    )
     return parser.parse_args()
 
 
@@ -1544,10 +1774,17 @@ def main() -> None:
     if args.per_module:
         report_lines.extend(print_per_module_detail(rtl_stats))
 
+    # 覆盖率 vs ASM 指令数（逐模块）
+    report_lines.extend(
+        print_coverage_vs_asm_per_module(rtl_stats, asm_stats, args.max_instructions)
+    )
+
     # 可选可视化
     if args.plot:
         console.rule("[bold]可视化[/bold]")
-        plot_lines = plot_distributions(rtl_stats, asm_stats, args.output_dir)
+        plot_lines = plot_distributions(
+            rtl_stats, asm_stats, args.output_dir, args.max_instructions
+        )
         report_lines.extend(["\n## 可视化\n"] + plot_lines)
 
     # JSON 导出
