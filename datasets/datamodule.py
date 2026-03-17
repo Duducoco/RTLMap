@@ -42,6 +42,91 @@ def _make_edge_index(src: list, tgt: list) -> torch.Tensor:
     return torch.empty((2, 0), dtype=torch.long)
 
 
+def _build_rtl_structure(rtl: dict) -> dict:
+    """构建 RTL 图结构张量（不含 coverage_label），返回 dict
+
+    额外返回 _valid_edge_mask: list[bool]，标记原始 edges 中哪些边通过了
+    node_id 过滤，用于标签提取时保持一致性。
+    """
+    nodes = rtl["nodes"]
+    node_id_to_idx = {n["id"]: i for i, n in enumerate(nodes)}
+
+    node_cell_type = [get_cell_type_index(n["cell_type"]) for n in nodes]
+    node_width = [n["width"] for n in nodes]
+
+    src_list, tgt_list = [], []
+    etype_list, ewidth_list = [], []
+    esrc_port_list, etgt_port_list = [], []
+    valid_edge_mask: list[bool] = []
+
+    for e in rtl["edges"]:
+        si = node_id_to_idx.get(e["source"])
+        ti = node_id_to_idx.get(e["target"])
+        if si is None or ti is None:
+            valid_edge_mask.append(False)
+            continue
+        valid_edge_mask.append(True)
+        src_list.append(si)
+        tgt_list.append(ti)
+        etype_list.append(_EDGE_TYPE_MAP.get(e["type"], 0))
+        ewidth_list.append(e["width"])
+        esrc_port_list.append(e["source_port_idx"])
+        etgt_port_list.append(e["target_port_idx"])
+
+    return {
+        "node_cell_type": torch.tensor(node_cell_type, dtype=torch.long),
+        "node_width": torch.tensor(node_width, dtype=torch.long),
+        "edge_index": _make_edge_index(src_list, tgt_list),
+        "edge_type": torch.tensor(etype_list, dtype=torch.long),
+        "edge_width": torch.tensor(ewidth_list, dtype=torch.long),
+        "edge_source_port_idx": torch.tensor(esrc_port_list, dtype=torch.long),
+        "edge_target_port_idx": torch.tensor(etgt_port_list, dtype=torch.long),
+        "_valid_edge_mask": valid_edge_mask,
+    }
+
+
+def _build_asm_graph(
+    asm_json_path: str, asm_encoding: Optional[torch.Tensor]
+) -> dict:
+    """构建 ASM 图张量，返回 dict"""
+    with open(asm_json_path, encoding="utf-8") as f:
+        asm = json.load(f)
+
+    asm_node_ids = list(asm["nodes"].keys())
+    asm_id_to_idx = {nid: i for i, nid in enumerate(asm_node_ids)}
+
+    asm_nt = [
+        _ASM_NODE_TYPE_MAP.get(
+            asm["nodes"][nid]["node_type"],
+            AsmNodeType.UNKNOWN.value - 1,
+        )
+        for nid in asm_node_ids
+    ]
+
+    asm_src, asm_tgt, asm_et = [], [], []
+    for ae in asm["edges"]:
+        s = asm_id_to_idx.get(ae["source"])
+        t = asm_id_to_idx.get(ae["target"])
+        if s is None or t is None:
+            continue
+        asm_src.append(s)
+        asm_tgt.append(t)
+        asm_et.append(_ASM_EDGE_TYPE_MAP.get(ae["edge_type"], 0))
+
+    # 使用预计算的编码，或回退到零向量
+    if asm_encoding is not None:
+        asm_instr_enc = asm_encoding
+    else:
+        asm_instr_enc = torch.zeros(len(asm_node_ids), 256)
+
+    return {
+        "asm_node_type": torch.tensor(asm_nt, dtype=torch.long),
+        "asm_instruction_encoding": asm_instr_enc,
+        "asm_edge_index": _make_edge_index(asm_src, asm_tgt),
+        "asm_edge_type": torch.tensor(asm_et, dtype=torch.long),
+    }
+
+
 def _generate_annotated_json(
     rtlil_json_dir: Path,
     test_dir: Path,
@@ -177,129 +262,45 @@ def _process_single_test(
     return [(rtl, asm_json) for rtl in rtl_files]
 
 
-# ── 阶段 3 worker 共享内存支持 ──
-_save_worker_packed: Optional["torch.Tensor"] = None  # 合并后的共享内存 tensor
-_save_worker_slices: dict[str, tuple[int, int]] = {}  # path → (offset, count)
-
-
-def _init_save_worker(
-    packed: "torch.Tensor", slices: dict[str, tuple[int, int]]
-) -> None:
-    """Pool initializer: 注入合并的共享内存 tensor 和偏移索引"""
-    global _save_worker_packed, _save_worker_slices
-    _save_worker_packed = packed
-    _save_worker_slices = slices
-
-
-def _build_and_save(
-    args: tuple[str, Optional[str], str, int],
+def _build_and_save_labels(
+    args: tuple[str, str, str, str, int],
 ) -> bool:
-    """阶段 3 worker: 构建 DualGraphData 并保存 .pt
+    """阶段 3 worker: 仅提取标签并保存轻量 data_{idx}.pt
 
-    通过 _save_worker_packed 共享内存 tensor 和偏移索引获取编码，
-    避免 pickle 序列化导致的 tensor 深拷贝和内存放大。
+    RTL 图结构和 ASM 图已去重保存，此处仅保存 edge_labels + y + 引用文件名。
+    通过 _valid_edge_mask 保证标签与图结构的边过滤一致。
 
     Args:
-        args: (rtl_json_path, asm_json_path, processed_dir, idx)
+        args: (rtl_json_path, rtl_filename, asm_filename, processed_dir, idx)
 
     Returns:
         True 成功, False 失败
     """
-    rtl_json_path, asm_json_path, processed_dir, idx = args
-
-    # ASM 缺失提前返回，避免白费 RTL 解析开销
-    if asm_json_path is None:
-        logger.error("ASM JSON 文件缺失，跳过构建: rtl=%s", rtl_json_path)
-        return False
-
-    # 从共享内存合并 tensor 中按偏移切片
-    slice_info = _save_worker_slices.get(asm_json_path)
-    asm_encoding = _save_worker_packed[slice_info[0] : slice_info[0] + slice_info[1]] if slice_info else None
+    rtl_json_path, rtl_filename, asm_filename, processed_dir, idx = args
 
     try:
-        # ── RTL 图 ──
         with open(rtl_json_path, encoding="utf-8") as f:
             rtl = json.load(f)
 
+        # 重建 node_id_to_idx 以过滤边（保持与 _build_rtl_structure 一致）
         nodes = rtl["nodes"]
         node_id_to_idx = {n["id"]: i for i, n in enumerate(nodes)}
 
-        node_cell_type = [get_cell_type_index(n["cell_type"]) for n in nodes]
-        node_width = [n["width"] for n in nodes]
-
-        src_list, tgt_list = [], []
-        etype_list, ewidth_list = [], []
-        esrc_port_list, etgt_port_list = [], []
         elabel_list = []
-
         for e in rtl["edges"]:
             si = node_id_to_idx.get(e["source"])
             ti = node_id_to_idx.get(e["target"])
             if si is None or ti is None:
                 continue
-            src_list.append(si)
-            tgt_list.append(ti)
-            etype_list.append(_EDGE_TYPE_MAP.get(e["type"], 0))
-            ewidth_list.append(e["width"])
-            esrc_port_list.append(e["source_port_idx"])
-            etgt_port_list.append(e["target_port_idx"])
             elabel_list.append(e["coverage_label"])
 
-        edge_index = _make_edge_index(src_list, tgt_list)
-
-        # ── ASM 图 ──（asm_json_path 已保证非 None）
-        with open(asm_json_path, encoding="utf-8") as f:
-            asm = json.load(f)
-
-        asm_node_ids = list(asm["nodes"].keys())
-        asm_id_to_idx = {nid: i for i, nid in enumerate(asm_node_ids)}
-
-        asm_nt = [
-            _ASM_NODE_TYPE_MAP.get(
-                asm["nodes"][nid]["node_type"],
-                AsmNodeType.UNKNOWN.value - 1,
-            )
-            for nid in asm_node_ids
-        ]
-
-        asm_src, asm_tgt, asm_et = [], [], []
-        for ae in asm["edges"]:
-            s = asm_id_to_idx.get(ae["source"])
-            t = asm_id_to_idx.get(ae["target"])
-            if s is None or t is None:
-                continue
-            asm_src.append(s)
-            asm_tgt.append(t)
-            asm_et.append(_ASM_EDGE_TYPE_MAP.get(ae["edge_type"], 0))
-
-        asm_node_type = torch.tensor(asm_nt, dtype=torch.long)
-
-        # 使用预计算的编码，或回退到零向量
-        if asm_encoding is not None:
-            asm_instr_enc = asm_encoding
-        else:
-            asm_instr_enc = torch.zeros(len(asm_node_ids), 256)
-
-        asm_edge_index = _make_edge_index(asm_src, asm_tgt)
-        asm_edge_type = torch.tensor(asm_et, dtype=torch.long)
-
-        # ── 图级标签 y ──
         y = rtl.get("branch_coverage", 0.0) / 100.0
 
         data = DualGraphData(
-            node_cell_type=torch.tensor(node_cell_type, dtype=torch.long),
-            node_width=torch.tensor(node_width, dtype=torch.long),
-            edge_index=edge_index,
-            edge_type=torch.tensor(etype_list, dtype=torch.long),
-            edge_width=torch.tensor(ewidth_list, dtype=torch.long),
-            edge_source_port_idx=torch.tensor(esrc_port_list, dtype=torch.long),
-            edge_target_port_idx=torch.tensor(etgt_port_list, dtype=torch.long),
-            asm_node_type=asm_node_type,
-            asm_instruction_encoding=asm_instr_enc,
-            asm_edge_index=asm_edge_index,
-            asm_edge_type=asm_edge_type,
             edge_labels=torch.tensor(elabel_list, dtype=torch.long),
             y=torch.tensor([[y]], dtype=torch.float),
+            _rtl_file=rtl_filename,
+            _asm_file=asm_filename,
         )
 
         pt_path = Path(processed_dir) / f"data_{idx}.pt"
@@ -307,7 +308,7 @@ def _build_and_save(
         return True
 
     except Exception as e:
-        logger.error("构建/保存 DualGraphData 失败 [%s]: %s", rtl_json_path, e)
+        logger.error("构建/保存标签失败 [%s]: %s", rtl_json_path, e)
         return False
 
 
@@ -402,7 +403,6 @@ class DualGraphDataset(Dataset):
             "cv32e40p_load_store_unit",
             "cv32e40p_id_stage",
             "cv32e40p_prefetch_controller",
-            "cv32e40p_decoder",
             "cv32e40p_ex_stage",
             # "cv32e40p_compressed_decoder",
         ]
@@ -605,54 +605,80 @@ class DualGraphDataset(Dataset):
         else:
             logger.info("阶段 2/3: 跳过 GPU 编码（无编码器配置或无 ASM 文件）")
 
-        # ── 阶段 3: 多进程张量构建 + 保存 ──
+        # ── 阶段 2.5: 构建并保存去重 RTL 图 + ASM 图 ──
         processed_dir = self.processed_dir
 
-        # 合并所有编码 tensor 为单个共享内存 tensor（仅 1 个 fd）
-        if asm_encodings:
-            packed_parts = []
-            encoding_slices: dict[str, tuple[int, int]] = {}
-            offset = 0
-            for path, enc in asm_encodings.items():
-                n = enc.shape[0]
-                packed_parts.append(enc)
-                encoding_slices[path] = (offset, n)
-                offset += n
-            packed_tensor = torch.cat(packed_parts, dim=0)
-            packed_tensor.share_memory_()
-            del asm_encodings, packed_parts  # 释放原始 tensor
-        else:
-            packed_tensor = torch.empty(0)
-            encoding_slices = {}
+        # --- RTL 图去重 ---
+        # 从 flat_results 中提取 unique 模块名 → 任意一个 annotated JSON 路径
+        rtl_module_to_path: dict[str, str] = {}
+        for rtl_path, _ in flat_results:
+            module_name = Path(rtl_path).stem  # e.g. cv32e40p_alu
+            if module_name not in rtl_module_to_path:
+                rtl_module_to_path[module_name] = rtl_path
 
-        # save_args 不再包含 tensor，通过 initializer 传入共享内存
-        save_args: list[tuple[str, Optional[str], str, int]] = []
+        rtl_module_to_file: dict[str, str] = {}
+        for module_name, rtl_path in rtl_module_to_path.items():
+            rtl_filename = f"rtl_{module_name}.pt"
+            rtl_file_path = Path(processed_dir) / rtl_filename
+            if not rtl_file_path.exists():
+                with open(rtl_path, encoding="utf-8") as f:
+                    rtl_json = json.load(f)
+                rtl_data = _build_rtl_structure(rtl_json)
+                # _valid_edge_mask 不需要持久化到 RTL 图文件中
+                rtl_data.pop("_valid_edge_mask", None)
+                torch.save(rtl_data, rtl_file_path)
+            rtl_module_to_file[module_name] = rtl_filename
+
+        logger.info("阶段 2.5a: 保存 %d 个去重 RTL 图结构", len(rtl_module_to_file))
+
+        # --- ASM 图去重 ---
+        asm_path_to_file: dict[str, str] = {}
+        for asm_path in unique_asm_paths:
+            asm_hash = hashlib.sha256(asm_path.encode("utf-8")).hexdigest()[:16]
+            asm_filename = f"asm_{asm_hash}.pt"
+            asm_file_path = Path(processed_dir) / asm_filename
+            if not asm_file_path.exists():
+                asm_encoding = asm_encodings.get(asm_path)
+                asm_data = _build_asm_graph(asm_path, asm_encoding)
+                torch.save(asm_data, asm_file_path)
+            asm_path_to_file[asm_path] = asm_filename
+
+        logger.info("阶段 2.5b: 保存 %d 个去重 ASM 图", len(asm_path_to_file))
+
+        # 释放编码 tensor，后续不再需要
+        del asm_encodings
+
+        # ── 阶段 3: 多进程标签提取 + 保存（轻量） ──
+        save_args: list[tuple[str, str, str, str, int]] = []
 
         for i, (rtl_path, asm_path) in enumerate(flat_results):
-            save_args.append((rtl_path, asm_path, processed_dir, i))
+            if asm_path is None:
+                logger.error("ASM JSON 文件缺失，跳过: rtl=%s", rtl_path)
+                continue
+            module_name = Path(rtl_path).stem
+            rtl_filename = rtl_module_to_file[module_name]
+            asm_filename = asm_path_to_file[asm_path]
+            save_args.append((rtl_path, rtl_filename, asm_filename, processed_dir, i))
 
         logger.info(
-            "阶段 3/3: 多进程张量构建 + 保存 (%d 个样本, %d workers)",
+            "阶段 3/3: 多进程标签提取 + 保存 (%d 个样本, %d workers)",
             len(save_args),
             self._num_workers,
         )
-        with Pool(
-            self._num_workers,
-            initializer=_init_save_worker,
-            initargs=(packed_tensor, encoding_slices),
-        ) as pool:
-            results = pool.map(_build_and_save, save_args)
+        with Pool(self._num_workers) as pool:
+            results = pool.map(_build_and_save_labels, save_args)
 
         success_count = sum(1 for r in results if r)
 
         # 紧缩索引，消除失败样本导致的缺口
         actual_idx = 0
         for i, r in enumerate(results):
-            if r and i != actual_idx:
-                src = Path(processed_dir) / f"data_{i}.pt"
-                dst = Path(processed_dir) / f"data_{actual_idx}.pt"
-                src.rename(dst)
             if r:
+                orig_idx = save_args[i][4]  # 原始 idx
+                if orig_idx != actual_idx:
+                    src = Path(processed_dir) / f"data_{orig_idx}.pt"
+                    dst = Path(processed_dir) / f"data_{actual_idx}.pt"
+                    src.rename(dst)
                 actual_idx += 1
 
         self._num_samples = success_count
@@ -667,7 +693,12 @@ class DualGraphDataset(Dataset):
         return len(files)
 
     def get(self, idx: int) -> DualGraphData:
-        """从磁盘加载指定索引的数据"""
+        """从磁盘加载指定索引的数据，透明合并去重的 RTL/ASM 图
+
+        新格式 data_{idx}.pt 仅包含标签 + 引用文件名，
+        get() 在返回前从缓存中合并 RTL 图结构和 ASM 图。
+        旧格式文件（无 _rtl_file 属性）直接返回，保持向后兼容。
+        """
         if self._idx_to_file:
             filename = self._idx_to_file[idx]
         else:
@@ -675,7 +706,34 @@ class DualGraphDataset(Dataset):
         data = torch.load(
             Path(self.processed_dir) / filename, weights_only=False
         )
+
+        # 透明合并 RTL 图结构
+        rtl_file = getattr(data, "_rtl_file", None)
+        if rtl_file is not None:
+            rtl = self._load_cached(rtl_file)
+            for k, v in rtl.items():
+                setattr(data, k, v)
+            del data._rtl_file
+
+        # 透明合并 ASM 图
+        asm_file = getattr(data, "_asm_file", None)
+        if asm_file is not None:
+            asm = self._load_cached(asm_file)
+            for k, v in asm.items():
+                setattr(data, k, v)
+            del data._asm_file
+
         return data
+
+    def _load_cached(self, filename: str) -> dict:
+        """从缓存中加载去重的图文件，首次访问时从磁盘加载"""
+        if not hasattr(self, "_file_cache"):
+            self._file_cache: dict[str, dict] = {}
+        if filename not in self._file_cache:
+            self._file_cache[filename] = torch.load(
+                Path(self.processed_dir) / filename, weights_only=False
+            )
+        return self._file_cache[filename]
 
 
 class DualGraphDataModule(L.LightningDataModule):
