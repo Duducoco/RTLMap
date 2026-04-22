@@ -3,7 +3,7 @@
 
 import torch
 from dataclasses import dataclass
-from typing import Optional, Literal
+from typing import Optional
 
 # 从 cdfg_rtl 导入 cell 类型数量
 from cdfg_rtl import NUM_CELL_TYPES
@@ -34,10 +34,12 @@ class ModelConfig:
     num_asm_edge_types: int = 10  # AsmEdgeType 枚举数量
     asm_instruction_dim: int = 256  # ASM 指令编码维度（由外部模型生成）
 
-    # 融合配置
-    fusion_type: Literal["film", "ssm_film"] = "ssm_film"  # 融合模式（默认 SSM-FiLM）
-    ssm_d_state: int = 16  # SSM 状态空间维度
-    ssm_pool_mode: Literal["last", "mean", "attention"] = "last"  # SSM 聚合模式
+    # 融合配置（PerceiverCrossFusion）
+    perceiver_num_latents: int = 16   # latent token 数量 K
+    perceiver_num_heads: int = 4      # Multi-head Attention 头数
+
+    # ASM 节点编码器适配器
+    use_asm_adapter: bool = True      # 在 instruction_encoding 投影前插入可训练 Adapter
 
 
 @dataclass

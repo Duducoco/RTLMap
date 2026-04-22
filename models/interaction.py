@@ -1,269 +1,101 @@
 #!/usr/bin/env python3
 """
-特征融合模块
+特征融合模块：PerceiverCrossFusion
 
-实现双向特征注入：
-- ASM → RTL：测试激励驱动硬件
-- RTL → ASM：硬件状态反馈给激励
+用 K 个可学习 latent token 作为跨图信息瓶颈，实现双向节点级融合：
+  ASM → RTL：测试激励驱动硬件
+  RTL → ASM：硬件状态反馈给激励
 
-支持两种融合方式：
-1. FiLM (Feature-wise Linear Modulation)
-   - Perez et al., "FiLM: Visual Reasoning with a General Conditioning Layer" (AAAI 2018)
-
-2. SSM-FiLM (State Space Model + FiLM)
-   - 结合 Mamba 的选择性状态空间机制和 FiLM 的条件注入
-   - 用 SSM 处理源图节点序列，生成动态上下文
+复杂度 O((N_src + N_tgt) · K · D)，消除 N_rtl × N_asm 二次项。
+数值稳定：pre/post LayerNorm、key_padding_mask、gate bias=-3、mlp zero-init。
 """
+
+import math
+from typing import Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from typing import Tuple, Literal
-from torch_geometric.nn import global_mean_pool
 from torch_geometric.utils import to_dense_batch
 
 
-class FiLMInjection(nn.Module):
+class PerceiverCrossFusion(nn.Module):
     """
-    FiLM (Feature-wise Linear Modulation) 注入模块
+    Perceiver-IO 风格的跨图双向融合模块
 
-    将上下文特征注入到目标节点特征：
-    h' = (1 + γ) ⊙ h + β
+    流程（每方向一个实例）：
+      1. attn_pool：latent ← source（K 个 latent token 汇聚源图信息）
+      2. attn_read：target ← latent（将摘要注入目标节点，节点级 cross-attn）
+      3. Gated 残差：Highway gate 控制注入强度
 
-    其中 γ, β 由上下文生成。
-
-    设计特点：
-    - 使用 (1 + γ) 而非 γ，确保初始时接近恒等映射
-    - γ 通过 Tanh 限制范围在 [-1, 1]，稳定训练
-    - 小随机初始化确保梯度非零，同时保持初始时接近恒等映射
-    """
-
-    def __init__(self, hidden_dim: int, init_std: float = 0.02):
-        """
-        Args:
-            hidden_dim: 隐藏层维度
-            init_std: 初始化标准差（默认 0.02，足够小以接近恒等映射）
-        """
-        super().__init__()
-
-        # γ 生成器（缩放因子）
-        self.gamma_gen = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),  # 限制范围在 [-1, 1]，稳定训练
-        )
-
-        # β 生成器（偏移量）
-        self.beta_gen = nn.Linear(hidden_dim, hidden_dim)
-
-        # 小随机初始化：确保梯度非零，同时 γ ≈ 0, β ≈ 0
-        nn.init.normal_(self.gamma_gen[0].weight, std=init_std)
-        nn.init.zeros_(self.gamma_gen[0].bias)
-        nn.init.normal_(self.beta_gen.weight, std=init_std)
-        nn.init.zeros_(self.beta_gen.bias)
-
-    def forward(
-        self,
-        target_h: torch.Tensor,
-        context: torch.Tensor,
-        target_batch: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        FiLM 调制
-
-        Args:
-            target_h: [N, D] 目标节点特征
-            context: [B, D] 上下文向量（global_mean_pool 后）
-            target_batch: [N] 目标节点的 batch 索引
-
-        Returns:
-            [N, D] 调制后的目标节点特征
-        """
-        # 生成调制参数
-        gamma = self.gamma_gen(context)  # [B, D]
-        beta = self.beta_gen(context)  # [B, D]
-
-        # 广播到每个目标节点
-        gamma_expanded = gamma[target_batch]  # [N, D]
-        beta_expanded = beta[target_batch]  # [N, D]
-
-        # FiLM 调制: h' = (1 + γ) ⊙ h + β
-        # 使用 (1 + γ) 确保初始时接近恒等映射
-        return (1 + gamma_expanded) * target_h + beta_expanded
-
-
-class SimpleSSM(nn.Module):
-    """
-    简化版选择性状态空间模型 (Selective State Space Model)
-
-    基于 Mamba 的核心思想，但使用纯 PyTorch 实现（无需 CUDA 内核）。
-
-    状态空间方程：
-        h_t = Ā · h_{t-1} + B̄ · x_t    # 状态更新
-        y_t = C · h_t                   # 输出
-
-    选择性机制：Δ, B, C 是输入依赖的，模型学习"哪些输入重要"。
-
-    参考：
-    - Gu & Dao, "Mamba: Linear-Time Sequence Modeling with Selective State Spaces" (2024)
-    """
-
-    def __init__(self, d_model: int, d_state: int = 16):
-        """
-        Args:
-            d_model: 模型维度（输入/输出维度）
-            d_state: 状态空间维度（隐状态大小）
-        """
-        super().__init__()
-        self.d_model = d_model
-        self.d_state = d_state
-
-        # 状态空间参数 A（可学习，初始化为负值以确保稳定性）
-        # A 控制状态衰减，负值确保长期稳定
-        self.A_log = nn.Parameter(torch.log(torch.rand(d_model, d_state) * 0.5 + 0.5))
-
-        # 选择性参数生成器（输入依赖）
-        self.delta_proj = nn.Linear(d_model, d_model)  # Δ: 步长/记忆门
-        self.B_proj = nn.Linear(d_model, d_state)  # B: 输入门
-        self.C_proj = nn.Linear(d_model, d_state)  # C: 输出门
-
-        # 输出投影（可选，用于残差连接）
-        self.out_proj = nn.Linear(d_model, d_model)
-
-        # 初始化
-        nn.init.xavier_uniform_(self.delta_proj.weight)
-        nn.init.zeros_(self.delta_proj.bias)
-        nn.init.xavier_uniform_(self.B_proj.weight)
-        nn.init.zeros_(self.B_proj.bias)
-        nn.init.xavier_uniform_(self.C_proj.weight)
-        nn.init.zeros_(self.C_proj.bias)
-
-        # torch.compile 编译缓存（首次 forward 时初始化）
-        self._compiled_scan = None
-
-    def _scan(self, A_bar: Tensor, delta: Tensor, B_t: Tensor, C_t: Tensor, x: Tensor) -> Tensor:
-        """
-        SSM 状态递推（独立方法，可被 torch.compile 优化 kernel 融合）
-
-        Args:
-            A_bar: [B, T, D, d_state] 离散化状态矩阵
-            delta: [B, T, D] 步长
-            B_t: [B, T, d_state] 输入门
-            C_t: [B, T, d_state] 输出门
-            x: [B, T, D] 输入序列
-
-        Returns:
-            y: [B, T, D] 输出序列
-        """
-        B, T, D = x.shape
-        h = x.new_zeros(B, D, self.d_state)
-        outputs = []
-        for t in range(T):
-            delta_B_x = delta[:, t, :, None] * B_t[:, t, None, :] * x[:, t, :, None]
-            h = A_bar[:, t] * h + delta_B_x
-            y_t = (h * C_t[:, t, None, :]).sum(-1)
-            outputs.append(y_t)
-        return torch.stack(outputs, dim=1)
-
-    def forward(self, x: Tensor, mask: Tensor = None) -> Tensor:
-        """
-        前向传播
-
-        Args:
-            x: [B, T, D] 输入序列
-            mask: [B, T] 可选的 padding mask（True 表示有效位置）
-
-        Returns:
-            y: [B, T, D] 输出序列
-        """
-        B, T, D = x.shape
-
-        # 获取 A（负值确保稳定性）
-        A = -torch.exp(self.A_log)  # [D, d_state]
-
-        # 选择性参数（输入依赖）
-        delta = F.softplus(self.delta_proj(x))  # [B, T, D] 步长，正值
-        B_t = self.B_proj(x)  # [B, T, d_state] 输入门
-        C_t = self.C_proj(x)  # [B, T, d_state] 输出门
-
-        # 离散化：Ā = exp(Δ · A)
-        delta_A = delta.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(0)
-        A_bar = torch.exp(delta_A)  # [B, T, D, d_state]
-
-        # 状态递推（首次调用时尝试 torch.compile）
-        if self._compiled_scan is None:
-            if hasattr(torch, "compile"):
-                self._compiled_scan = torch.compile(self._scan)
-            else:
-                # torch < 2.0 fallback
-                self._compiled_scan = self._scan
-        y = self._compiled_scan(A_bar, delta, B_t, C_t, x)
-
-        # 输出投影
-        y = self.out_proj(y)
-
-        return y
-
-
-class SSMFiLMInjection(nn.Module):
-    """
-    SSM 增强的 FiLM 注入模块
-
-    用 SSM 处理源图节点序列，生成动态上下文，然后进行 FiLM 注入。
-
-    相比原始 FiLM 的优势：
-    - 动态上下文：SSM 状态递推模拟"执行状态演化"
-    - 选择性记忆：学习"哪些源节点对目标重要"
-    - 长程依赖：SSM 天然支持长序列
-
-    架构：
-    1. 将源节点按 batch 分组并 padding 成序列
-    2. SSM 处理序列，生成每个位置的状态
-    3. 选择性聚合状态生成上下文
-    4. FiLM 注入到目标节点
+    数值稳定性保证：
+      - pre-LayerNorm（源侧 / 目标侧）+ post-LayerNorm（context）
+      - key_padding_mask 走 PyTorch 内置 stable softmax，不手动 fill -inf
+      - gate bias=-3 → sigmoid≈0.05，起步近恒等映射
+      - mlp 最后线性层 zero-init，起步输出为零残差
+      - 全空 batch 行（无有效源节点）：latents 置零，不污染其他样本
     """
 
     def __init__(
         self,
         hidden_dim: int,
-        d_state: int = 16,
-        pool_mode: Literal["last", "mean", "attention"] = "last",
+        num_latents: int = 16,
+        num_heads: int = 4,
+        num_layers: int = 4,
         init_std: float = 0.02,
     ):
         """
         Args:
-            hidden_dim: 隐藏层维度
-            d_state: SSM 状态空间维度
-            pool_mode: 聚合模式
-                - "last": 取最后一个有效状态
-                - "mean": 平均池化
-                - "attention": 注意力聚合
-            init_std: FiLM 参数初始化标准差
+            hidden_dim:  模型隐藏维度 D
+            num_latents: latent token 数量 K（建议 8–16）
+            num_heads:   Multi-head Attention 头数
+            num_layers:  总 GNN 层数（用于 mlp 输出投影 GPT-NeoX 风格缩放）
+            init_std:    gate/latent 初始化标准差
         """
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.pool_mode = pool_mode
 
-        # SSM 模块
-        self.ssm = SimpleSSM(hidden_dim, d_state)
+        # 可学习 latent tokens [K, D]
+        self.latents = nn.Parameter(torch.empty(num_latents, hidden_dim))
+        nn.init.trunc_normal_(self.latents, std=init_std)
 
-        # 注意力聚合（可选）
-        if pool_mode == "attention":
-            self.query_proj = nn.Linear(hidden_dim, hidden_dim)
-            self.key_proj = nn.Linear(hidden_dim, hidden_dim)
+        # pre-LayerNorm
+        self.ln_src = nn.LayerNorm(hidden_dim)
+        self.ln_tgt = nn.LayerNorm(hidden_dim)
+        # post-LayerNorm（context 向量）
+        self.ln_ctx = nn.LayerNorm(hidden_dim)
 
-        # FiLM 参数生成器
-        self.gamma_gen = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
+        # latent ← source 池化（Q=latents, KV=source）
+        self.attn_pool = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            batch_first=True,
+            dropout=0.0,
         )
-        self.beta_gen = nn.Linear(hidden_dim, hidden_dim)
 
-        # 小随机初始化
-        nn.init.normal_(self.gamma_gen[0].weight, std=init_std)
-        nn.init.zeros_(self.gamma_gen[0].bias)
-        nn.init.normal_(self.beta_gen.weight, std=init_std)
-        nn.init.zeros_(self.beta_gen.bias)
+        # target ← latent 读取（Q=target, KV=latents）
+        self.attn_read = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            batch_first=True,
+            dropout=0.0,
+        )
+
+        # Highway gate：σ(W[h; ctx])，bias=-3 → 起步 σ≈0.05
+        self.gate = nn.Linear(hidden_dim * 2, hidden_dim)
+        nn.init.normal_(self.gate.weight, std=init_std)
+        nn.init.constant_(self.gate.bias, -3.0)
+
+        # 注入 MLP（最后层 zero-init）
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+        )
+        scale = 1.0 / math.sqrt(2.0 * max(num_layers, 1))
+        nn.init.normal_(self.mlp[-1].weight, std=scale * init_std)
+        nn.init.zeros_(self.mlp[-1].bias)
 
     def forward(
         self,
@@ -273,104 +105,45 @@ class SSMFiLMInjection(nn.Module):
         source_batch: Tensor,
     ) -> Tensor:
         """
-        SSM-FiLM 调制
-
         Args:
-            target_h: [N_tgt, D] 目标节点特征（如 RTL）
-            source_h: [N_src, D] 源节点特征（如 ASM）
-            target_batch: [N_tgt] 目标节点的 batch 索引
-            source_batch: [N_src] 源节点的 batch 索引
-
+            target_h:     [N_tgt, D] 目标图节点特征（如 RTL）
+            source_h:     [N_src, D] 源图节点特征（如 ASM）
+            target_batch: [N_tgt]    目标节点 batch 索引
+            source_batch: [N_src]    源节点 batch 索引
         Returns:
-            [N_tgt, D] 调制后的目标节点特征
+            [N_tgt, D] 融合后目标节点特征
         """
-        # 1. 将源节点按 batch 分组并 padding 成序列
-        source_seq, seq_mask = self._batch_to_sequence(source_h, source_batch)
-        # source_seq: [B, T_max, D], seq_mask: [B, T_max]
+        # ── Step 1：源图 → latents ──────────────────────────────────────────
+        src_seq, src_mask = to_dense_batch(source_h, source_batch)  # [B,T_s,D], [B,T_s]
+        B = src_seq.size(0)
 
-        # 2. SSM 处理
-        ssm_out = self.ssm(source_seq, seq_mask)  # [B, T_max, D]
+        q = self.latents.unsqueeze(0).expand(B, -1, -1)  # [B,K,D]
+        # key_padding_mask: True = 忽略（PyTorch MHA 约定）
+        src_normed = self.ln_src(src_seq)
+        Z, _ = self.attn_pool(
+            q,
+            src_normed,
+            src_normed,
+            key_padding_mask=~src_mask,
+        )  # [B,K,D]
 
-        # 3. 选择性聚合
-        context = self._aggregate(ssm_out, seq_mask, target_h, target_batch)
-        # context: [B, D]
+        # 全空行（无有效源节点）：latent 置零，不污染其他样本
+        has_src = src_mask.any(dim=1)  # [B]
+        Z = torch.where(has_src[:, None, None], Z, Z.new_zeros(()))
 
-        # 4. FiLM 注入
-        gamma = self.gamma_gen(context)  # [B, D]
-        beta = self.beta_gen(context)  # [B, D]
+        # ── Step 2：target ← latents ────────────────────────────────────────
+        tgt_seq, tgt_mask = to_dense_batch(target_h, target_batch)  # [B,T_t,D], [B,T_t]
 
-        gamma_expanded = gamma[target_batch]  # [N_tgt, D]
-        beta_expanded = beta[target_batch]  # [N_tgt, D]
+        ctx_seq, _ = self.attn_read(
+            self.ln_tgt(tgt_seq),
+            Z,
+            Z,
+        )  # [B,T_t,D]
 
-        return (1 + gamma_expanded) * target_h + beta_expanded
+        # dense → flat（只取有效位置）
+        ctx = ctx_seq[tgt_mask]  # [N_tgt, D]
 
-    def _batch_to_sequence(self, h: Tensor, batch: Tensor) -> Tuple[Tensor, Tensor]:
-        """
-        将 batch 格式转换为 padding 序列格式（使用 PyG to_dense_batch 向量化实现）
-
-        Args:
-            h: [N, D] 节点特征
-            batch: [N] batch 索引
-
-        Returns:
-            seq: [B, T_max, D] padding 后的序列
-            mask: [B, T_max] 有效位置 mask（True 表示有效）
-        """
-        seq, mask = to_dense_batch(h, batch)  # [B, T_max, D], [B, T_max]
-        return seq, mask
-
-    def _aggregate(
-        self,
-        ssm_out: Tensor,
-        seq_mask: Tensor,
-        target_h: Tensor,
-        target_batch: Tensor,
-    ) -> Tensor:
-        """
-        选择性聚合 SSM 输出
-
-        Args:
-            ssm_out: [B, T, D] SSM 输出
-            seq_mask: [B, T] 有效位置 mask
-            target_h: [N_tgt, D] 目标节点特征
-            target_batch: [N_tgt] 目标节点 batch 索引
-
-        Returns:
-            context: [B, D] 聚合后的上下文
-        """
-        B, T, D = ssm_out.shape
-
-        if self.pool_mode == "last":
-            # 取每个序列的最后一个有效位置
-            lengths = seq_mask.sum(dim=1).long()  # [B]
-            # 处理空序列的情况
-            lengths = lengths.clamp(min=1) - 1
-            context = ssm_out[torch.arange(B, device=ssm_out.device), lengths]  # [B, D]
-
-        elif self.pool_mode == "mean":
-            # 平均池化（mask 掉 padding）
-            ssm_masked = ssm_out * seq_mask.unsqueeze(-1).float()
-            lengths = seq_mask.sum(dim=1, keepdim=True).float().clamp(min=1)
-            context = ssm_masked.sum(dim=1) / lengths  # [B, D]
-
-        elif self.pool_mode == "attention":
-            # 注意力聚合：目标图级特征作为 query
-            target_graph = global_mean_pool(target_h, target_batch)  # [B, D]
-            query = self.query_proj(target_graph).unsqueeze(1)  # [B, 1, D]
-            key = self.key_proj(ssm_out)  # [B, T, D]
-
-            # 计算注意力分数
-            attn = torch.bmm(query, key.transpose(1, 2)) / (self.hidden_dim**0.5)
-            # [B, 1, T]
-
-            # mask 掉 padding 位置
-            attn = attn.masked_fill(~seq_mask.unsqueeze(1), float("-inf"))
-            attn = F.softmax(attn, dim=-1)  # [B, 1, T]
-
-            # 加权聚合
-            context = torch.bmm(attn, ssm_out).squeeze(1)  # [B, D]
-
-        else:
-            raise ValueError(f"Unknown pool_mode: {self.pool_mode}")
-
-        return context
+        # ── Step 3：Gated 残差注入 ───────────────────────────────────────────
+        ctx_normed = self.ln_ctx(ctx)
+        g = torch.sigmoid(self.gate(torch.cat([target_h, ctx_normed], dim=-1)))  # [N_tgt,D]
+        return target_h + g * self.mlp(ctx_normed)

@@ -26,6 +26,8 @@ class TrainerConfig:
     gradient_clip_val: float = 1.0
     accumulate_grad_batches: int = 1
     num_workers: int = 4
+    use_bucketing: bool = False    # 按 RTL 图大小分桶的动态 batch（减少 padding 浪费）
+    token_budget: int = 8192       # bucketing 模式下每 batch 最大 RTL 节点总数
 
     # 早停
     early_stopping_patience: int = 10

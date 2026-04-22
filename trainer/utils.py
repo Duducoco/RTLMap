@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """便捷训练函数"""
 
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from pathlib import Path
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 import lightning as L
 from lightning.pytorch.callbacks import Callback
 
@@ -19,8 +20,7 @@ def train_model(
     model_config: ModelConfig,
     trainer_config: TrainerConfig,
     data_root: str,
-    sim_results_dirs: Optional[List[str]] = None,
-    module_names: Optional[List[str]] = None,
+    dataset_dir: Optional[Union[str, Path]] = None,
     text_encoder_config: Optional["TextEncoderConfig"] = None,
     has_validation: bool = True,
     has_test: bool = False,
@@ -28,7 +28,6 @@ def train_model(
     experiment_name: str = "dual_graph_gnn",
     extra_callbacks: Optional[List[Callback]] = None,
     ckpt_path: Optional[str] = None,
-    preprocess_only: bool = False,
 ) -> Tuple[DualGraphLightningModule, L.Trainer]:
     """
     便捷训练函数
@@ -36,9 +35,8 @@ def train_model(
     Args:
         model_config: 模型配置
         trainer_config: 训练配置
-        data_root: 数据集根目录
-        sim_results_dirs: simulation_results 目录路径列表
-        module_names: 要标注的模块名列表（不含 .json 后缀）
+        data_root: 数据集缓存根目录
+        dataset_dir: coverage-report-extractor 输出目录（含 dataset_index.jsonlines）
         text_encoder_config: 文本编码器配置，None 时回退到零向量
         has_validation: 是否有验证集
         has_test: 是否有测试集
@@ -46,12 +44,10 @@ def train_model(
         experiment_name: 实验名称
         extra_callbacks: 额外的自定义 callbacks（可选）
         ckpt_path: 检查点路径（用于恢复训练）
-        preprocess_only: 仅执行阶段 1 预处理，跳过 GPU 编码和张量构建
 
     Returns:
         (module, trainer): 训练后的模块和 Trainer
     """
-    # 创建 LightningModule
     module = DualGraphLightningModule(
         model_config=model_config,
         learning_rate=trainer_config.learning_rate,
@@ -63,18 +59,14 @@ def train_model(
         scheduler_type=trainer_config.scheduler_type,
     )
 
-    # 创建 DataModule
     datamodule = DualGraphDataModule(
         root=data_root,
-        sim_results_dirs=sim_results_dirs,
-        module_names=module_names,
+        dataset_dir=dataset_dir,
         text_encoder_config=text_encoder_config,
         batch_size=trainer_config.batch_size,
         num_workers=trainer_config.num_workers,
-        preprocess_only=preprocess_only,
     )
 
-    # 使用 LightningTrainer
     lightning_trainer = LightningTrainer(
         config=trainer_config,
         experiment_name=experiment_name,
@@ -83,10 +75,8 @@ def train_model(
         has_validation=has_validation,
     )
 
-    # 训练
     lightning_trainer.fit(module, datamodule, ckpt_path=ckpt_path)
 
-    # 测试
     if has_test:
         lightning_trainer.test(module, datamodule)
 

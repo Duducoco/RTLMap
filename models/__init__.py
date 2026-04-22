@@ -3,7 +3,7 @@
 
 from .data_types import ModelConfig, ModelOutput
 from .encoder import (
-    FiLMDualEncoder,
+    PerceiverDualEncoder,
     GNNLayer,
     ControlGatedGNNLayer,
     EDGE_TYPE_DATA,
@@ -14,7 +14,7 @@ from .encoder import (
     EDGE_TYPE_RESET,
     EDGE_TYPE_ENABLE,
 )
-from .interaction import FiLMInjection, SimpleSSM, SSMFiLMInjection
+from .interaction import PerceiverCrossFusion
 from .model import (
     DualGraphFusionModel,
     create_model,
@@ -25,7 +25,7 @@ from .model import (
 __all__ = [
     "ModelConfig",
     "ModelOutput",
-    "FiLMDualEncoder",
+    "PerceiverDualEncoder",
     "GNNLayer",
     "ControlGatedGNNLayer",
     "EDGE_TYPE_DATA",
@@ -35,9 +35,7 @@ __all__ = [
     "EDGE_TYPE_CLOCK",
     "EDGE_TYPE_RESET",
     "EDGE_TYPE_ENABLE",
-    "FiLMInjection",
-    "SimpleSSM",
-    "SSMFiLMInjection",
+    "PerceiverCrossFusion",
     "DualGraphFusionModel",
     "create_model",
     "create_small_model",
