@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-"""
-CDFG 基础类型定义
-"""
+"""RTL CDFG 词汇表与边类型定义（供数据集加载使用）"""
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Tuple, Optional
 from enum import Enum, auto
-from collections import defaultdict
 
 
-# Cell 类型词汇表：cell_type 字符串 -> 整数索引
 CELL_TYPE_VOCAB = {
     # 特殊类型（端口/常量）
     "INPUT": 0,
@@ -101,88 +95,82 @@ NUM_CELL_TYPES = len(CELL_TYPE_VOCAB)  # 74
 
 
 def get_cell_type_index(cell_type: str) -> int:
-    """将 cell_type 字符串转换为索引，未知类型返回 UNKNOWN 索引"""
     return CELL_TYPE_VOCAB.get(cell_type, CELL_TYPE_VOCAB["UNKNOWN"])
 
 
 class NodeType(Enum):
     """节点类型枚举"""
 
-    INPUT = auto()  # 输入端口
-    OUTPUT = auto()  # 输出端口
-    CONSTANT = auto()  # 常数
-    COMBINATIONAL = auto()  # 组合逻辑
-    SEQUENTIAL = auto()  # 时序逻辑
-    MEMORY = auto()  # 存储器
-    MUX = auto()  # 多路选择器（控制节点）
-    ARITHMETIC = auto()  # 算术运算
-    LOGIC = auto()  # 逻辑运算
-    COMPARE = auto()  # 比较运算
-    SHIFT = auto()  # 移位运算
-    UNKNOWN = auto()  # 未知类型
+    INPUT = auto()
+    OUTPUT = auto()
+    CONSTANT = auto()
+    COMBINATIONAL = auto()
+    SEQUENTIAL = auto()
+    MEMORY = auto()
+    MUX = auto()
+    ARITHMETIC = auto()
+    LOGIC = auto()
+    COMPARE = auto()
+    SHIFT = auto()
+    UNKNOWN = auto()
 
 
 class EdgeType(Enum):
-    """边类型枚举"""
-
-    DATA = auto()  # 通用数据流
-    DATA_TRUE = auto()  # MUX 真分支数据流（B 端口，S=1 时选择）
-    DATA_FALSE = auto()  # MUX 假分支数据流（A 端口，S=0 时选择）
-    CONTROL = auto()  # 控制流
-    CLOCK = auto()  # 时钟
-    RESET = auto()  # 复位
-    ENABLE = auto()  # 使能
+    DATA = auto()
+    DATA_TRUE = auto()
+    DATA_FALSE = auto()
+    CONTROL = auto()
+    CLOCK = auto()
+    RESET = auto()
+    ENABLE = auto()
 
 
-@dataclass
-class Node:
-    """图节点"""
+NUM_NODE_TYPES = len(NodeType)
 
-    id: str
-    name: str
-    node_type: NodeType
-    cell_type: str = ""
-    width: int = 1
-    parameters: Dict = field(default_factory=dict)
-    attributes: Dict = field(default_factory=dict)
-    input_ports: List[str] = field(default_factory=list)
-    output_ports: List[str] = field(default_factory=list)
-    # 覆盖率标注相关字段
-    source_line: int = 0  # RTL 源码行号（从 src 属性解析）
-    source_file: str = ""  # RTL 源文件名
-    stmt_start_line: Optional[int] = None  # 语句起始行号（用于 CASE 语句匹配）
+_CELL_TO_NODETYPE_MAP = {
+    "INPUT":    NodeType.INPUT,
+    "OUTPUT":   NodeType.OUTPUT,
+    "CONSTANT": NodeType.CONSTANT,
+    "$mux": NodeType.MUX,   "$pmux": NodeType.MUX,
+    "$bmux": NodeType.MUX,  "$demux": NodeType.MUX,
+    "$tribuf": NodeType.COMBINATIONAL,
+    "$dff": NodeType.SEQUENTIAL,    "$dffe": NodeType.SEQUENTIAL,
+    "$adff": NodeType.SEQUENTIAL,   "$adffe": NodeType.SEQUENTIAL,
+    "$asdff": NodeType.SEQUENTIAL,  "$asdffe": NodeType.SEQUENTIAL,
+    "$sdff": NodeType.SEQUENTIAL,   "$sdffe": NodeType.SEQUENTIAL,
+    "$sdffce": NodeType.SEQUENTIAL, "$dlatch": NodeType.SEQUENTIAL,
+    "$adlatch": NodeType.SEQUENTIAL,"$dlatchsr": NodeType.SEQUENTIAL,
+    "$sr": NodeType.SEQUENTIAL,     "$ff": NodeType.SEQUENTIAL,
+    "$aldff": NodeType.SEQUENTIAL,  "$aldffe": NodeType.SEQUENTIAL,
+    "$mem": NodeType.MEMORY,      "$mem_v2": NodeType.MEMORY,
+    "$memrd": NodeType.MEMORY,    "$memrd_v2": NodeType.MEMORY,
+    "$memwr": NodeType.MEMORY,    "$memwr_v2": NodeType.MEMORY,
+    "$meminit": NodeType.MEMORY,  "$meminit_v2": NodeType.MEMORY,
+    "$add": NodeType.ARITHMETIC,  "$sub": NodeType.ARITHMETIC,
+    "$mul": NodeType.ARITHMETIC,  "$div": NodeType.ARITHMETIC,
+    "$mod": NodeType.ARITHMETIC,  "$divfloor": NodeType.ARITHMETIC,
+    "$modfloor": NodeType.ARITHMETIC, "$pow": NodeType.ARITHMETIC,
+    "$neg": NodeType.ARITHMETIC,  "$pos": NodeType.ARITHMETIC,
+    "$eq": NodeType.COMPARE,  "$ne": NodeType.COMPARE,
+    "$lt": NodeType.COMPARE,  "$le": NodeType.COMPARE,
+    "$gt": NodeType.COMPARE,  "$ge": NodeType.COMPARE,
+    "$eqx": NodeType.COMPARE, "$nex": NodeType.COMPARE,
+    "$and": NodeType.LOGIC,       "$or": NodeType.LOGIC,
+    "$xor": NodeType.LOGIC,       "$xnor": NodeType.LOGIC,
+    "$not": NodeType.LOGIC,       "$reduce_and": NodeType.LOGIC,
+    "$reduce_or": NodeType.LOGIC, "$reduce_xor": NodeType.LOGIC,
+    "$reduce_xnor": NodeType.LOGIC,"$reduce_bool": NodeType.LOGIC,
+    "$logic_and": NodeType.LOGIC, "$logic_or": NodeType.LOGIC,
+    "$logic_not": NodeType.LOGIC,
+    "$shl": NodeType.SHIFT,   "$shr": NodeType.SHIFT,
+    "$sshl": NodeType.SHIFT,  "$sshr": NodeType.SHIFT,
+    "$shift": NodeType.SHIFT, "$shiftx": NodeType.SHIFT,
+    "$concat": NodeType.COMBINATIONAL, "$slice": NodeType.COMBINATIONAL,
+    "$lut": NodeType.COMBINATIONAL,    "$sop": NodeType.COMBINATIONAL,
+    "UNKNOWN": NodeType.UNKNOWN,
+}
 
-
-@dataclass
-class Edge:
-    """图边"""
-
-    source: str  # 源节点 ID
-    target: str  # 目标节点 ID
-    source_port: str  # 源端口名
-    target_port: str  # 目标端口名
-    edge_type: EdgeType  # 边类型
-    bits: List[int] = field(default_factory=list)  # 涉及的 bit 编号
-    width: int = 1  # 信号宽度
-    # 覆盖率标注相关字段
-    source_line: int = 0  # RTL 源码行号
-    branch_index: int = -1  # 分支索引（if-else-if 链中的位置，-1 表示不适用）
-    coverage_label: int = -1  # 覆盖标签：-1=不适用, 0=未覆盖, 1=已覆盖
-    coverage_type: str = (
-        ""  # 覆盖类型："control", "data_true", "data_false", "" 表示不适用
-    )
-
-
-@dataclass
-class CDFG:
-    """控制数据流图"""
-
-    module_name: str
-    nodes: Dict[str, Node] = field(default_factory=dict)
-    edges: List[Edge] = field(default_factory=list)
-
-    # 索引结构
-    bit_to_driver: Dict[int, Tuple[str, str]] = field(default_factory=dict)
-    bit_to_consumers: Dict[int, List[Tuple[str, str]]] = field(
-        default_factory=lambda: defaultdict(list)
-    )
+CELL_TYPE_TO_NODE_TYPE: list[int] = [
+    _CELL_TO_NODETYPE_MAP.get(k, NodeType.UNKNOWN).value - 1
+    for k, _ in sorted(CELL_TYPE_VOCAB.items(), key=lambda x: x[1])
+]

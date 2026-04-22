@@ -19,7 +19,7 @@ from typing import Dict, Optional
 
 from datasets import DualGraphData
 from .data_types import ModelConfig, ModelOutput
-from .encoder import FiLMDualEncoder, RTLEdgeFeatureEncoder
+from .encoder import PerceiverDualEncoder, RTLEdgeFeatureEncoder
 
 
 class EdgeClassifier(nn.Module):
@@ -131,8 +131,8 @@ class DualGraphFusionModel(nn.Module):
         super().__init__()
         self.config = config
 
-        # 双图编码器（支持 FiLM 或 SSM-FiLM 融合）
-        self.encoder = FiLMDualEncoder(
+        # 双图编码器（PerceiverCrossFusion 双向融合）
+        self.encoder = PerceiverDualEncoder(
             hidden_dim=config.hidden_dim,
             output_dim=config.hidden_dim,
             num_layers=config.num_gnn_layers,
@@ -143,10 +143,9 @@ class DualGraphFusionModel(nn.Module):
             num_asm_node_types=config.num_asm_node_types,
             num_asm_edge_types=config.num_asm_edge_types,
             asm_instruction_dim=config.asm_instruction_dim,
-            # 融合配置
-            fusion_type=config.fusion_type,
-            ssm_d_state=config.ssm_d_state,
-            ssm_pool_mode=config.ssm_pool_mode,
+            use_asm_adapter=config.use_asm_adapter,
+            perceiver_num_latents=config.perceiver_num_latents,
+            perceiver_num_heads=config.perceiver_num_heads,
         )
 
         # 边分类器（仅 RTL，支持端口位置索引）
@@ -183,6 +182,7 @@ class DualGraphFusionModel(nn.Module):
             rtl_node_cell_type=data.node_cell_type,
             rtl_node_width=data.node_width,
             rtl_edge_type=data.edge_type,
+            rtl_node_type=data.node_type,
             rtl_batch=getattr(data, "batch", None),
             rtl_edge_width=getattr(data, "edge_width", None),
             rtl_edge_source_port_idx=getattr(data, "edge_source_port_idx", None),

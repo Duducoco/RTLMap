@@ -11,6 +11,7 @@ class DualGraphData(Data):
     属性：
     - 主图（RTL）:
         - node_cell_type: [N] 节点的 cell_type 索引（对应 CELL_TYPE_VOCAB）
+        - node_type: [N] 节点粗粒度类型索引（0-11，对应 NodeType 枚举，0-indexed）
         - node_width: [N] 节点的 width（信号位宽）
         - edge_index: [2, E] 边索引
         - edge_type: [E] 边类型（0: DATA, 1: DATA_TRUE, 2: DATA_FALSE, 3: CONTROL, 4: CLOCK, 5: RESET, 6: ENABLE）
@@ -57,6 +58,7 @@ class DualGraphData(Data):
         if key in [
             # RTL 节点属性
             "node_cell_type",
+            "node_type",
             "node_width",
             # RTL 边属性
             "edge_type",

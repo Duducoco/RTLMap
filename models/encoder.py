@@ -21,18 +21,37 @@ import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.nn import MessagePassing, global_mean_pool
 from typing import Optional, Tuple
-
-from .interaction import FiLMInjection, SSMFiLMInjection
+from .interaction import PerceiverCrossFusion
 
 # EdgeType 索引常量（0-indexed，用于控制门控聚合和 Embedding 层）
 # 对应 cdfg_rtl.data_types.EdgeType 枚举（值需减 1 转为 0-indexed）
-EDGE_TYPE_DATA = 0  # 通用数据流
-EDGE_TYPE_DATA_TRUE = 1  # MUX 真分支数据流（B 端口，S=1 时选择）
-EDGE_TYPE_DATA_FALSE = 2  # MUX 假分支数据流（A 端口，S=0 时选择）
-EDGE_TYPE_CONTROL = 3  # 控制流（MUX S 端口）
-EDGE_TYPE_CLOCK = 4  # 时钟
-EDGE_TYPE_RESET = 5  # 复位
-EDGE_TYPE_ENABLE = 6  # 使能
+EDGE_TYPE_DATA = 0
+EDGE_TYPE_DATA_TRUE = 1
+EDGE_TYPE_DATA_FALSE = 2
+EDGE_TYPE_CONTROL = 3
+EDGE_TYPE_CLOCK = 4
+EDGE_TYPE_RESET = 5
+EDGE_TYPE_ENABLE = 6
+
+NUM_NODE_TYPES = 12
+
+# NodeType 0-indexed (0-11) → agg_group (0-9)
+# INPUT(0)/OUTPUT(1)/CONSTANT(2) 共享 group 0
+_NODE_TYPE_TO_AGG_GROUP = [
+    0,  # INPUT
+    0,  # OUTPUT
+    0,  # CONSTANT
+    1,  # COMBINATIONAL
+    2,  # SEQUENTIAL
+    3,  # MEMORY
+    4,  # MUX  ← 实际走 gated_out
+    5,  # ARITHMETIC
+    6,  # LOGIC
+    7,  # COMPARE
+    8,  # SHIFT
+    9,  # UNKNOWN
+]
+NUM_AGG_GROUPS = 10
 
 
 def drop_path(x: torch.Tensor, drop_prob: float, training: bool) -> torch.Tensor:
@@ -79,25 +98,54 @@ class RTLNodeFeatureEncoder(nn.Module):
         return self.norm(type_emb + width_emb)
 
 
+class InstructionAdapter(nn.Module):
+    """
+    可训练适配器：为冻结的 instruction_encoding 补充任务适应能力。
+
+    结构：LayerNorm → Linear → GELU → Linear（zero-init）+ 残差
+    起步等价于恒等映射，旧 checkpoint 通过 strict=False 兼容加载。
+    """
+
+    def __init__(self, dim: int):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.fc1 = nn.Linear(dim, dim)
+        self.fc2 = nn.Linear(dim, dim)
+        # zero-init 保证起步为恒等
+        nn.init.zeros_(self.fc2.weight)
+        nn.init.zeros_(self.fc2.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.fc2(F.gelu(self.fc1(self.norm(x))))
+
+
 class AsmNodeFeatureEncoder(nn.Module):
     """
     ASM 节点特征编码器
 
     将 node_type 和 instruction_encoding 编码为节点嵌入：
     - node_type: 通过 Embedding 层嵌入
-    - instruction_encoding: 通过线性层投影（由外部模型生成）
+    - instruction_encoding: 先经可训练 InstructionAdapter 适配，再线性投影
     - 融合方式: 加法融合
     """
 
-    def __init__(self, num_node_types: int, instruction_dim: int, hidden_dim: int):
+    def __init__(
+        self,
+        num_node_types: int,
+        instruction_dim: int,
+        hidden_dim: int,
+        use_adapter: bool = True,
+    ):
         """
         Args:
             num_node_types: ASM 节点类型数量 (AsmNodeType 枚举)
             instruction_dim: 指令编码维度（由外部模型生成）
             hidden_dim: 隐藏层维度
+            use_adapter: 是否启用 InstructionAdapter（默认 True）
         """
         super().__init__()
         self.node_type_embedding = nn.Embedding(num_node_types, hidden_dim)
+        self.adapter = InstructionAdapter(instruction_dim) if use_adapter else nn.Identity()
         self.instruction_proj = nn.Linear(instruction_dim, hidden_dim)
         self.norm = nn.LayerNorm(hidden_dim)
 
@@ -113,7 +161,7 @@ class AsmNodeFeatureEncoder(nn.Module):
             [M, hidden_dim] 节点嵌入
         """
         type_emb = self.node_type_embedding(node_type)  # [M, D]
-        instr_emb = self.instruction_proj(instruction_encoding)  # [M, D]
+        instr_emb = self.instruction_proj(self.adapter(instruction_encoding))  # [M, D]
         return self.norm(type_emb + instr_emb)
 
 
@@ -330,6 +378,16 @@ class ControlGatedGNNLayer(MessagePassing):
             nn.Linear(hidden_dim // 2, 2),  # [gate_true, gate_false]
         )
 
+        # 类型感知软聚合选择器：每个 agg_group 学习 {sum, mean, max} 权重
+        self.agg_selector = nn.Embedding(NUM_AGG_GROUPS, 3)
+        nn.init.zeros_(self.agg_selector.weight)
+        with torch.no_grad():
+            self.agg_selector.weight[:, 0] = 2.0  # 初始偏向 sum
+        self.register_buffer(
+            "node_type_to_agg_group",
+            torch.tensor(_NODE_TYPE_TO_AGG_GROUP, dtype=torch.long),
+        )
+
         # γ: 节点更新函数
         self.node_mlp = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim * 2),
@@ -353,6 +411,7 @@ class ControlGatedGNNLayer(MessagePassing):
         edge_index: Tensor,
         edge_attr: Tensor,
         edge_type: Tensor,
+        node_type: Tensor,
     ) -> Tuple[Tensor, Tensor]:
         """
         前向传播
@@ -362,6 +421,7 @@ class ControlGatedGNNLayer(MessagePassing):
             edge_index: [2, E] 边索引
             edge_attr: [E, D] 边特征（已通过 RTLEdgeFeatureEncoder 编码）
             edge_type: [E] EdgeType 索引（用于控制门控聚合）
+            node_type: [N] NodeType 0-indexed（用于类型感知聚合）
 
         Returns:
             x: [N, D] 更新后的节点特征
@@ -373,6 +433,7 @@ class ControlGatedGNNLayer(MessagePassing):
             x=x,
             edge_attr=edge_attr,
             edge_type=edge_type,
+            node_type=node_type,
             size=None,
         )
 
@@ -422,35 +483,25 @@ class ControlGatedGNNLayer(MessagePassing):
         inputs: Tensor,
         index: Tensor,
         edge_type: Tensor,
+        node_type: Tensor,
         ptr: Optional[Tensor] = None,
         dim_size: Optional[int] = None,
     ) -> Tensor:
         """
-        控制门控聚合
+        类型感知聚合
 
         MUX 节点: m_gated = α_true · m_true + α_false · m_false + m_other
-        非 MUX 节点: m = Σ(all_messages)
-
-        Args:
-            inputs: [E, D] 消息（来自 message()）
-            index: [E] 目标节点索引（PyG 自动传入）
-            edge_type: [E] 边类型索引（从 propagate 传入）
-            ptr: 可选，CSR 格式指针
-            dim_size: 节点数量
-
-        Returns:
-            aggregated: [N, D] 聚合后的消息
+        其他节点: 软选择 sum/mean/max，权重由 agg_selector[node_type_group] 决定
+        INPUT/OUTPUT/CONSTANT 共享同一组权重（group 0）
         """
         num_nodes = dim_size if dim_size is not None else int(index.max()) + 1
         D = self.hidden_dim
 
-        # 按边类型创建 mask
         is_ctrl = edge_type == EDGE_TYPE_CONTROL
         is_true = edge_type == EDGE_TYPE_DATA_TRUE
         is_false = edge_type == EDGE_TYPE_DATA_FALSE
         is_other = ~(is_ctrl | is_true | is_false)
 
-        # 初始化各类消息聚合结果
         agg_ctrl = inputs.new_zeros(num_nodes, D)
         agg_true = inputs.new_zeros(num_nodes, D)
         agg_false = inputs.new_zeros(num_nodes, D)
@@ -459,30 +510,33 @@ class ControlGatedGNNLayer(MessagePassing):
         def expand_idx(mask: Tensor) -> Tensor:
             return index[mask].unsqueeze(-1).expand(-1, D)
 
-        # 分类聚合消息（scatter_add_ 对空 tensor 是安全 no-op，无需 .any() 保护）
         agg_ctrl.scatter_add_(0, expand_idx(is_ctrl), inputs[is_ctrl])
         agg_true.scatter_add_(0, expand_idx(is_true), inputs[is_true])
         agg_false.scatter_add_(0, expand_idx(is_false), inputs[is_false])
         agg_other.scatter_add_(0, expand_idx(is_other), inputs[is_other])
 
-        # 检测哪些节点有 CONTROL 边（MUX 节点）
         has_ctrl = inputs.new_zeros(num_nodes, dtype=torch.bool)
         has_ctrl.scatter_(0, index[is_ctrl], True)
 
-        # 生成门控权重 [α_true, α_false]
-        gate_logits = self.gate_mlp(agg_ctrl)  # [N, 2]
+        gate_logits = self.gate_mlp(agg_ctrl)
         gates = F.softmax(gate_logits, dim=-1)
-        alpha_true = gates[:, 0:1]  # [N, 1]
-        alpha_false = gates[:, 1:2]  # [N, 1]
-
-        # MUX 节点：门控加权聚合
+        alpha_true = gates[:, 0:1]
+        alpha_false = gates[:, 1:2]
         gated_out = alpha_true * agg_true + alpha_false * agg_false + agg_other
 
-        # 非 MUX 节点：标准 sum 聚合（所有消息直接相加）
-        standard_out = agg_ctrl + agg_true + agg_false + agg_other
+        # 类型感知软聚合（非 MUX 节点）
+        all_sum = agg_ctrl + agg_true + agg_false + agg_other
+        deg = inputs.new_zeros(num_nodes)
+        deg.scatter_add_(0, index, torch.ones(index.size(0), dtype=inputs.dtype, device=inputs.device))
+        all_mean = all_sum / deg.clamp(min=1).unsqueeze(-1)
+        all_max = inputs.new_full((num_nodes, D), 0.0)
+        all_max.scatter_reduce_(0, index.unsqueeze(-1).expand(-1, D), inputs, reduce="amax", include_self=True)
 
-        # 根据节点类型选择输出
-        return torch.where(has_ctrl.unsqueeze(-1), gated_out, standard_out)
+        agg_group = self.node_type_to_agg_group[node_type]
+        agg_w = F.softmax(self.agg_selector(agg_group), dim=-1)
+        type_out = agg_w[:, 0:1] * all_sum + agg_w[:, 1:2] * all_mean + agg_w[:, 2:3] * all_max
+
+        return torch.where(has_ctrl.unsqueeze(-1), gated_out, type_out)
 
     def edge_update(
         self,
@@ -504,18 +558,17 @@ class ControlGatedGNNLayer(MessagePassing):
         return self.edge_mlp(torch.cat([x_j, edge_attr], dim=-1))
 
 
-class FiLMDualEncoder(nn.Module):
+class PerceiverDualEncoder(nn.Module):
     """
-    双向 FiLM 注入式双图编码器
+    双向 Perceiver 注入式双图编码器
 
-    架构：每层 GNN 后，ASM 和 RTL 通过双向 FiLM 相互注入
+    架构：每层 GNN 后，ASM 和 RTL 通过双向 PerceiverCrossFusion 相互注入。
 
     特性：
-    - 双向注入：ASM ↔ RTL（测试激励与硬件相互影响）
-    - 计算高效：无需 dense batch 转换，直接广播
-    - 训练稳定：FiLM 小随机初始化，初始时接近恒等映射且梯度非零
-    - 仅调制节点特征，边特征保持不变
-    - 支持两种融合模式：FiLM 和 SSM-FiLM
+    - 节点级双向 cross-attn，细粒度 ASM ↔ RTL 对应
+    - K 个 latent token 作为信息瓶颈，O((N_rtl+N_asm)·K·D) 复杂度
+    - 双向调用使用快照，避免链式污染
+    - ASM 节点编码含可训练 Adapter
     """
 
     def __init__(
@@ -527,43 +580,35 @@ class FiLMDualEncoder(nn.Module):
         # RTL 特征配置
         num_cell_types: int = 74,
         num_edge_types: int = 7,
-        max_ports: int = 8,  # 端口位置索引最大值
+        max_ports: int = 8,
         # ASM 特征配置
         num_asm_node_types: int = 22,
         num_asm_edge_types: int = 10,
         asm_instruction_dim: int = 256,
-        # 融合配置
-        fusion_type: str = "film",  # "film" 或 "ssm_film"
-        ssm_d_state: int = 16,  # SSM 状态空间维度
-        ssm_pool_mode: str = "last",  # SSM 聚合模式: "last", "mean", "attention"
+        use_asm_adapter: bool = True,
+        # Perceiver 融合配置
+        perceiver_num_latents: int = 16,
+        perceiver_num_heads: int = 4,
     ):
         super().__init__()
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
-        self.fusion_type = fusion_type
 
-        # RTL 节点编码器
+        # RTL 编码器
         self.rtl_node_encoder = RTLNodeFeatureEncoder(num_cell_types, hidden_dim)
+        self.rtl_edge_encoder = RTLEdgeFeatureEncoder(num_edge_types, hidden_dim, max_ports)
 
-        # ASM 节点编码器
+        # ASM 编码器（含可训练 Adapter）
         self.asm_node_encoder = AsmNodeFeatureEncoder(
-            num_asm_node_types, asm_instruction_dim, hidden_dim
+            num_asm_node_types, asm_instruction_dim, hidden_dim, use_asm_adapter
         )
-
-        # RTL 边特征编码器（支持端口位置索引）
-        self.rtl_edge_encoder = RTLEdgeFeatureEncoder(
-            num_edge_types, hidden_dim, max_ports
-        )
-
-        # ASM 边特征编码器（仅类型嵌入）
         self.asm_edge_encoder = AsmEdgeFeatureEncoder(num_asm_edge_types, hidden_dim)
 
-        # GNN 层（独立，逐层增加 drop_path 概率）
+        # GNN 层（逐层增加 drop_path）
         drop_rates = [
-            dropout * i / (num_layers - 1) if num_layers > 1 else 0
+            dropout * i / (num_layers - 1) if num_layers > 1 else 0.0
             for i in range(num_layers)
         ]
-        # RTL 使用 ControlGatedGNNLayer（控制门控聚合，模拟 MUX 互斥选择）
         self.rtl_layers = nn.ModuleList(
             [ControlGatedGNNLayer(hidden_dim, drop_rates[i]) for i in range(num_layers)]
         )
@@ -571,33 +616,21 @@ class FiLMDualEncoder(nn.Module):
             [GNNLayer(hidden_dim, drop_rates[i]) for i in range(num_layers)]
         )
 
-        # 双向融合层（根据配置选择 FiLM 或 SSM-FiLM）
-        if fusion_type == "film":
-            self.film_asm2rtl = nn.ModuleList(
-                [FiLMInjection(hidden_dim) for _ in range(num_layers)]
-            )
-            self.film_rtl2asm = nn.ModuleList(
-                [FiLMInjection(hidden_dim) for _ in range(num_layers)]
-            )
-        elif fusion_type == "ssm_film":
-            self.film_asm2rtl = nn.ModuleList(
-                [
-                    SSMFiLMInjection(hidden_dim, ssm_d_state, ssm_pool_mode)
-                    for _ in range(num_layers)
-                ]
-            )
-            self.film_rtl2asm = nn.ModuleList(
-                [
-                    SSMFiLMInjection(hidden_dim, ssm_d_state, ssm_pool_mode)
-                    for _ in range(num_layers)
-                ]
-            )
-        else:
-            raise ValueError(
-                f"Unknown fusion_type: {fusion_type}. Use 'film' or 'ssm_film'."
-            )
+        # 双向 Perceiver 融合层
+        self.fusion_asm2rtl = nn.ModuleList(
+            [
+                PerceiverCrossFusion(hidden_dim, perceiver_num_latents, perceiver_num_heads, num_layers)
+                for _ in range(num_layers)
+            ]
+        )
+        self.fusion_rtl2asm = nn.ModuleList(
+            [
+                PerceiverCrossFusion(hidden_dim, perceiver_num_latents, perceiver_num_heads, num_layers)
+                for _ in range(num_layers)
+            ]
+        )
 
-        # 输出投影（独立）
+        # 输出投影
         self.rtl_output = nn.Linear(hidden_dim, output_dim)
         self.asm_output = nn.Linear(hidden_dim, output_dim)
 
@@ -608,6 +641,7 @@ class FiLMDualEncoder(nn.Module):
         rtl_node_cell_type: torch.Tensor,
         rtl_node_width: torch.Tensor,
         rtl_edge_type: torch.Tensor,
+        rtl_node_type: torch.Tensor,
         rtl_batch: Optional[torch.Tensor] = None,
         rtl_edge_width: Optional[torch.Tensor] = None,
         rtl_edge_source_port_idx: Optional[torch.Tensor] = None,
@@ -620,85 +654,42 @@ class FiLMDualEncoder(nn.Module):
         asm_batch: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        前向传播
-
-        Args:
-            rtl_edge_index: [2, E1] RTL 边索引
-            rtl_node_cell_type: [N1] RTL 节点 cell_type 索引
-            rtl_node_width: [N1] RTL 节点 width
-            rtl_edge_type: [E1] RTL 边类型
-            rtl_batch: [N1] RTL batch 索引
-            rtl_edge_width: [E1] RTL 边 width
-            rtl_edge_source_port_idx: [E1] RTL 边源端口位置索引
-            rtl_edge_target_port_idx: [E1] RTL 边目标端口位置索引
-            asm_edge_index: [2, E2] ASM 边索引
-            asm_node_type: [N2] ASM 节点类型索引
-            asm_instruction_encoding: [N2, D_instr] ASM 指令编码
-            asm_edge_type: [E2] ASM 边类型
-            asm_batch: [N2] ASM batch 索引
-
         Returns:
-            rtl_node: [N1, D] RTL 节点嵌入
-            rtl_edge_attr: [E1, D] RTL 边嵌入
-            rtl_graph: [B, D] RTL 图级嵌入
-            asm_node: [N2, D] ASM 节点嵌入
-            asm_graph: [B, D] ASM 图级嵌入
+            rtl_node:     [N1, D] RTL 节点嵌入
+            rtl_edge_attr:[E1, D] RTL 边嵌入
+            rtl_graph:    [B, D]  RTL 图级嵌入
+            asm_node:     [N2, D] ASM 节点嵌入
+            asm_graph:    [B, D]  ASM 图级嵌入
         """
-        # 处理单图情况（无 batch 索引）
         if rtl_batch is None:
             rtl_batch = torch.zeros(
-                rtl_node_cell_type.size(0),
-                dtype=torch.long,
-                device=rtl_node_cell_type.device,
+                rtl_node_cell_type.size(0), dtype=torch.long, device=rtl_node_cell_type.device
             )
         if asm_batch is None:
             asm_batch = torch.zeros(
                 asm_node_type.size(0), dtype=torch.long, device=asm_node_type.device
             )
 
-        # 编码节点特征
         rtl_h = self.rtl_node_encoder(rtl_node_cell_type, rtl_node_width)
         asm_h = self.asm_node_encoder(asm_node_type, asm_instruction_encoding)
 
-        # 边特征编码（包含端口位置索引）
         rtl_edge_attr = self.rtl_edge_encoder(
-            rtl_edge_type,
-            rtl_edge_width,
-            rtl_edge_source_port_idx,
-            rtl_edge_target_port_idx,
+            rtl_edge_type, rtl_edge_width, rtl_edge_source_port_idx, rtl_edge_target_port_idx
         )
         asm_edge_attr = self.asm_edge_encoder(asm_edge_type)
 
         for i in range(self.num_layers):
             # 1. 并行 GNN 传播
-            asm_h, asm_edge_attr = self.asm_layers[i](
-                asm_h, asm_edge_index, asm_edge_attr
-            )
-            rtl_h, rtl_edge_attr = self.rtl_layers[i](
-                rtl_h, rtl_edge_index, rtl_edge_attr, rtl_edge_type
-            )
+            asm_h, asm_edge_attr = self.asm_layers[i](asm_h, asm_edge_index, asm_edge_attr)
+            rtl_h, rtl_edge_attr = self.rtl_layers[i](rtl_h, rtl_edge_index, rtl_edge_attr, rtl_edge_type, rtl_node_type)
 
-            # 2. 双向融合注入（仅节点特征）
-            if self.fusion_type == "film":
-                # FiLM: 使用全局池化的上下文
-                asm_context = global_mean_pool(asm_h, asm_batch)  # [B, D]
-                rtl_context = global_mean_pool(rtl_h, rtl_batch)  # [B, D]
-                rtl_h = self.film_asm2rtl[i](rtl_h, asm_context, rtl_batch)  # ASM → RTL
-                asm_h = self.film_rtl2asm[i](asm_h, rtl_context, asm_batch)  # RTL → ASM
-            else:
-                # SSM-FiLM: 传递源节点特征，内部进行 SSM 处理
-                rtl_h = self.film_asm2rtl[i](
-                    rtl_h, asm_h, rtl_batch, asm_batch
-                )  # ASM → RTL
-                asm_h = self.film_rtl2asm[i](
-                    asm_h, rtl_h, asm_batch, rtl_batch
-                )  # RTL → ASM
+            # 2. 双向 Perceiver 注入：快照避免链式污染
+            rtl_in, asm_in = rtl_h, asm_h
+            rtl_h = self.fusion_asm2rtl[i](rtl_in, asm_in, rtl_batch, asm_batch)  # ASM → RTL
+            asm_h = self.fusion_rtl2asm[i](asm_in, rtl_in, asm_batch, rtl_batch)  # RTL → ASM
 
-        # 输出投影
         rtl_node = self.rtl_output(rtl_h)
         asm_node = self.asm_output(asm_h)
-
-        # 图级池化
         rtl_graph = global_mean_pool(rtl_node, rtl_batch)
         asm_graph = global_mean_pool(asm_node, asm_batch)
 
