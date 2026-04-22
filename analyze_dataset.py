@@ -2,14 +2,14 @@
 """
 数据集统计分析脚本
 
-分析 simulation_results 下测试用例的 RTL 标注 JSON 和 ASM CDFG JSON，
-输出分布特征、覆盖率标签统计、图结构特征和数据质量检查。
+分析 coverage-report-extractor 生成的数据集，读取 dataset_index.jsonlines
+并统计 RTL 标注 JSON 和 ASM CDFG JSON 的分布特征。
 
 使用示例：
-    uv run python analyze_dataset.py --sim-dir designs/cv32e40p/simulation_results_2
-    uv run python analyze_dataset.py --sim-dir designs/cv32e40p/simulation_results_2 --sample 500
-    uv run python analyze_dataset.py --sim-dir designs/cv32e40p/simulation_results_2 --plot --output-dir analysis_output
-    uv run python analyze_dataset.py --sim-dir designs/cv32e40p/simulation_results_2 --json c
+    uv run python analyze_dataset.py --dataset-dir /path/to/dataset
+    uv run python analyze_dataset.py --dataset-dir /path/to/dataset --sample 500
+    uv run python analyze_dataset.py --dataset-dir /path/to/dataset --plot --output-dir analysis_output
+    uv run python analyze_dataset.py --dataset-dir /path/to/dataset --json stats.json
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ def extract_rtl_stats(json_path: str, test_case: str) -> RTLStats:
         return stats
 
     stats.module_name = data.get("module_name", "")
-    stats.branch_coverage = data.get("branch_coverage", -1.0)
+    stats.branch_coverage = data.get("branch", data.get("branch_coverage", -1.0))
 
     nodes = data.get("nodes", [])
     edges = data.get("edges", [])
@@ -201,23 +201,16 @@ def extract_asm_stats(json_path: str, test_case: str) -> ASMStats:
     return stats
 
 
-def _process_test_case(
-    args: tuple[str, str],
+def _process_index_entry(
+    args: tuple[str, str, str],
 ) -> tuple[list[RTLStats], ASMStats | None]:
-    """处理单个测试用例，返回 (rtl_stats_list, asm_stats)"""
-    sim_dir, tc = args
-    tc_dir = os.path.join(sim_dir, tc)
-    annotated_dir = os.path.join(tc_dir, "annotated")
+    """处理单条索引记录，返回 (rtl_stats_list, asm_stats)"""
+    rtl_path, asm_path, tc = args
 
-    # RTL 文件
     rtl_list: list[RTLStats] = []
-    if os.path.isdir(annotated_dir):
-        for fn in os.listdir(annotated_dir):
-            if fn.endswith(".json"):
-                rtl_list.append(extract_rtl_stats(os.path.join(annotated_dir, fn), tc))
+    if os.path.isfile(rtl_path):
+        rtl_list.append(extract_rtl_stats(rtl_path, tc))
 
-    # ASM 文件
-    asm_path = os.path.join(tc_dir, f"{tc}.json")
     asm_stats = None
     if os.path.isfile(asm_path):
         asm_stats = extract_asm_stats(asm_path, tc)
@@ -230,24 +223,45 @@ def _process_test_case(
 # ---------------------------------------------------------------------------
 
 
-def discover_test_cases(sim_dir: str) -> list[str]:
-    """发现 simulation_results 下所有测试用例目录"""
-    entries = sorted(os.listdir(sim_dir))
-    return [e for e in entries if os.path.isdir(os.path.join(sim_dir, e))]
+def read_dataset_index(dataset_dir: str) -> list[tuple[str, str, str]]:
+    """读取 dataset_index.jsonlines，返回 [(rtl_abs, asm_abs, test_case), ...]"""
+    index_file = os.path.join(dataset_dir, "dataset_index.jsonlines")
+    results: list[tuple[str, str, str]] = []
+    with open(index_file, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            rtl = os.path.join(dataset_dir, entry["rtl"])
+            asm = os.path.join(dataset_dir, entry["asm"])
+            # 从路径提取测试用例名（父目录名）
+            tc = os.path.basename(os.path.dirname(os.path.dirname(rtl)))
+            results.append((rtl, asm, tc))
+    return results
+
+
+def discover_test_cases(dataset_dir: str) -> list[str]:
+    """从 dataset_index.jsonlines 提取唯一测试用例名"""
+    entries = read_dataset_index(dataset_dir)
+    seen: dict[str, None] = {}
+    for _, _, tc in entries:
+        seen[tc] = None
+    return list(seen.keys())
 
 
 def collect_all_stats(
-    sim_dir: str, sample_n: int | None = None, workers: int | None = None
+    dataset_dir: str, sample_n: int | None = None, workers: int | None = None
 ) -> tuple[list[RTLStats], list[ASMStats]]:
-    """并行收集所有测试用例的统计信息"""
-    test_cases = discover_test_cases(sim_dir)
-    total = len(test_cases)
-    console.print(f"发现 [bold]{total}[/bold] 个测试用例")
+    """并行收集所有索引条目的统计信息"""
+    entries = read_dataset_index(dataset_dir)
+    total = len(entries)
+    console.print(f"读取索引: [bold]{total}[/bold] 条记录")
 
     if sample_n and sample_n < total:
         random.seed(42)
-        test_cases = random.sample(test_cases, sample_n)
-        console.print(f"随机采样 [bold]{sample_n}[/bold] 个")
+        entries = random.sample(entries, sample_n)
+        console.print(f"随机采样 [bold]{sample_n}[/bold] 条")
 
     if workers is None:
         workers = min(os.cpu_count() or 4, 32)
@@ -255,7 +269,7 @@ def collect_all_stats(
     all_rtl: list[RTLStats] = []
     all_asm: list[ASMStats] = []
 
-    task_args = [(sim_dir, tc) for tc in test_cases]
+    task_args = [(rtl, asm, tc) for rtl, asm, tc in entries]
 
     with Progress(
         SpinnerColumn(),
@@ -268,7 +282,7 @@ def collect_all_stats(
         task = progress.add_task("收集统计信息", total=len(task_args))
 
         with ProcessPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_process_test_case, arg): arg for arg in task_args}
+            futures = {pool.submit(_process_index_entry, arg): arg for arg in task_args}
             for future in as_completed(futures):
                 rtl_list, asm_stats = future.result()
                 all_rtl.extend(rtl_list)
@@ -850,14 +864,14 @@ def print_structure_stats(
 def print_quality_check(
     rtl_stats: list[RTLStats],
     asm_stats: list[ASMStats],
-    sim_dir: str,
+    dataset_dir: str,
 ) -> list[str]:
     """数据质量检查"""
     lines: list[str] = []
     console.rule("[bold]6. 数据质量检查[/bold]")
     lines.append("## 6. 数据质量检查\n")
 
-    all_tc = set(discover_test_cases(sim_dir))
+    all_tc = set(discover_test_cases(dataset_dir))
     rtl_tc = {r.test_case for r in rtl_stats if not r.error}
     asm_tc = {a.test_case for a in asm_stats if not a.error}
 
@@ -1683,9 +1697,9 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--sim-dir",
+        "--dataset-dir",
         required=True,
-        help="simulation_results 目录路径",
+        help="coverage-report-extractor 输出目录（含 dataset_index.jsonlines）",
     )
     parser.add_argument(
         "--sample",
@@ -1743,19 +1757,19 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    sim_dir = args.sim_dir
+    dataset_dir = args.dataset_dir
 
-    if not os.path.isdir(sim_dir):
-        console.print(f"[red]目录不存在: {sim_dir}[/red]")
+    if not os.path.isdir(dataset_dir):
+        console.print(f"[red]目录不存在: {dataset_dir}[/red]")
         sys.exit(1)
 
-    total_tc = len(discover_test_cases(sim_dir))
-    console.print(f"[bold]数据集统计分析[/bold] - {sim_dir}")
+    total_tc = len(discover_test_cases(dataset_dir))
+    console.print(f"[bold]数据集统计分析[/bold] - {dataset_dir}")
     console.print()
 
     # 收集统计
     rtl_stats, asm_stats = collect_all_stats(
-        sim_dir, sample_n=args.sample, workers=args.workers
+        dataset_dir, sample_n=args.sample, workers=args.workers
     )
     console.print(f"收集完成: RTL={len(rtl_stats)} 条, ASM={len(asm_stats)} 条\n")
 
@@ -1768,7 +1782,7 @@ def main() -> None:
     report_lines.extend(print_asm_stats(asm_stats))
     report_lines.extend(print_label_stats(rtl_stats))
     report_lines.extend(print_structure_stats(rtl_stats, asm_stats))
-    report_lines.extend(print_quality_check(rtl_stats, asm_stats, sim_dir))
+    report_lines.extend(print_quality_check(rtl_stats, asm_stats, dataset_dir))
 
     # 逐模块详细分析
     if args.per_module:

@@ -42,9 +42,17 @@ Issues = "https://github.com/Duducoco/RTLMap/issues"
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
 
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
 [dependency-groups]
 dev = [
     "ruff>=0.14.14",
 ]
-[tool.uv]
-find-links = ["https://mirrors.aliyun.com/pytorch-wheels/cu124"]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu124" }]
+torchvision = [{ index = "pytorch-cu124" }]
+torchaudio = [{ index = "pytorch-cu124" }]

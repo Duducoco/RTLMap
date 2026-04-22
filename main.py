@@ -3,26 +3,23 @@
 
 用法示例:
     # 基础训练
-    uv run python main.py --data-root ./data
-
-    # 指定模块和仿真目录
-    uv run python main.py --data-root ./data \
-        --sim-results-dirs ./sim_a ./sim_b \
-        --module-names alu decoder
+    uv run python main.py --dataset-dir /path/to/dataset --data-root ./data
 
     # 启用 CodeBERT 文本编码
-    uv run python main.py --data-root ./data --use-text-encoder
+    uv run python main.py --dataset-dir /path/to/dataset --data-root ./data --use-text-encoder
 
     # 自定义超参数
-    uv run python main.py --data-root ./data \
-        --max-epochs 200 --lr 3e-4 --batch-size 16 \
+    uv run python main.py --dataset-dir /path/to/dataset --data-root ./data \\
+        --max-epochs 200 --lr 3e-4 --batch-size 16 \\
         --fusion-type ssm_film --precision bf16-mixed
 
     # 从检查点恢复训练
-    uv run python main.py --data-root ./data --ckpt-path checkpoints/last.ckpt
+    uv run python main.py --dataset-dir /path/to/dataset --data-root ./data \\
+        --ckpt-path checkpoints/last.ckpt
 
     # 仅测试
-    uv run python main.py --data-root ./data --test-only --ckpt-path checkpoints/best.ckpt
+    uv run python main.py --dataset-dir /path/to/dataset --data-root ./data \\
+        --test-only --ckpt-path checkpoints/best.ckpt
 """
 
 import argparse
@@ -52,19 +49,13 @@ def parse_args() -> argparse.Namespace:
 
     # ── 数据 ──────────────────────────────────────────────
     data = p.add_argument_group("数据")
-    data.add_argument("--data-root", type=str, required=True, help="数据集根目录")
     data.add_argument(
-        "--sim-results-dirs",
-        nargs="*",
-        default=None,
-        help="simulation_results 目录路径列表",
+        "--dataset-dir",
+        type=str,
+        required=True,
+        help="coverage-report-extractor 输出目录（含 dataset_index.jsonlines）",
     )
-    data.add_argument(
-        "--module-names",
-        nargs="*",
-        default=None,
-        help="要标注的模块名列表（不含 .json 后缀）",
-    )
+    data.add_argument("--data-root", type=str, required=True, help="数据集缓存根目录")
 
     # ── 模型架构 ──────────────────────────────────────────
     model = p.add_argument_group("模型架构")
@@ -156,11 +147,6 @@ def parse_args() -> argparse.Namespace:
     mode.add_argument("--ckpt-path", default=None, help="检查点路径（恢复训练或测试）")
     mode.add_argument("--test-only", action="store_true", help="仅运行测试")
     mode.add_argument(
-        "--preprocess-only",
-        action="store_true",
-        help="仅执行阶段 1 预处理（生成中间 JSON），跳过 GPU 编码和训练",
-    )
-    mode.add_argument(
         "--fast-dev-run", action="store_true", help="快速调试（单 batch）"
     )
     mode.add_argument("--seed", type=int, default=None, help="全局随机种子")
@@ -169,7 +155,6 @@ def parse_args() -> argparse.Namespace:
 
 
 def build_model_config(args: argparse.Namespace) -> ModelConfig:
-    """从 CLI 参数构建 ModelConfig"""
     return ModelConfig(
         hidden_dim=args.hidden_dim,
         num_gnn_layers=args.num_gnn_layers,
@@ -182,7 +167,6 @@ def build_model_config(args: argparse.Namespace) -> ModelConfig:
 
 
 def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
-    """从 CLI 参数构建 TrainerConfig"""
     return TrainerConfig(
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
@@ -208,7 +192,6 @@ def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
 
 
 def build_text_encoder_config(args: argparse.Namespace):
-    """启用文本编码器时构建 TextEncoderConfig，否则返回 None"""
     if not args.use_text_encoder:
         return None
 
@@ -226,21 +209,18 @@ def build_text_encoder_config(args: argparse.Namespace):
 def main() -> None:
     args = parse_args()
 
-    # 日志配置
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # 全局随机种子
     if args.seed is not None:
         import lightning as L
 
         L.seed_everything(args.seed, workers=True)
         logger.info("全局随机种子: %d", args.seed)
 
-    # 构建配置
     model_config = build_model_config(args)
     trainer_config = build_trainer_config(args)
     text_encoder_config = build_text_encoder_config(args)
@@ -259,21 +239,7 @@ def main() -> None:
         trainer_config.batch_size,
     )
 
-    if args.preprocess_only:
-        # 仅预处理模式：执行阶段 1 生成中间 JSON 文件
-        logger.info("预处理模式：仅执行阶段 1（生成中间 JSON）")
-        datamodule = DualGraphDataModule(
-            root=args.data_root,
-            sim_results_dirs=args.sim_results_dirs,
-            module_names=args.module_names,
-            preprocess_only=True,
-            batch_size=trainer_config.batch_size,
-            num_workers=trainer_config.num_workers,
-        )
-        datamodule.setup("fit")
-        logger.info("预处理完成")
-    elif args.test_only:
-        # 仅测试模式
+    if args.test_only:
         if args.ckpt_path is None:
             logger.error("--test-only 需要指定 --ckpt-path")
             sys.exit(1)
@@ -284,11 +250,12 @@ def main() -> None:
         )
         datamodule = DualGraphDataModule(
             root=args.data_root,
-            sim_results_dirs=args.sim_results_dirs,
-            module_names=args.module_names,
+            dataset_dir=args.dataset_dir,
             text_encoder_config=text_encoder_config,
             batch_size=trainer_config.batch_size,
             num_workers=trainer_config.num_workers,
+            use_bucketing=trainer_config.use_bucketing,
+            token_budget=trainer_config.token_budget,
         )
         lt = LightningTrainer(
             config=trainer_config,
@@ -298,13 +265,11 @@ def main() -> None:
         )
         lt.test(module, datamodule)
     else:
-        # 训练模式（可选从检查点恢复）
         module, trainer = train_model(
             model_config=model_config,
             trainer_config=trainer_config,
             data_root=args.data_root,
-            sim_results_dirs=args.sim_results_dirs,
-            module_names=args.module_names,
+            dataset_dir=args.dataset_dir,
             text_encoder_config=text_encoder_config,
             has_validation=True,
             has_test=False,
