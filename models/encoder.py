@@ -20,6 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.nn import MessagePassing, global_mean_pool
+from torch_geometric.utils import softmax as pyg_softmax
 from typing import Optional, Tuple
 from .interaction import PerceiverCrossFusion
 
@@ -33,7 +34,20 @@ EDGE_TYPE_CLOCK = 4
 EDGE_TYPE_RESET = 5
 EDGE_TYPE_ENABLE = 6
 
-NUM_NODE_TYPES = 12
+# NodeType 索引常量（0-indexed，对应 cdfg_rtl.data_types.NodeType 枚举）
+NODE_TYPE_INPUT = 0
+NODE_TYPE_OUTPUT = 1
+NODE_TYPE_CONSTANT = 2
+NODE_TYPE_COMBINATIONAL = 3
+NODE_TYPE_SEQUENTIAL = 4
+NODE_TYPE_MEMORY = 5
+NODE_TYPE_MUX = 6
+NODE_TYPE_ARITHMETIC = 7
+NODE_TYPE_LOGIC = 8
+NODE_TYPE_COMPARE = 9
+NODE_TYPE_SHIFT = 10
+NODE_TYPE_UNKNOWN = 11
+
 
 # NodeType 0-indexed (0-11) → agg_group (0-9)
 # INPUT(0)/OUTPUT(1)/CONSTANT(2) 共享 group 0
@@ -145,7 +159,9 @@ class AsmNodeFeatureEncoder(nn.Module):
         """
         super().__init__()
         self.node_type_embedding = nn.Embedding(num_node_types, hidden_dim)
-        self.adapter = InstructionAdapter(instruction_dim) if use_adapter else nn.Identity()
+        self.adapter = (
+            InstructionAdapter(instruction_dim) if use_adapter else nn.Identity()
+        )
         self.instruction_proj = nn.Linear(instruction_dim, hidden_dim)
         self.norm = nn.LayerNorm(hidden_dim)
 
@@ -405,6 +421,31 @@ class ControlGatedGNNLayer(MessagePassing):
         self.node_norm = nn.LayerNorm(hidden_dim)
         self.edge_norm = nn.LayerNorm(hidden_dim)
 
+        # SEQUENTIAL 嵌套门控残差：[0]=reset 门, [1]=enable 门
+        self.seq_gates = nn.ModuleList(
+            [
+                nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.Sigmoid())
+                for _ in range(2)
+            ]
+        )
+
+        # ARITH/CMP/SHIFT 共享端口对 MLP，pair_type_emb 区分三类语义
+        # idx: 0→ARITHMETIC, 1→COMPARE, 2→SHIFT
+        self.pair_type_emb = nn.Embedding(3, hidden_dim)
+        self.shared_pair_mlp = nn.Sequential(
+            nn.Linear(hidden_dim * 3, hidden_dim * 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim * 2, hidden_dim),
+        )
+
+        # MEMORY 端口角色缩放：每个端口位置对应一个 D 维缩放向量，初始化为全 1
+        self.mem_port_scale_emb = nn.Embedding(8, hidden_dim)
+        nn.init.ones_(self.mem_port_scale_emb.weight)
+
+        # GAT 风格注意力：per-edge 标量权重，让 edge_attr 内容影响默认聚合路径的贡献比例
+        # 输入 cat([x_j, edge_attr]) [2D] → 标量 logit，per-node softmax 后用于加权求和
+        self.attn_proj = nn.Linear(hidden_dim * 2, 1)
+
     def forward(
         self,
         x: Tensor,
@@ -412,6 +453,7 @@ class ControlGatedGNNLayer(MessagePassing):
         edge_attr: Tensor,
         edge_type: Tensor,
         node_type: Tensor,
+        target_port_idx: Optional[Tensor] = None,
     ) -> Tuple[Tensor, Tensor]:
         """
         前向传播
@@ -422,18 +464,30 @@ class ControlGatedGNNLayer(MessagePassing):
             edge_attr: [E, D] 边特征（已通过 RTLEdgeFeatureEncoder 编码）
             edge_type: [E] EdgeType 索引（用于控制门控聚合）
             node_type: [N] NodeType 0-indexed（用于类型感知聚合）
+            target_port_idx: [E] 目标端口位置索引（可选，用于 ARITH/CMP/SHIFT/MEMORY）
 
         Returns:
             x: [N, D] 更新后的节点特征
             edge_attr: [E, D] 更新后的边特征
         """
-        # 1. 消息传递 + 聚合（通过 propagate 调用 message 和 aggregate）
+        # 1. 计算 per-edge GAT 注意力权重（在 propagate 前用当前 x 和 edge_attr 计算）
+        src = edge_index[0]
+        fused_src_edge = torch.cat(
+            [x[src], edge_attr], dim=-1
+        )  # [E, 2D]，reuse in message()
+        attn_logit = self.attn_proj(fused_src_edge)  # [E, 1]
+        attn_w = pyg_softmax(attn_logit, edge_index[1], num_nodes=x.size(0))  # [E, 1]
+
+        # 2. 消息传递 + 聚合（通过 propagate 调用 message 和 aggregate）
         node_out = self.propagate(
             edge_index,
             x=x,
             edge_attr=edge_attr,
             edge_type=edge_type,
             node_type=node_type,
+            target_port_idx=target_port_idx,
+            attn_w=attn_w,
+            fused_src_edge=fused_src_edge,
             size=None,
         )
 
@@ -452,30 +506,14 @@ class ControlGatedGNNLayer(MessagePassing):
     def message(
         self,
         x_j: Tensor,
-        edge_attr: Tensor,
         edge_type: Tensor,
+        fused_src_edge: Tensor,
     ) -> Tensor:
-        """
-        计算边消息 φ(h_j, e_{j→i})
-
-        PyG 自动将 x 映射为 x_j（源节点特征，因为 flow='source_to_target'）
-
-        Args:
-            x_j: [E, D] 源节点特征（PyG 自动索引）
-            edge_attr: [E, D] 边特征
-            edge_type: [E] 边类型索引
-
-        Returns:
-            messages: [E, D] 边消息
-        """
+        """计算边消息 φ(h_j, e_{j→i})"""
         is_ctrl = edge_type == EDGE_TYPE_CONTROL
-        is_data = ~is_ctrl
-
         # 无条件计算所有边消息，用 torch.where 按类型选择（避免 .any() GPU-CPU 同步）
-        ctrl_input = torch.cat([x_j, edge_attr], dim=-1)
-        ctrl_msg = self.ctrl_message_mlp(ctrl_input).to(x_j.dtype)
-        data_msg = self.data_message_mlp(ctrl_input).to(x_j.dtype)
-
+        ctrl_msg = self.ctrl_message_mlp(fused_src_edge).to(x_j.dtype)
+        data_msg = self.data_message_mlp(fused_src_edge).to(x_j.dtype)
         return torch.where(is_ctrl.unsqueeze(-1), ctrl_msg, data_msg)
 
     def aggregate(
@@ -484,37 +522,52 @@ class ControlGatedGNNLayer(MessagePassing):
         index: Tensor,
         edge_type: Tensor,
         node_type: Tensor,
+        target_port_idx: Optional[Tensor] = None,
+        attn_w: Optional[Tensor] = None,
         ptr: Optional[Tensor] = None,
         dim_size: Optional[int] = None,
     ) -> Tensor:
         """
-        类型感知聚合
+        类型感知差异化聚合
 
-        MUX 节点: m_gated = α_true · m_true + α_false · m_false + m_other
-        其他节点: 软选择 sum/mean/max，权重由 agg_selector[node_type_group] 决定
-        INPUT/OUTPUT/CONSTANT 共享同一组权重（group 0）
+        - MUX(6):        控制门控，α_true·m_true + α_false·m_false + m_other
+        - SEQUENTIAL(4): 嵌套门控残差，模拟 reset > enable > data 优先级
+        - MEMORY(5):     端口角色缩放，scaled_msg = port_scale_emb(port_idx) * msg
+        - ARITHMETIC(7)/COMPARE(9)/SHIFT(10): 端口对 MLP，保留 portA/portB 顺序
+        - 其他:          可学习 sum/mean/max 软混合（agg_selector）
         """
         num_nodes = dim_size if dim_size is not None else int(index.max()) + 1
         D = self.hidden_dim
+        full_idx = index.unsqueeze(-1).expand(-1, D)
 
         is_ctrl = edge_type == EDGE_TYPE_CONTROL
         is_true = edge_type == EDGE_TYPE_DATA_TRUE
         is_false = edge_type == EDGE_TYPE_DATA_FALSE
-        is_other = ~(is_ctrl | is_true | is_false)
-
-        agg_ctrl = inputs.new_zeros(num_nodes, D)
-        agg_true = inputs.new_zeros(num_nodes, D)
-        agg_false = inputs.new_zeros(num_nodes, D)
-        agg_other = inputs.new_zeros(num_nodes, D)
+        is_clock = edge_type == EDGE_TYPE_CLOCK
+        is_reset = edge_type == EDGE_TYPE_RESET
+        is_enable = edge_type == EDGE_TYPE_ENABLE
+        is_data = edge_type == EDGE_TYPE_DATA
 
         def expand_idx(mask: Tensor) -> Tensor:
             return index[mask].unsqueeze(-1).expand(-1, D)
 
+        agg_ctrl = inputs.new_zeros(num_nodes, D)
+        agg_true = inputs.new_zeros(num_nodes, D)
+        agg_false = inputs.new_zeros(num_nodes, D)
+        agg_clock = inputs.new_zeros(num_nodes, D)
+        agg_reset = inputs.new_zeros(num_nodes, D)
+        agg_enable = inputs.new_zeros(num_nodes, D)
+        agg_data = inputs.new_zeros(num_nodes, D)
+
         agg_ctrl.scatter_add_(0, expand_idx(is_ctrl), inputs[is_ctrl])
         agg_true.scatter_add_(0, expand_idx(is_true), inputs[is_true])
         agg_false.scatter_add_(0, expand_idx(is_false), inputs[is_false])
-        agg_other.scatter_add_(0, expand_idx(is_other), inputs[is_other])
+        agg_clock.scatter_add_(0, expand_idx(is_clock), inputs[is_clock])
+        agg_reset.scatter_add_(0, expand_idx(is_reset), inputs[is_reset])
+        agg_enable.scatter_add_(0, expand_idx(is_enable), inputs[is_enable])
+        agg_data.scatter_add_(0, expand_idx(is_data), inputs[is_data])
 
+        # MUX 门控聚合
         has_ctrl = inputs.new_zeros(num_nodes, dtype=torch.bool)
         has_ctrl.scatter_(0, index[is_ctrl], True)
 
@@ -522,21 +575,102 @@ class ControlGatedGNNLayer(MessagePassing):
         gates = F.softmax(gate_logits, dim=-1)
         alpha_true = gates[:, 0:1]
         alpha_false = gates[:, 1:2]
-        gated_out = alpha_true * agg_true + alpha_false * agg_false + agg_other
+        # clock/reset/enable/data 不参与互斥选择，直接加和旁路门控
+        gated_out = (
+            alpha_true * agg_true
+            + alpha_false * agg_false
+            + (agg_data + agg_clock + agg_reset + agg_enable)
+        )
 
-        # 类型感知软聚合（非 MUX 节点）
-        all_sum = agg_ctrl + agg_true + agg_false + agg_other
+        # SEQUENTIAL: reset 同步覆盖 enable，enable 覆盖 data；乘法门保证高优先级激活时低优先级被完全屏蔽
+        g_r = self.seq_gates[0](agg_reset)
+        g_e = self.seq_gates[1](agg_enable)
+        seq_out = g_r * agg_reset + (1 - g_r) * (g_e * agg_data + (1 - g_e) * agg_clock)
+
+        # MEMORY 端口角色缩放（仅 DATA/ENABLE 边参与，排除 CONTROL/CLOCK 等干扰）
+        if target_port_idx is not None:
+            is_mem_edge = is_data | is_enable
+            port_scale = self.mem_port_scale_emb(target_port_idx[is_mem_edge])
+            scaled = inputs[is_mem_edge] * port_scale
+            mem_out = inputs.new_zeros(num_nodes, D)
+            mem_out.scatter_add_(0, expand_idx(is_mem_edge), scaled)
+        else:
+            mem_out = agg_data + agg_enable
+
+        # ARITH/CMP/SHIFT 端口对分组
+        if target_port_idx is not None:
+            is_portA = target_port_idx == 0
+            is_portB = target_port_idx == 1
+            agg_portA = inputs.new_zeros(num_nodes, D)
+            agg_portB = inputs.new_zeros(num_nodes, D)
+            agg_portA.scatter_add_(0, expand_idx(is_portA), inputs[is_portA])
+            agg_portB.scatter_add_(0, expand_idx(is_portB), inputs[is_portB])
+        else:
+            agg_portA = agg_data
+            agg_portB = inputs.new_zeros(num_nodes, D)
+
+        # 三路合一，减少 3 次独立 MLP forward 开销：stack [3N, 3D]，单次 forward，chunk 回各路
+        portA_tiled = agg_portA.repeat(3, 1)
+        portB_tiled = agg_portB.repeat(3, 1)
+        type_tiled = self.pair_type_emb.weight.repeat_interleave(num_nodes, dim=0)
+        pair_out = self.shared_pair_mlp(
+            torch.cat([portA_tiled, portB_tiled, type_tiled], dim=-1)
+        )
+        arith_out, cmp_out, shift_out = pair_out.chunk(3, dim=0)
+
+        # 默认软混合（LOGIC/COMB/其他）
+        # all_sum 用于 all_mean/all_max 的分母计算；attn_sum 替代 all_sum 作为加权聚合
+        all_sum = (
+            agg_ctrl
+            + agg_true
+            + agg_false
+            + agg_data
+            + agg_clock
+            + agg_reset
+            + agg_enable
+        )
         deg = inputs.new_zeros(num_nodes)
-        deg.scatter_add_(0, index, torch.ones(index.size(0), dtype=inputs.dtype, device=inputs.device))
+        deg.scatter_add_(0, index, torch.ones_like(index, dtype=inputs.dtype))
         all_mean = all_sum / deg.clamp(min=1).unsqueeze(-1)
         all_max = inputs.new_full((num_nodes, D), 0.0)
-        all_max.scatter_reduce_(0, index.unsqueeze(-1).expand(-1, D), inputs, reduce="amax", include_self=True)
+        all_max.scatter_reduce_(
+            0,
+            full_idx,
+            inputs,
+            reduce="amax",
+            include_self=True,
+        )
+
+        attn_sum = inputs.new_zeros(num_nodes, D)
+        attn_sum.scatter_add_(0, full_idx, inputs * attn_w)
 
         agg_group = self.node_type_to_agg_group[node_type]
         agg_w = F.softmax(self.agg_selector(agg_group), dim=-1)
-        type_out = agg_w[:, 0:1] * all_sum + agg_w[:, 1:2] * all_mean + agg_w[:, 2:3] * all_max
+        type_out = (
+            agg_w[:, 0:1] * attn_sum
+            + agg_w[:, 1:2] * all_mean
+            + agg_w[:, 2:3] * all_max
+        )
 
-        return torch.where(has_ctrl.unsqueeze(-1), gated_out, type_out)
+        # 路由链（内到外，MUX 最高优先级）
+        result = type_out
+        result = torch.where(
+            (node_type == NODE_TYPE_SHIFT).unsqueeze(-1), shift_out, result
+        )
+        result = torch.where(
+            (node_type == NODE_TYPE_COMPARE).unsqueeze(-1), cmp_out, result
+        )
+        result = torch.where(
+            (node_type == NODE_TYPE_ARITHMETIC).unsqueeze(-1), arith_out, result
+        )
+        result = torch.where(
+            (node_type == NODE_TYPE_MEMORY).unsqueeze(-1), mem_out, result
+        )
+        result = torch.where(
+            (node_type == NODE_TYPE_SEQUENTIAL).unsqueeze(-1), seq_out, result
+        )
+        result = torch.where(has_ctrl.unsqueeze(-1), gated_out, result)  # MUX
+        return result
 
     def edge_update(
         self,
@@ -596,7 +730,9 @@ class PerceiverDualEncoder(nn.Module):
 
         # RTL 编码器
         self.rtl_node_encoder = RTLNodeFeatureEncoder(num_cell_types, hidden_dim)
-        self.rtl_edge_encoder = RTLEdgeFeatureEncoder(num_edge_types, hidden_dim, max_ports)
+        self.rtl_edge_encoder = RTLEdgeFeatureEncoder(
+            num_edge_types, hidden_dim, max_ports
+        )
 
         # ASM 编码器（含可训练 Adapter）
         self.asm_node_encoder = AsmNodeFeatureEncoder(
@@ -619,13 +755,17 @@ class PerceiverDualEncoder(nn.Module):
         # 双向 Perceiver 融合层
         self.fusion_asm2rtl = nn.ModuleList(
             [
-                PerceiverCrossFusion(hidden_dim, perceiver_num_latents, perceiver_num_heads, num_layers)
+                PerceiverCrossFusion(
+                    hidden_dim, perceiver_num_latents, perceiver_num_heads, num_layers
+                )
                 for _ in range(num_layers)
             ]
         )
         self.fusion_rtl2asm = nn.ModuleList(
             [
-                PerceiverCrossFusion(hidden_dim, perceiver_num_latents, perceiver_num_heads, num_layers)
+                PerceiverCrossFusion(
+                    hidden_dim, perceiver_num_latents, perceiver_num_heads, num_layers
+                )
                 for _ in range(num_layers)
             ]
         )
@@ -663,7 +803,9 @@ class PerceiverDualEncoder(nn.Module):
         """
         if rtl_batch is None:
             rtl_batch = torch.zeros(
-                rtl_node_cell_type.size(0), dtype=torch.long, device=rtl_node_cell_type.device
+                rtl_node_cell_type.size(0),
+                dtype=torch.long,
+                device=rtl_node_cell_type.device,
             )
         if asm_batch is None:
             asm_batch = torch.zeros(
@@ -674,19 +816,35 @@ class PerceiverDualEncoder(nn.Module):
         asm_h = self.asm_node_encoder(asm_node_type, asm_instruction_encoding)
 
         rtl_edge_attr = self.rtl_edge_encoder(
-            rtl_edge_type, rtl_edge_width, rtl_edge_source_port_idx, rtl_edge_target_port_idx
+            rtl_edge_type,
+            rtl_edge_width,
+            rtl_edge_source_port_idx,
+            rtl_edge_target_port_idx,
         )
         asm_edge_attr = self.asm_edge_encoder(asm_edge_type)
 
         for i in range(self.num_layers):
             # 1. 并行 GNN 传播
-            asm_h, asm_edge_attr = self.asm_layers[i](asm_h, asm_edge_index, asm_edge_attr)
-            rtl_h, rtl_edge_attr = self.rtl_layers[i](rtl_h, rtl_edge_index, rtl_edge_attr, rtl_edge_type, rtl_node_type)
+            asm_h, asm_edge_attr = self.asm_layers[i](
+                asm_h, asm_edge_index, asm_edge_attr
+            )
+            rtl_h, rtl_edge_attr = self.rtl_layers[i](
+                rtl_h,
+                rtl_edge_index,
+                rtl_edge_attr,
+                rtl_edge_type,
+                rtl_node_type,
+                rtl_edge_target_port_idx,
+            )
 
             # 2. 双向 Perceiver 注入：快照避免链式污染
             rtl_in, asm_in = rtl_h, asm_h
-            rtl_h = self.fusion_asm2rtl[i](rtl_in, asm_in, rtl_batch, asm_batch)  # ASM → RTL
-            asm_h = self.fusion_rtl2asm[i](asm_in, rtl_in, asm_batch, rtl_batch)  # RTL → ASM
+            rtl_h = self.fusion_asm2rtl[i](
+                rtl_in, asm_in, rtl_batch, asm_batch
+            )  # ASM → RTL
+            asm_h = self.fusion_rtl2asm[i](
+                asm_in, rtl_in, asm_batch, rtl_batch
+            )  # RTL → ASM
 
         rtl_node = self.rtl_output(rtl_h)
         asm_node = self.asm_output(asm_h)
