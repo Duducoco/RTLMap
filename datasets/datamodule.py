@@ -4,8 +4,6 @@
 import hashlib
 import json
 import warnings
-
-import orjson
 from tqdm import tqdm
 import logging
 import os
@@ -74,7 +72,9 @@ def _build_rtl_structure(rtl: dict) -> dict:
 
     return {
         "node_cell_type": torch.tensor(node_cell_type, dtype=torch.long),
-        "node_type": torch.tensor([_NODE_TYPE_MAP[ct] for ct in node_cell_type], dtype=torch.long),
+        "node_type": torch.tensor(
+            [_NODE_TYPE_MAP[ct] for ct in node_cell_type], dtype=torch.long
+        ),
         "node_width": torch.tensor(node_width, dtype=torch.long),
         "edge_index": _make_edge_index(src_list, tgt_list),
         "edge_type": torch.tensor(etype_list, dtype=torch.long),
@@ -85,9 +85,7 @@ def _build_rtl_structure(rtl: dict) -> dict:
     }
 
 
-def _build_asm_graph(
-    asm_json_path: str, asm_encoding: Optional[torch.Tensor]
-) -> dict:
+def _build_asm_graph(asm_json_path: str, asm_encoding: Optional[torch.Tensor]) -> dict:
     """构建 ASM 图张量，返回 dict"""
     with open(asm_json_path, encoding="utf-8") as f:
         asm = json.load(f)
@@ -293,6 +291,7 @@ class DualGraphDataset(Dataset):
                 nonlocal text_encoder
                 if text_encoder is None:
                     from text_encoder import MultiGPUInstructionEncoder
+
                     text_encoder = MultiGPUInstructionEncoder(
                         self._text_encoder_config,
                         projection_only=projection_only,
@@ -313,7 +312,9 @@ class DualGraphDataset(Dataset):
                         del pooled
                         continue
                     except Exception as e:
-                        logger.warning("缓存文件损坏，将重新编码: %s (%s)", cache_file, e)
+                        logger.warning(
+                            "缓存文件损坏，将重新编码: %s (%s)", cache_file, e
+                        )
                 uncached_paths.append(asm_path)
 
             logger.info(
@@ -433,9 +434,7 @@ class DualGraphDataset(Dataset):
             filename = self._idx_to_file[idx]
         else:
             filename = f"data_{idx}.pt"
-        data = torch.load(
-            Path(self.processed_dir) / filename, weights_only=False
-        )
+        data = torch.load(Path(self.processed_dir) / filename, weights_only=False)
 
         rtl_file = getattr(data, "_rtl_file", None)
         if rtl_file is not None:
@@ -500,7 +499,9 @@ class RtlSizeBucketSampler(torch.utils.data.Sampler):
         # 预扫描：获取每个样本的 RTL 节点数
         sizes = self._scan_sizes(dataset)
         # 按桶分组
-        buckets: dict[int, list[int]] = {k: [] for k in range(len(self._BUCKET_EDGES) + 1)}
+        buckets: dict[int, list[int]] = {
+            k: [] for k in range(len(self._BUCKET_EDGES) + 1)
+        }
         for idx, n in enumerate(sizes):
             bkt = sum(n >= e for e in self._BUCKET_EDGES)
             buckets[bkt].append(idx)
@@ -513,7 +514,11 @@ class RtlSizeBucketSampler(torch.utils.data.Sampler):
         for i in range(len(dataset)):
             data = dataset[i]
             # node_cell_type 是 RTL 节点的可靠代理字段
-            n = int(data.node_cell_type.size(0)) if hasattr(data, "node_cell_type") else 1
+            n = (
+                int(data.node_cell_type.size(0))
+                if hasattr(data, "node_cell_type")
+                else 1
+            )
             sizes.append(max(n, 1))
         return sizes
 
@@ -618,12 +623,14 @@ class DualGraphDataModule(L.LightningDataModule):
                 self.val_dataset = self._make_dataset("val")
             else:
                 from torch.utils.data import random_split
+
                 full_len = len(self.train_dataset)
                 val_len = max(1, int(full_len * 0.1))
                 train_len = full_len - val_len
                 split_gen = torch.Generator().manual_seed(42)
                 self.train_dataset, self.val_dataset = random_split(
-                    self.train_dataset, [train_len, val_len],
+                    self.train_dataset,
+                    [train_len, val_len],
                     generator=split_gen,
                 )
                 logger.info(
