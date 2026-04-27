@@ -66,3 +66,12 @@ class TrainerConfig:
     enable_checkpointing: bool = True
     enable_progress_bar: bool = True
     enable_model_summary: bool = True
+
+    # 对比学习超矩形配置
+    use_hyperrectangle: bool = False              # 启用超矩形对比学习
+    contrastive_loss_weight: float = 0.5          # 对比损失权重
+    contrastive_pairs_per_epoch: int = 512        # 每 epoch 采样的对比对数量
+    contrastive_batch_size: int = 16              # 对比 DataLoader batch 大小
+    contrastive_margin: float = 0.2               # margin 模式下不相似对的交集上限
+    contrastive_loss_type: str = "mse"            # mse / bce / margin
+    hyper_min_margin: float = 0.01                # 超矩形每维度最小宽度

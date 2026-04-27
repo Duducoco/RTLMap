@@ -41,6 +41,10 @@ class ModelConfig:
     # ASM 节点编码器适配器
     use_asm_adapter: bool = True      # 在 instruction_encoding 投影前插入可训练 Adapter
 
+    # 对比学习超矩形配置
+    use_hyperrectangle: bool = False  # 启用超矩形对比学习
+    hyper_min_margin: float = 0.01    # 超矩形每个维度的最小宽度
+
 
 @dataclass
 class ModelOutput:
@@ -51,3 +55,5 @@ class ModelOutput:
     rtl_final: Optional[torch.Tensor] = None
     asm_final: Optional[torch.Tensor] = None
     matching_matrix: Optional[torch.Tensor] = None
+    hyper_min: Optional[torch.Tensor] = None   # [B, D] 超矩形下界
+    hyper_max: Optional[torch.Tensor] = None   # [B, D] 超矩形上界

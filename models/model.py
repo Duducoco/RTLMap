@@ -20,6 +20,7 @@ from typing import Dict, Optional
 from datasets import DualGraphData
 from .data_types import ModelConfig, ModelOutput
 from .encoder import PerceiverDualEncoder, RTLEdgeFeatureEncoder
+from .hyperrectangle import HyperrectangleHead
 
 
 class EdgeClassifier(nn.Module):
@@ -162,6 +163,12 @@ class DualGraphFusionModel(nn.Module):
             config.hidden_dim, config.num_graph_targets, config.dropout
         )
 
+        # 超矩形头（条件创建）
+        if config.use_hyperrectangle:
+            self.hyperrectangle_head = HyperrectangleHead(
+                hidden_dim=config.hidden_dim, margin=config.hyper_min_margin
+            )
+
     def forward(self, data: DualGraphData) -> ModelOutput:
         """
         前向传播
@@ -206,11 +213,18 @@ class DualGraphFusionModel(nn.Module):
         )
         graph_pred = self.graph_regressor(rtl_graph)
 
+        # 超矩形输出（条件计算）
+        hyper_min, hyper_max = None, None
+        if self.config.use_hyperrectangle and hasattr(self, "hyperrectangle_head"):
+            hyper_min, hyper_max = self.hyperrectangle_head(rtl_graph)
+
         return ModelOutput(
             edge_logits=edge_logits,
             graph_pred=graph_pred,
             rtl_final=rtl_node,
             asm_final=asm_node,
+            hyper_min=hyper_min,
+            hyper_max=hyper_max,
         )
 
     def compute_loss(

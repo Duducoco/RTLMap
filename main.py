@@ -62,18 +62,6 @@ def parse_args() -> argparse.Namespace:
     model.add_argument("--hidden-dim", type=int, default=256)
     model.add_argument("--num-gnn-layers", type=int, default=6)
     model.add_argument("--dropout", type=float, default=0.1)
-    model.add_argument(
-        "--fusion-type",
-        choices=["film", "ssm_film"],
-        default="film",
-        help="融合模式",
-    )
-    model.add_argument("--ssm-d-state", type=int, default=64, help="SSM 状态空间维度")
-    model.add_argument(
-        "--ssm-pool-mode",
-        choices=["last", "mean", "attention"],
-        default="last",
-    )
 
     # ── 训练超参数 ────────────────────────────────────────
     train_g = p.add_argument_group("训练")
@@ -142,6 +130,16 @@ def parse_args() -> argparse.Namespace:
     exp.add_argument("--early-stopping-patience", type=int, default=10)
     exp.add_argument("--log-every-n-steps", type=int, default=1)
 
+    # ── 对比学习 (超矩形) ──────────────────────────────
+    hyper = p.add_argument_group("对比学习 (Hyperrectangle)")
+    hyper.add_argument("--use-hyperrectangle", action="store_true", help="启用超矩形对比学习")
+    hyper.add_argument("--contrastive-loss-weight", type=float, default=0.5, help="对比损失权重")
+    hyper.add_argument("--contrastive-pairs-per-epoch", type=int, default=512, help="每 epoch 采样对比对数量")
+    hyper.add_argument("--contrastive-batch-size", type=int, default=16, help="对比 DataLoader batch 大小")
+    hyper.add_argument("--contrastive-margin", type=float, default=0.2, help="margin 模式下不相似对交集上限")
+    hyper.add_argument("--contrastive-loss-type", choices=["mse", "bce", "margin"], default="mse", help="对比损失类型")
+    hyper.add_argument("--hyper-min-margin", type=float, default=0.01, help="超矩形每维度最小宽度")
+
     # ── 运行模式 ──────────────────────────────────────────
     mode = p.add_argument_group("运行模式")
     mode.add_argument("--ckpt-path", default=None, help="检查点路径（恢复训练或测试）")
@@ -159,10 +157,9 @@ def build_model_config(args: argparse.Namespace) -> ModelConfig:
         hidden_dim=args.hidden_dim,
         num_gnn_layers=args.num_gnn_layers,
         dropout=args.dropout,
-        fusion_type=args.fusion_type,
-        ssm_d_state=args.ssm_d_state,
-        ssm_pool_mode=args.ssm_pool_mode,
         asm_instruction_dim=args.text_output_dim,
+        use_hyperrectangle=args.use_hyperrectangle,
+        hyper_min_margin=args.hyper_min_margin,
     )
 
 
@@ -188,6 +185,13 @@ def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
         precision=args.precision,
         fast_dev_run=args.fast_dev_run,
         log_every_n_steps=args.log_every_n_steps,
+        use_hyperrectangle=args.use_hyperrectangle,
+        contrastive_loss_weight=args.contrastive_loss_weight,
+        contrastive_pairs_per_epoch=args.contrastive_pairs_per_epoch,
+        contrastive_batch_size=args.contrastive_batch_size,
+        contrastive_margin=args.contrastive_margin,
+        contrastive_loss_type=args.contrastive_loss_type,
+        hyper_min_margin=args.hyper_min_margin,
     )
 
 
@@ -227,10 +231,10 @@ def main() -> None:
 
     logger.info("实验: %s", args.experiment_name)
     logger.info(
-        "模型: hidden_dim=%d, gnn_layers=%d, fusion=%s",
+        "模型: hidden_dim=%d, gnn_layers=%d, hyperrectangle=%s",
         model_config.hidden_dim,
         model_config.num_gnn_layers,
-        model_config.fusion_type,
+        model_config.use_hyperrectangle,
     )
     logger.info(
         "训练: epochs=%d, lr=%.1e, batch_size=%d",

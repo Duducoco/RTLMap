@@ -7,11 +7,14 @@
 - DualGraphDataModule: Lightning DataModule 封装
 """
 
-from .data_types import DualGraphData
+from .data_types import DualGraphData, ContrastivePairBatch
 from .datamodule import DualGraphDataset, DualGraphDataModule
+from .coverage_similarity import compute_edge_jaccard
 
 __all__ = [
     "DualGraphData",
     "DualGraphDataset",
     "DualGraphDataModule",
+    "ContrastivePairBatch",
+    "compute_edge_jaccard",
 ]

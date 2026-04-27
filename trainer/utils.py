@@ -7,6 +7,7 @@ import lightning as L
 from lightning.pytorch.callbacks import Callback
 
 from datasets import DualGraphDataModule
+from datasets.pair_datamodule import ContrastivePairDataModule
 from models.data_types import ModelConfig
 from .config import TrainerConfig
 from .lightning_module import DualGraphLightningModule
@@ -57,6 +58,9 @@ def train_model(
         label_smoothing=trainer_config.label_smoothing,
         warmup_steps=trainer_config.warmup_steps,
         scheduler_type=trainer_config.scheduler_type,
+        contrastive_loss_weight=trainer_config.contrastive_loss_weight if trainer_config.use_hyperrectangle else 0.0,
+        contrastive_loss_type=trainer_config.contrastive_loss_type,
+        contrastive_margin=trainer_config.contrastive_margin,
     )
 
     datamodule = DualGraphDataModule(
@@ -66,6 +70,18 @@ def train_model(
         batch_size=trainer_config.batch_size,
         num_workers=trainer_config.num_workers,
     )
+
+    # 对比学习 DataLoader（条件创建）
+    if trainer_config.use_hyperrectangle and model_config.use_hyperrectangle:
+        datamodule.setup("fit")
+        contrastive_dm = ContrastivePairDataModule(
+            base_dataset=datamodule.train_dataset,
+            pairs_per_epoch=trainer_config.contrastive_pairs_per_epoch,
+            batch_size=trainer_config.contrastive_batch_size,
+            num_workers=min(trainer_config.num_workers, 2),
+        )
+        contrastive_dm.setup("fit")
+        module.set_contrastive_dataloader(contrastive_dm.contrastive_train_dataloader())
 
     lightning_trainer = LightningTrainer(
         config=trainer_config,

@@ -15,6 +15,8 @@ from .encoder import (
     EDGE_TYPE_ENABLE,
 )
 from .interaction import PerceiverCrossFusion
+from .hyperrectangle import HyperrectangleHead, hyperrectangle_intersection
+from .contrastive_loss import compute_contrastive_loss
 from .model import (
     DualGraphFusionModel,
     create_model,
@@ -36,6 +38,9 @@ __all__ = [
     "EDGE_TYPE_RESET",
     "EDGE_TYPE_ENABLE",
     "PerceiverCrossFusion",
+    "HyperrectangleHead",
+    "hyperrectangle_intersection",
+    "compute_contrastive_loss",
     "DualGraphFusionModel",
     "create_model",
     "create_small_model",

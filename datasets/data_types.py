@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """双图数据类型定义"""
 
+from dataclasses import dataclass
+
+import torch
 from torch_geometric.data import Data
 
 
@@ -100,3 +103,17 @@ class DualGraphData(Data):
         """辅助图边数"""
         asm_ei = getattr(self, "asm_edge_index", None)
         return asm_ei.size(1) if asm_ei is not None else 0
+
+
+@dataclass
+class ContrastivePairBatch:
+    """对比学习对批数据
+
+    Attributes:
+        batch_a: 左侧 PyG batch（一组 DualGraphData）
+        batch_b: 右侧 PyG batch（一组 DualGraphData）
+        similarity: [B] 两侧样本间的覆盖率 Jaccard 相似度
+    """
+    batch_a: DualGraphData
+    batch_b: DualGraphData
+    similarity: torch.Tensor
