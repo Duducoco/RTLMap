@@ -61,6 +61,7 @@ def train_model(
         contrastive_loss_weight=trainer_config.contrastive_loss_weight if trainer_config.use_hyperrectangle else 0.0,
         contrastive_loss_type=trainer_config.contrastive_loss_type,
         contrastive_margin=trainer_config.contrastive_margin,
+        coverage_target_keys=trainer_config.coverage_target_keys,
     )
 
     datamodule = DualGraphDataModule(

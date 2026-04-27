@@ -31,6 +31,7 @@ class DualGraphLightningModule(L.LightningModule):
         contrastive_loss_weight: float = 0.0,
         contrastive_loss_type: str = "mse",
         contrastive_margin: float = 0.2,
+        coverage_target_keys: tuple = ("branch",),
     ):
         super().__init__()
         # 保存超参数（包括 ModelConfig 的所有字段）
@@ -48,6 +49,7 @@ class DualGraphLightningModule(L.LightningModule):
                 "num_asm_node_types": model_config.num_asm_node_types,
                 "num_asm_edge_types": model_config.num_asm_edge_types,
                 "asm_instruction_dim": model_config.asm_instruction_dim,
+                "coverage_target_keys": coverage_target_keys,
             }
         )
 
@@ -66,6 +68,7 @@ class DualGraphLightningModule(L.LightningModule):
         self.contrastive_loss_type = contrastive_loss_type
         self.contrastive_margin = contrastive_margin
         self.use_hyperrectangle = model_config.use_hyperrectangle
+        self.coverage_target_keys = coverage_target_keys
 
         # 指标计算器
         self.edge_metrics = EdgeClassificationMetrics()
@@ -137,9 +140,16 @@ class DualGraphLightningModule(L.LightningModule):
         for k, v in edge_m.items():
             metrics[f"{stage}/{k}"] = v
 
-        # 图回归指标
+        # 图回归指标（选列 + NaN 行过滤）
+        from datasets.data_types import coverage_key_index
+        col_idx = [coverage_key_index(k) for k in self.coverage_target_keys]
+        y_target = batch.y[:, col_idx] if batch.y is not None else None
+        valid_rows = ~torch.isnan(y_target).any(dim=-1) if y_target is not None else None
+        pred_valid = output.graph_pred[valid_rows] if valid_rows is not None and valid_rows.any() else None
+        target_valid = y_target[valid_rows] if valid_rows is not None and valid_rows.any() else None
         graph_m = self.regression_metrics.compute(
-            output.graph_pred, batch.y, lite=lite
+            pred_valid, target_valid, lite=lite,
+            coverage_keys=self.coverage_target_keys,
         )
         for k, v in graph_m.items():
             metrics[f"{stage}/{k}"] = v

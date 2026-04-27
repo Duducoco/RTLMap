@@ -75,3 +75,6 @@ class TrainerConfig:
     contrastive_margin: float = 0.2               # margin 模式下不相似对的交集上限
     contrastive_loss_type: str = "mse"            # mse / bce / margin
     hyper_min_margin: float = 0.01                # 超矩形每维度最小宽度
+
+    # 图回归目标选择
+    coverage_target_keys: tuple = ("branch",)     # 实际用于 loss 的覆盖率列子集

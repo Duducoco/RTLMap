@@ -3,7 +3,7 @@
 
 import torch
 import torch.nn.functional as F
-from typing import Dict
+from typing import Dict, Optional, Tuple
 
 
 class CoverageRegressionMetrics:
@@ -29,60 +29,82 @@ class CoverageRegressionMetrics:
 
     def compute(
         self,
-        pred: torch.Tensor,
-        target: torch.Tensor,
+        pred: Optional[torch.Tensor],
+        target: Optional[torch.Tensor],
         lite: bool = False,
+        coverage_keys: Tuple[str, ...] = ("branch",),
     ) -> Dict[str, torch.Tensor]:
         """计算覆盖率回归指标
 
         Args:
-            pred: [B, 1] 预测覆盖率
-            target: [B, 1] 真实覆盖率
+            pred: [B, K] 预测覆盖率（None 时返回零指标）
+            target: [B, K] 真实覆盖率（None 时返回零指标，NaN 行应在调用前过滤）
             lite: True 时仅计算核心指标
+            coverage_keys: 与 pred/target 列对应的覆盖率类型名（用于多列时的指标后缀）
         """
+        use_suffix = len(coverage_keys) > 1
+
+        def _suffix(key: str) -> str:
+            return f"_{key}" if use_suffix else ""
+
+        # 单列时保持原接口不变，多列时按列分别计算后合并
+        if pred is None or target is None or pred.numel() == 0:
+            result: Dict[str, torch.Tensor] = {}
+            device = pred.device if pred is not None else torch.device("cpu")
+            _zero = torch.tensor(0.0, device=device)
+            for key in coverage_keys:
+                sfx = _suffix(key)
+                result[f"graph_mse{sfx}"] = _zero
+                result[f"graph_mae{sfx}"] = _zero
+                if not lite:
+                    result.update({
+                        f"graph_rmse{sfx}": _zero,
+                        f"graph_mape{sfx}": _zero,
+                        f"graph_smape{sfx}": _zero,
+                        f"graph_medae{sfx}": _zero,
+                        f"graph_r2{sfx}": _zero,
+                        f"graph_r{sfx}": _zero,
+                        f"graph_mase{sfx}": _zero,
+                    })
+            return result
+
+        result = {}
+        for col, key in enumerate(coverage_keys):
+            sfx = _suffix(key)
+            p = pred[:, col] if pred.dim() == 2 else pred.view(-1)
+            t = target[:, col] if target.dim() == 2 else target.view(-1)
+            result.update(self._compute_single(p, t, lite=lite, suffix=sfx))
+        return result
+
+    def _compute_single(
+        self,
+        pred: torch.Tensor,
+        target: torch.Tensor,
+        lite: bool,
+        suffix: str,
+    ) -> Dict[str, torch.Tensor]:
         device = pred.device
         _zero = torch.tensor(0.0, device=device)
-
-        if target is None or pred is None:
-            result = {
-                "graph_mse": _zero,
-                "graph_mae": _zero,
-            }
-            if not lite:
-                result.update({
-                    "graph_rmse": _zero,
-                    "graph_mape": _zero,
-                    "graph_smape": _zero,
-                    "graph_medae": _zero,
-                    "graph_r2": _zero,
-                    "graph_r": _zero,
-                    "graph_mase": _zero,
-                })
-            return result
 
         mse = F.mse_loss(pred, target)
         mae = F.l1_loss(pred, target)
 
         result = {
-            "graph_mse": mse,
-            "graph_mae": mae,
+            f"graph_mse{suffix}": mse,
+            f"graph_mae{suffix}": mae,
         }
 
         if lite:
             return result
 
-        # full 模式指标
         rmse = mse.sqrt()
 
-        # SMAPE: symmetric MAPE
         smape = 2.0 * (pred - target).abs() / (pred.abs() + target.abs() + 1e-8)
         smape = smape.mean() * 100
 
-        # MedAE: median absolute error
         errors = (pred - target).abs().view(-1)
         medae = errors.median()
 
-        # MAPE: 仅对 target ≠ 0 计算
         non_zero_mask = target.abs() > 1e-8
         if non_zero_mask.any():
             mape = (
@@ -92,14 +114,12 @@ class CoverageRegressionMetrics:
         else:
             mape = _zero
 
-        # R² (决定系数)
         pred_flat = pred.view(-1)
         target_flat = target.view(-1)
         ss_res = (pred_flat - target_flat).pow(2).sum()
         ss_tot = (target_flat - target_flat.mean()).pow(2).sum()
         r2 = 1.0 - ss_res / (ss_tot + 1e-8)
 
-        # Pearson R
         if pred.numel() > 1:
             pred_centered = pred_flat - pred_flat.mean()
             target_centered = target_flat - target_flat.mean()
@@ -110,20 +130,19 @@ class CoverageRegressionMetrics:
         else:
             r = _zero
 
-        # MASE
         if self._naive_mae is not None and self._naive_mae > 1e-8:
             mase = mae / self._naive_mae
         else:
-            mase = mae  # 无基准时回退为 MAE
+            mase = mae
 
         result.update({
-            "graph_rmse": rmse,
-            "graph_mape": mape,
-            "graph_smape": smape,
-            "graph_medae": medae,
-            "graph_r2": r2,
-            "graph_r": r,
-            "graph_mase": mase,
+            f"graph_rmse{suffix}": rmse,
+            f"graph_mape{suffix}": mape,
+            f"graph_smape{suffix}": smape,
+            f"graph_medae{suffix}": medae,
+            f"graph_r2{suffix}": r2,
+            f"graph_r{suffix}": r,
+            f"graph_mase{suffix}": mase,
         })
 
         return result

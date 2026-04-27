@@ -21,7 +21,7 @@ from torch_geometric.loader import DataLoader as PyGDataLoader
 
 from cdfg_rtl.data_types import EdgeType, get_cell_type_index, CELL_TYPE_TO_NODE_TYPE
 from cdfg_asm.data_types import AsmNodeType, AsmEdgeType
-from .data_types import DualGraphData
+from .data_types import DualGraphData, COVERAGE_KEYS
 
 logger = logging.getLogger(__name__)
 
@@ -166,11 +166,14 @@ def _build_and_save_labels(
                 continue
             elabel_list.append(e["coverage_label"])
 
-        y = rtl.get("branch", 0.0) / 100.0
+        y_vals = []
+        for key in COVERAGE_KEYS:
+            v = rtl.get(key)
+            y_vals.append(float("nan") if v is None else float(v) / 100.0)
 
         data = DualGraphData(
             edge_labels=torch.tensor(elabel_list, dtype=torch.long),
-            y=torch.tensor([[y]], dtype=torch.float),
+            y=torch.tensor([y_vals], dtype=torch.float),
             _rtl_file=rtl_filename,
             _asm_file=asm_filename,
         )

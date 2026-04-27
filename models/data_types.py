@@ -21,6 +21,7 @@ class ModelConfig:
     # 任务配置
     num_edge_classes: int = 2  # {0: 未覆盖, 1: 已覆盖}，-1 被 mask 掉
     num_graph_targets: int = 1
+    coverage_target_keys: tuple = ("branch",)  # 实际用于 loss 的覆盖率列子集
 
     # RTL 特征配置
     num_cell_types: int = NUM_CELL_TYPES  # cell_type 词汇表大小 (74)

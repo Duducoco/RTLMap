@@ -81,6 +81,13 @@ def parse_args() -> argparse.Namespace:
     train_g.add_argument("--edge-loss-weight", type=float, default=1.0)
     train_g.add_argument("--graph-loss-weight", type=float, default=1.0)
     train_g.add_argument("--label-smoothing", type=float, default=0.1)
+    train_g.add_argument(
+        "--coverage-targets",
+        nargs="+",
+        default=["branch"],
+        choices=["branch", "line", "fsm", "toggle", "condition"],
+        help="用于图回归损失的覆盖率类型（默认仅 branch）",
+    )
 
     # ── 设备与精度 ────────────────────────────────────────
     device = p.add_argument_group("设备")
@@ -160,6 +167,8 @@ def build_model_config(args: argparse.Namespace) -> ModelConfig:
         asm_instruction_dim=args.text_output_dim,
         use_hyperrectangle=args.use_hyperrectangle,
         hyper_min_margin=args.hyper_min_margin,
+        coverage_target_keys=tuple(args.coverage_targets),
+        num_graph_targets=len(args.coverage_targets),
     )
 
 
@@ -192,6 +201,7 @@ def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
         contrastive_margin=args.contrastive_margin,
         contrastive_loss_type=args.contrastive_loss_type,
         hyper_min_margin=args.hyper_min_margin,
+        coverage_target_keys=tuple(args.coverage_targets),
     )
 
 

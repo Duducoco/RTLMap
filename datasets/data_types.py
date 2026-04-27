@@ -6,6 +6,12 @@ from dataclasses import dataclass
 import torch
 from torch_geometric.data import Data
 
+COVERAGE_KEYS: tuple[str, ...] = ("branch", "line", "fsm", "toggle", "condition")
+
+
+def coverage_key_index(key: str) -> int:
+    return COVERAGE_KEYS.index(key)
+
 
 class DualGraphData(Data):
     """
@@ -30,7 +36,7 @@ class DualGraphData(Data):
         - asm_edge_type: [F] ASM 边类型（对应 AsmEdgeType 枚举）
 
     - 标签:
-        - y: [B, 1] 图级标签（整体覆盖率）
+        - y: [B, 5] 图级覆盖率（顺序同 COVERAGE_KEYS: branch/line/fsm/toggle/condition），NaN 表示该类型未收集
 
     - Batching:
         - batch: [N] 主图 batch 索引（自动生成）

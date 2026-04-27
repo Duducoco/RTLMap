@@ -18,6 +18,7 @@ import torch.nn.functional as F
 from typing import Dict, Optional
 
 from datasets import DualGraphData
+from datasets.data_types import coverage_key_index
 from .data_types import ModelConfig, ModelOutput
 from .encoder import PerceiverDualEncoder, RTLEdgeFeatureEncoder
 from .hyperrectangle import HyperrectangleHead
@@ -272,9 +273,15 @@ class DualGraphFusionModel(nn.Module):
             losses["edge_loss"] = torch.tensor(0.0, device=device)
             losses["num_valid_edges"] = 0
 
-        # 图回归损失
+        # 图回归损失（按 coverage_target_keys 选列，NaN 行跳过）
         if data.y is not None:
-            graph_loss = F.smooth_l1_loss(output.graph_pred, data.y)
+            col_idx = [coverage_key_index(k) for k in self.config.coverage_target_keys]
+            target = data.y[:, col_idx]                        # [B, K]
+            valid = ~torch.isnan(target).any(dim=-1)           # [B]
+            if valid.any():
+                graph_loss = F.smooth_l1_loss(output.graph_pred[valid], target[valid])
+            else:
+                graph_loss = output.graph_pred.sum() * 0.0
             losses["graph_loss"] = graph_loss * graph_loss_weight
         else:
             losses["graph_loss"] = torch.tensor(0.0, device=device)
