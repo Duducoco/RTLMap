@@ -25,6 +25,7 @@
 import argparse
 import logging
 import sys
+from pathlib import Path
 
 import torch
 
@@ -147,6 +148,28 @@ def parse_args() -> argparse.Namespace:
     hyper.add_argument("--contrastive-loss-type", choices=["mse", "bce", "margin"], default="mse", help="对比损失类型")
     hyper.add_argument("--hyper-min-margin", type=float, default=0.01, help="超矩形每维度最小宽度")
 
+    # ── 联合三元组对比学习 (joint mode) ───────────────────
+    joint = p.add_argument_group("联合训练 (Joint Contrastive)")
+    joint.add_argument(
+        "--joint-contrastive",
+        action="store_true",
+        help="启用单次 forward 三元组联合训练（覆盖率预测 + 对比学习）",
+    )
+    joint.add_argument(
+        "--contrastive-triple-index",
+        type=str,
+        default="",
+        help="contrastive_index.jsonlines 路径（空串时自动拼接 dataset-dir/contrastive_index.jsonlines）",
+    )
+    joint.add_argument("--lambda-ce", type=float, default=1.0, help="三路 CE 损失的合并权重")
+    joint.add_argument("--lambda-cl", type=float, default=0.5, help="joint 模式下对比损失权重")
+    joint.add_argument(
+        "--or-consistency-weight",
+        type=float,
+        default=0.0,
+        help="merged 逻辑 OR 一致性约束权重（0=关闭）",
+    )
+
     # ── 运行模式 ──────────────────────────────────────────
     mode = p.add_argument_group("运行模式")
     mode.add_argument("--ckpt-path", default=None, help="检查点路径（恢复训练或测试）")
@@ -173,6 +196,11 @@ def build_model_config(args: argparse.Namespace) -> ModelConfig:
 
 
 def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
+    # joint 模式下自动推断 triple index 路径
+    triple_index = args.contrastive_triple_index
+    if args.joint_contrastive and not triple_index:
+        triple_index = str(Path(args.dataset_dir) / "contrastive_index.jsonlines")
+
     return TrainerConfig(
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
@@ -202,6 +230,11 @@ def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
         contrastive_loss_type=args.contrastive_loss_type,
         hyper_min_margin=args.hyper_min_margin,
         coverage_target_keys=tuple(args.coverage_targets),
+        joint_contrastive=args.joint_contrastive,
+        contrastive_triple_index=triple_index,
+        lambda_ce=args.lambda_ce,
+        lambda_cl=args.lambda_cl,
+        or_consistency_weight=args.or_consistency_weight,
     )
 
 

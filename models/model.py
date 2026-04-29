@@ -226,6 +226,7 @@ class DualGraphFusionModel(nn.Module):
             asm_final=asm_node,
             hyper_min=hyper_min,
             hyper_max=hyper_max,
+            rtl_graph_emb=rtl_graph,
         )
 
     def compute_loss(

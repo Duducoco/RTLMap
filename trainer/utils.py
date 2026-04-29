@@ -8,6 +8,7 @@ from lightning.pytorch.callbacks import Callback
 
 from datasets import DualGraphDataModule
 from datasets.pair_datamodule import ContrastivePairDataModule
+from datasets.triple_datamodule import ContrastiveTripleDataModule
 from models.data_types import ModelConfig
 from .config import TrainerConfig
 from .lightning_module import DualGraphLightningModule
@@ -15,6 +16,38 @@ from .lightning_trainer import LightningTrainer
 
 if TYPE_CHECKING:
     from text_encoder import TextEncoderConfig
+
+
+class _JointTrainDataModule(L.LightningDataModule):
+    """包装 DataModule：训练 dataloader 来自 triple loader，验证/测试来自原 DataModule。
+
+    这样 Lightning 的 fit/val/test 接口保持不变，joint 模式对 Trainer 透明。
+    """
+
+    def __init__(
+        self,
+        base: DualGraphDataModule,
+        triple_dm: ContrastiveTripleDataModule,
+    ):
+        super().__init__()
+        self._base = base
+        self._triple_dm = triple_dm
+
+    def prepare_data(self):
+        self._base.prepare_data()
+
+    def setup(self, stage=None):
+        self._base.setup(stage)
+        self._triple_dm.setup(stage)
+
+    def train_dataloader(self):
+        return self._triple_dm.train_dataloader()
+
+    def val_dataloader(self):
+        return self._base.val_dataloader()
+
+    def test_dataloader(self):
+        return self._base.test_dataloader()
 
 
 def train_model(
@@ -62,6 +95,10 @@ def train_model(
         contrastive_loss_type=trainer_config.contrastive_loss_type,
         contrastive_margin=trainer_config.contrastive_margin,
         coverage_target_keys=trainer_config.coverage_target_keys,
+        joint_contrastive=trainer_config.joint_contrastive,
+        lambda_ce=trainer_config.lambda_ce,
+        lambda_cl=trainer_config.lambda_cl,
+        or_consistency_weight=trainer_config.or_consistency_weight,
     )
 
     datamodule = DualGraphDataModule(
@@ -72,17 +109,29 @@ def train_model(
         num_workers=trainer_config.num_workers,
     )
 
-    # 对比学习 DataLoader（条件创建）
-    if trainer_config.use_hyperrectangle and model_config.use_hyperrectangle:
-        datamodule.setup("fit")
-        contrastive_dm = ContrastivePairDataModule(
-            base_dataset=datamodule.train_dataset,
-            pairs_per_epoch=trainer_config.contrastive_pairs_per_epoch,
+    # joint 三元组训练模式
+    if trainer_config.joint_contrastive and trainer_config.contrastive_triple_index:
+        triple_dm = ContrastiveTripleDataModule(
+            dataset_dir=dataset_dir,
+            index_file=trainer_config.contrastive_triple_index,
             batch_size=trainer_config.contrastive_batch_size,
-            num_workers=min(trainer_config.num_workers, 2),
+            num_workers=min(trainer_config.num_workers, 4),
         )
-        contrastive_dm.setup("fit")
-        module.set_contrastive_dataloader(contrastive_dm.contrastive_train_dataloader())
+        effective_datamodule = _JointTrainDataModule(datamodule, triple_dm)
+    else:
+        effective_datamodule = datamodule
+
+        # 旧 pair 对比学习 DataLoader（向后兼容）
+        if trainer_config.use_hyperrectangle and model_config.use_hyperrectangle:
+            datamodule.setup("fit")
+            contrastive_dm = ContrastivePairDataModule(
+                base_dataset=datamodule.train_dataset,
+                pairs_per_epoch=trainer_config.contrastive_pairs_per_epoch,
+                batch_size=trainer_config.contrastive_batch_size,
+                num_workers=min(trainer_config.num_workers, 2),
+            )
+            contrastive_dm.setup("fit")
+            module.set_contrastive_dataloader(contrastive_dm.contrastive_train_dataloader())
 
     lightning_trainer = LightningTrainer(
         config=trainer_config,
@@ -92,9 +141,10 @@ def train_model(
         has_validation=has_validation,
     )
 
-    lightning_trainer.fit(module, datamodule, ckpt_path=ckpt_path)
+    lightning_trainer.fit(module, effective_datamodule, ckpt_path=ckpt_path)
 
     if has_test:
-        lightning_trainer.test(module, datamodule)
+        lightning_trainer.test(module, effective_datamodule)
 
     return module, lightning_trainer.trainer
+

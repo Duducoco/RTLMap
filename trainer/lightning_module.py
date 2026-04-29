@@ -7,7 +7,7 @@ from typing import Dict, List, Tuple, Any
 import lightning as L
 
 from datasets import DualGraphData
-from datasets.data_types import ContrastivePairBatch
+from datasets.data_types import ContrastivePairBatch, ContrastiveTripleBatch
 from models.data_types import ModelConfig, ModelOutput
 from models.model import create_model
 from models.contrastive_loss import compute_contrastive_loss
@@ -32,6 +32,10 @@ class DualGraphLightningModule(L.LightningModule):
         contrastive_loss_type: str = "mse",
         contrastive_margin: float = 0.2,
         coverage_target_keys: tuple = ("branch",),
+        joint_contrastive: bool = False,
+        lambda_ce: float = 1.0,
+        lambda_cl: float = 0.5,
+        or_consistency_weight: float = 0.0,
     ):
         super().__init__()
         # 保存超参数（包括 ModelConfig 的所有字段）
@@ -69,6 +73,12 @@ class DualGraphLightningModule(L.LightningModule):
         self.contrastive_margin = contrastive_margin
         self.use_hyperrectangle = model_config.use_hyperrectangle
         self.coverage_target_keys = coverage_target_keys
+        from datasets.data_types import coverage_key_index
+        self._coverage_key_index = coverage_key_index
+        self.joint_contrastive = joint_contrastive
+        self.lambda_ce = lambda_ce
+        self.lambda_cl = lambda_cl
+        self.or_consistency_weight = or_consistency_weight
 
         # 指标计算器
         self.edge_metrics = EdgeClassificationMetrics()
@@ -141,8 +151,7 @@ class DualGraphLightningModule(L.LightningModule):
             metrics[f"{stage}/{k}"] = v
 
         # 图回归指标（选列 + NaN 行过滤）
-        from datasets.data_types import coverage_key_index
-        col_idx = [coverage_key_index(k) for k in self.coverage_target_keys]
+        col_idx = [self._coverage_key_index(k) for k in self.coverage_target_keys]
         y_target = batch.y[:, col_idx] if batch.y is not None else None
         valid_rows = ~torch.isnan(y_target).any(dim=-1) if y_target is not None else None
         pred_valid = output.graph_pred[valid_rows] if valid_rows is not None and valid_rows.any() else None
@@ -224,12 +233,19 @@ class DualGraphLightningModule(L.LightningModule):
 
         self._test_outputs.clear()
 
-    def training_step(self, batch: DualGraphData, batch_idx: int) -> torch.Tensor:
-        """训练步骤"""
+    def training_step(self, batch, batch_idx: int) -> torch.Tensor:
+        """训练步骤：根据 joint_contrastive 标志路由到不同实现"""
+        if self.joint_contrastive and isinstance(batch, ContrastiveTripleBatch):
+            return self._joint_training_step(batch, batch_idx)
+        # 普通覆盖率预测训练（向后兼容）
+        return self._standard_training_step(batch, batch_idx)
+
+    def _standard_training_step(self, batch: DualGraphData, batch_idx: int) -> torch.Tensor:
+        """标准单图训练步骤（原 training_step 逻辑）"""
         loss, metrics = self._shared_step(batch, "train", lite=True)
         self.log_dict(metrics, on_step=True, on_epoch=True, prog_bar=True, batch_size=1)
 
-        # 对比损失
+        # 对比损失（旧 pair 模式）
         if self.contrastive_loss_weight > 0 and self._contrastive_dataloader is not None:
             pair_batch = self._get_next_contrastive_batch()
             pair_batch.batch_a = pair_batch.batch_a.to(self.device)
@@ -243,7 +259,6 @@ class DualGraphLightningModule(L.LightningModule):
                 margin=self.contrastive_margin,
             )
 
-            # 对比 step 级指标
             c_step = self._compute_contrastive_step_metrics(output_a, output_b, pair_batch.similarity)
             self.log_dict(c_step, on_step=True, on_epoch=True, prog_bar=False, batch_size=1)
 
@@ -252,6 +267,91 @@ class DualGraphLightningModule(L.LightningModule):
             return total
 
         return loss
+
+    def _joint_training_step(self, batch: ContrastiveTripleBatch, batch_idx: int) -> torch.Tensor:
+        """联合三元组训练步骤：单次 training_step 内完成三路覆盖率预测 + 对比学习。
+
+        L_total = lambda_ce * (L_ce_a + L_ce_b + L_ce_merged) + lambda_cl * L_contrastive
+                  [+ or_consistency_weight * L_or]
+        """
+        batch.batch_a = batch.batch_a.to(self.device)
+        batch.batch_b = batch.batch_b.to(self.device)
+        batch.batch_merged = batch.batch_merged.to(self.device)
+        batch.similarity = batch.similarity.to(self.device)
+
+        # 三次 forward（共享编码器参数）
+        out_a = self(batch.batch_a)
+        out_b = self(batch.batch_b)
+        out_m = self(batch.batch_merged)
+
+        # 三路边级 CE 损失
+        losses_a = self.model.compute_loss(
+            out_a, batch.batch_a,
+            edge_loss_weight=self.edge_loss_weight,
+            graph_loss_weight=self.graph_loss_weight,
+            label_smoothing=self.label_smoothing,
+        )
+        losses_b = self.model.compute_loss(
+            out_b, batch.batch_b,
+            edge_loss_weight=self.edge_loss_weight,
+            graph_loss_weight=self.graph_loss_weight,
+            label_smoothing=self.label_smoothing,
+        )
+        losses_m = self.model.compute_loss(
+            out_m, batch.batch_merged,
+            edge_loss_weight=self.edge_loss_weight,
+            graph_loss_weight=0.0,  # merged 无图回归标签，只算边级
+            label_smoothing=self.label_smoothing,
+        )
+
+        l_ce = losses_a["total_loss"] + losses_b["total_loss"] + losses_m["total_loss"]
+
+        # 对比损失（超矩形交集对齐 Jaccard 相似度）
+        l_cl = compute_contrastive_loss(
+            out_a, out_b, batch.similarity,
+            loss_type=self.contrastive_loss_type,
+            margin=self.contrastive_margin,
+        )
+
+        total = self.lambda_ce * l_ce + self.lambda_cl * l_cl
+
+        # 可选：merged 逻辑 OR 一致性约束
+        l_or = torch.tensor(0.0, device=self.device)
+        if self.or_consistency_weight > 0:
+            # 仅在三路边数完全对齐时启用 OR 一致性约束
+            if (
+                out_a.edge_logits.size(0) == out_b.edge_logits.size(0)
+                and out_a.edge_logits.size(0) == out_m.edge_logits.size(0)
+            ):
+                prob_a = torch.softmax(out_a.edge_logits, dim=-1)[:, 1]
+                prob_b = torch.softmax(out_b.edge_logits, dim=-1)[:, 1]
+                prob_or = 1.0 - (1.0 - prob_a) * (1.0 - prob_b)
+                merged_labels = getattr(batch.batch_merged, "edge_labels", None)
+                if merged_labels is not None:
+                    valid = merged_labels != -1
+                    if valid.any():
+                        l_or = F.binary_cross_entropy(
+                            prob_or[valid].clamp(1e-6, 1 - 1e-6),
+                            merged_labels[valid].float(),
+                        )
+                        total = total + self.or_consistency_weight * l_or
+
+        # 日志
+        self.log_dict({
+            "train/edge_loss_a": losses_a["edge_loss"].detach(),
+            "train/edge_loss_b": losses_b["edge_loss"].detach(),
+            "train/edge_loss_merged": losses_m["edge_loss"].detach(),
+            "train/ce_loss": l_ce.detach(),
+            "train/contrastive_loss": l_cl.detach(),
+            "train/or_consistency_loss": l_or.detach(),
+            "train/total_joint_loss": total.detach(),
+        }, on_step=True, on_epoch=True, prog_bar=True, batch_size=1)
+
+        # 对比 step 指标
+        c_step = self._compute_contrastive_step_metrics(out_a, out_b, batch.similarity)
+        self.log_dict(c_step, on_step=True, on_epoch=True, prog_bar=False, batch_size=1)
+
+        return total
 
     def validation_step(self, batch: DualGraphData, batch_idx: int):
         """验证步骤"""

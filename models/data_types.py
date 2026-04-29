@@ -56,5 +56,6 @@ class ModelOutput:
     rtl_final: Optional[torch.Tensor] = None
     asm_final: Optional[torch.Tensor] = None
     matching_matrix: Optional[torch.Tensor] = None
-    hyper_min: Optional[torch.Tensor] = None   # [B, D] 超矩形下界
-    hyper_max: Optional[torch.Tensor] = None   # [B, D] 超矩形上界
+    hyper_min: Optional[torch.Tensor] = None       # [B, D] 超矩形下界
+    hyper_max: Optional[torch.Tensor] = None       # [B, D] 超矩形上界
+    rtl_graph_emb: Optional[torch.Tensor] = None   # [B, D] 图级 RTL 嵌入（对比学习用）
