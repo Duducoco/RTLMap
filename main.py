@@ -64,6 +64,9 @@ def parse_args() -> argparse.Namespace:
     model.add_argument("--hidden-dim", type=int, default=256)
     model.add_argument("--num-gnn-layers", type=int, default=6)
     model.add_argument("--dropout", type=float, default=0.1)
+    model.add_argument(
+        "--hyper-min-margin", type=float, default=0.01, help="超矩形每维度最小宽度"
+    )
 
     # ── 训练超参数 ────────────────────────────────────────
     train_g = p.add_argument_group("训练")
@@ -148,12 +151,6 @@ def parse_args() -> argparse.Namespace:
         "--contrastive-loss-weight", type=float, default=0.5, help="对比损失权重"
     )
     hyper.add_argument(
-        "--contrastive-pairs-per-epoch",
-        type=int,
-        default=512,
-        help="每 epoch 采样对比对数量",
-    )
-    hyper.add_argument(
         "--contrastive-batch-size",
         type=int,
         default=16,
@@ -170,9 +167,6 @@ def parse_args() -> argparse.Namespace:
         choices=["mse", "bce", "margin"],
         default="mse",
         help="对比损失类型",
-    )
-    hyper.add_argument(
-        "--hyper-min-margin", type=float, default=0.01, help="超矩形每维度最小宽度"
     )
 
     # ── 联合三元组对比学习 (joint mode) ───────────────────
@@ -254,11 +248,9 @@ def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
         log_every_n_steps=args.log_every_n_steps,
         use_hyperrectangle=args.use_hyperrectangle,
         contrastive_loss_weight=args.contrastive_loss_weight,
-        contrastive_pairs_per_epoch=args.contrastive_pairs_per_epoch,
         contrastive_batch_size=args.contrastive_batch_size,
         contrastive_margin=args.contrastive_margin,
         contrastive_loss_type=args.contrastive_loss_type,
-        hyper_min_margin=args.hyper_min_margin,
         coverage_target_keys=tuple(args.coverage_targets),
         joint_contrastive=args.joint_contrastive,
         contrastive_triple_index=triple_index,

@@ -6,7 +6,6 @@ from typing import List, Optional, Tuple
 from lightning.pytorch.callbacks import Callback
 
 from datasets import DualGraphDataModule
-from datasets.pair_datamodule import ContrastivePairDataModule
 from datasets.triple_datamodule import ContrastiveTripleDataModule
 from .app_config import AppConfig
 from .lightning_module import DualGraphLightningModule
@@ -93,7 +92,7 @@ def train_model(
         token_budget=trainer_config.token_budget,
     )
 
-    # joint 三元组训练模式
+    effective_datamodule = datamodule
     if trainer_config.joint_contrastive and trainer_config.contrastive_triple_index:
         triple_dm = ContrastiveTripleDataModule(
             dataset_dir=dataset_dir,
@@ -102,22 +101,6 @@ def train_model(
             num_workers=min(trainer_config.num_workers, 4),
         )
         effective_datamodule = _JointTrainDataModule(datamodule, triple_dm)
-    else:
-        effective_datamodule = datamodule
-
-        # 旧 pair 对比学习 DataLoader（向后兼容）
-        if trainer_config.use_hyperrectangle and model_config.use_hyperrectangle:
-            datamodule.setup("fit")
-            contrastive_dm = ContrastivePairDataModule(
-                base_dataset=datamodule.train_dataset,
-                pairs_per_epoch=trainer_config.contrastive_pairs_per_epoch,
-                batch_size=trainer_config.contrastive_batch_size,
-                num_workers=min(trainer_config.num_workers, 2),
-            )
-            contrastive_dm.setup("fit")
-            module.set_contrastive_dataloader(
-                contrastive_dm.contrastive_train_dataloader()
-            )
 
     lightning_trainer = LightningTrainer(
         config=trainer_config,

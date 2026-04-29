@@ -112,20 +112,6 @@ class DualGraphData(Data):
 
 
 @dataclass
-class ContrastivePairBatch:
-    """对比学习对批数据
-
-    Attributes:
-        batch_a: 左侧 PyG batch（一组 DualGraphData）
-        batch_b: 右侧 PyG batch（一组 DualGraphData）
-        similarity: [B] 两侧样本间的覆盖率 Jaccard 相似度
-    """
-    batch_a: DualGraphData
-    batch_b: DualGraphData
-    similarity: torch.Tensor
-
-
-@dataclass
 class ContrastiveTripleBatch:
     """对比学习三元组批数据（来自 contrastive_index.jsonlines）
 
@@ -133,8 +119,9 @@ class ContrastiveTripleBatch:
         batch_a:      test_a 的双图批数据（RTL+ASM，含 edge_labels）
         batch_b:      test_b 的双图批数据（RTL+ASM，含 edge_labels）
         batch_merged: test_a ∪ test_b 合并覆盖率的双图批数据（RTL，含 edge_labels）
-        similarity:   [B] test_a 与 test_b 边级 Jaccard 相似度（对比 loss 监督信号）
+        similarity:   [B] test_a 与 test_b 覆盖率反推 Jaccard 相似度（对比 loss 监督信号）
     """
+
     batch_a: DualGraphData
     batch_b: DualGraphData
     batch_merged: DualGraphData

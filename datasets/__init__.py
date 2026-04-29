@@ -10,25 +10,20 @@
 
 from .data_types import (
     DualGraphData,
-    ContrastivePairBatch,
     ContrastiveTripleBatch,
     COVERAGE_KEYS,
     coverage_key_index,
 )
 from .datamodule import DualGraphDataset, DualGraphDataModule
-from .coverage_similarity import compute_edge_jaccard
 from .triple_datamodule import ContrastiveTripleDataset, ContrastiveTripleDataModule
 
 __all__ = [
     "DualGraphData",
     "DualGraphDataset",
     "DualGraphDataModule",
-    "ContrastivePairBatch",
     "ContrastiveTripleBatch",
     "ContrastiveTripleDataset",
     "ContrastiveTripleDataModule",
-    "compute_edge_jaccard",
     "COVERAGE_KEYS",
     "coverage_key_index",
 ]
-

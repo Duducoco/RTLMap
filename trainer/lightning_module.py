@@ -7,12 +7,16 @@ from typing import Dict, List, Tuple, Any
 import lightning as L
 
 from datasets import DualGraphData
-from datasets.data_types import ContrastivePairBatch, ContrastiveTripleBatch
+from datasets.data_types import ContrastiveTripleBatch
 from models.data_types import ModelConfig, ModelOutput
 from models.model import create_model
 from models.contrastive_loss import compute_contrastive_loss
 from models.hyperrectangle import hyperrectangle_intersection
-from metrics import EdgeClassificationMetrics, CoverageRegressionMetrics, ContrastiveMetrics
+from metrics import (
+    EdgeClassificationMetrics,
+    CoverageRegressionMetrics,
+    ContrastiveMetrics,
+)
 
 
 class DualGraphLightningModule(L.LightningModule):
@@ -74,6 +78,7 @@ class DualGraphLightningModule(L.LightningModule):
         self.use_hyperrectangle = model_config.use_hyperrectangle
         self.coverage_target_keys = coverage_target_keys
         from datasets.data_types import coverage_key_index
+
         self._coverage_key_index = coverage_key_index
         self.joint_contrastive = joint_contrastive
         self.lambda_ce = lambda_ce
@@ -88,12 +93,6 @@ class DualGraphLightningModule(L.LightningModule):
         # epoch 级指标收集器（用于 AUC-ROC/AUPRC/Spearman R）
         self._val_edge_metrics = EdgeClassificationMetrics()
         self._test_edge_metrics = EdgeClassificationMetrics()
-        self._val_contrastive_metrics = ContrastiveMetrics()
-        self._test_contrastive_metrics = ContrastiveMetrics()
-
-        # 对比 DataLoader（外部注入）
-        self._contrastive_dataloader = None
-        self._contrastive_iter = None
 
         # 验证/测试指标累积
         self._val_outputs: List[Dict] = []
@@ -102,21 +101,6 @@ class DualGraphLightningModule(L.LightningModule):
     def forward(self, data: DualGraphData) -> ModelOutput:
         """前向传播"""
         return self.model(data)
-
-    def set_contrastive_dataloader(self, dataloader):
-        """注入对比学习 DataLoader"""
-        self._contrastive_dataloader = dataloader
-        self._contrastive_iter = None
-
-    def _get_next_contrastive_batch(self) -> ContrastivePairBatch:
-        """从对比 DataLoader 取下一批"""
-        if self._contrastive_iter is None:
-            self._contrastive_iter = iter(self._contrastive_dataloader)
-        try:
-            return next(self._contrastive_iter)
-        except StopIteration:
-            self._contrastive_iter = iter(self._contrastive_dataloader)
-            return next(self._contrastive_iter)
 
     def set_regression_baseline(self, targets: torch.Tensor):
         """设置回归指标的 MASE 朴素基准（用训练集 y 均值）"""
@@ -128,7 +112,8 @@ class DualGraphLightningModule(L.LightningModule):
         """共享的训练/验证/测试步骤"""
         output = self(batch)
         losses = self.model.compute_loss(
-            output, batch,
+            output,
+            batch,
             edge_loss_weight=self.edge_loss_weight,
             graph_loss_weight=self.graph_loss_weight,
             label_smoothing=self.label_smoothing,
@@ -153,11 +138,23 @@ class DualGraphLightningModule(L.LightningModule):
         # 图回归指标（选列 + NaN 行过滤）
         col_idx = [self._coverage_key_index(k) for k in self.coverage_target_keys]
         y_target = batch.y[:, col_idx] if batch.y is not None else None
-        valid_rows = ~torch.isnan(y_target).any(dim=-1) if y_target is not None else None
-        pred_valid = output.graph_pred[valid_rows] if valid_rows is not None and valid_rows.any() else None
-        target_valid = y_target[valid_rows] if valid_rows is not None and valid_rows.any() else None
+        valid_rows = (
+            ~torch.isnan(y_target).any(dim=-1) if y_target is not None else None
+        )
+        pred_valid = (
+            output.graph_pred[valid_rows]
+            if valid_rows is not None and valid_rows.any()
+            else None
+        )
+        target_valid = (
+            y_target[valid_rows]
+            if valid_rows is not None and valid_rows.any()
+            else None
+        )
         graph_m = self.regression_metrics.compute(
-            pred_valid, target_valid, lite=lite,
+            pred_valid,
+            target_valid,
+            lite=lite,
             coverage_keys=self.coverage_target_keys,
         )
         for k, v in graph_m.items():
@@ -165,7 +162,9 @@ class DualGraphLightningModule(L.LightningModule):
 
         # epoch 级指标收集（验证/测试）
         if not lite and valid_mask is not None and valid_mask.any():
-            collector = self._val_edge_metrics if stage == "val" else self._test_edge_metrics
+            collector = (
+                self._val_edge_metrics if stage == "val" else self._test_edge_metrics
+            )
             collector.collect_step(output.edge_logits, edge_labels)
 
         return losses["total_loss"], metrics
@@ -175,8 +174,10 @@ class DualGraphLightningModule(L.LightningModule):
     ) -> Dict[str, torch.Tensor]:
         """计算对比学习 step 级指标"""
         intersection = hyperrectangle_intersection(
-            output_a.hyper_min, output_a.hyper_max,
-            output_b.hyper_min, output_b.hyper_max,
+            output_a.hyper_min,
+            output_a.hyper_max,
+            output_b.hyper_min,
+            output_b.hyper_max,
         )
         c_metrics = self.contrastive_metrics.compute(intersection, similarity)
         return {f"train/contrastive_{k}": v for k, v in c_metrics.items()}
@@ -212,12 +213,6 @@ class DualGraphLightningModule(L.LightningModule):
         self.log("val/auc_roc", auc_metrics["auc_roc"], sync_dist=False)
         self.log("val/auprc", auc_metrics["auprc"], sync_dist=False)
 
-        # epoch 级对比学习指标
-        if self.contrastive_loss_weight > 0:
-            cl_metrics = self._val_contrastive_metrics.compute_epoch()
-            self.log("val/alignment_pearson_r", cl_metrics["alignment_pearson_r"], sync_dist=False)
-            self.log("val/alignment_spearman_r", cl_metrics["alignment_spearman_r"], sync_dist=False)
-
         self._val_outputs.clear()
 
     def on_test_epoch_end(self):
@@ -226,49 +221,18 @@ class DualGraphLightningModule(L.LightningModule):
         self.log("test/auc_roc", auc_metrics["auc_roc"], sync_dist=False)
         self.log("test/auprc", auc_metrics["auprc"], sync_dist=False)
 
-        if self.contrastive_loss_weight > 0:
-            cl_metrics = self._test_contrastive_metrics.compute_epoch()
-            self.log("test/alignment_pearson_r", cl_metrics["alignment_pearson_r"], sync_dist=False)
-            self.log("test/alignment_spearman_r", cl_metrics["alignment_spearman_r"], sync_dist=False)
-
         self._test_outputs.clear()
 
     def training_step(self, batch, batch_idx: int) -> torch.Tensor:
-        """训练步骤：根据 joint_contrastive 标志路由到不同实现"""
         if self.joint_contrastive and isinstance(batch, ContrastiveTripleBatch):
             return self._joint_training_step(batch, batch_idx)
-        # 普通覆盖率预测训练（向后兼容）
-        return self._standard_training_step(batch, batch_idx)
-
-    def _standard_training_step(self, batch: DualGraphData, batch_idx: int) -> torch.Tensor:
-        """标准单图训练步骤（原 training_step 逻辑）"""
         loss, metrics = self._shared_step(batch, "train", lite=True)
         self.log_dict(metrics, on_step=True, on_epoch=True, prog_bar=True, batch_size=1)
-
-        # 对比损失（旧 pair 模式）
-        if self.contrastive_loss_weight > 0 and self._contrastive_dataloader is not None:
-            pair_batch = self._get_next_contrastive_batch()
-            pair_batch.batch_a = pair_batch.batch_a.to(self.device)
-            pair_batch.batch_b = pair_batch.batch_b.to(self.device)
-            pair_batch.similarity = pair_batch.similarity.to(self.device)
-            output_a = self(pair_batch.batch_a)
-            output_b = self(pair_batch.batch_b)
-            cl = compute_contrastive_loss(
-                output_a, output_b, pair_batch.similarity,
-                loss_type=self.contrastive_loss_type,
-                margin=self.contrastive_margin,
-            )
-
-            c_step = self._compute_contrastive_step_metrics(output_a, output_b, pair_batch.similarity)
-            self.log_dict(c_step, on_step=True, on_epoch=True, prog_bar=False, batch_size=1)
-
-            total = loss + self.contrastive_loss_weight * cl
-            self.log("train/contrastive_loss", cl, on_step=True, on_epoch=True, prog_bar=True, batch_size=1)
-            return total
-
         return loss
 
-    def _joint_training_step(self, batch: ContrastiveTripleBatch, batch_idx: int) -> torch.Tensor:
+    def _joint_training_step(
+        self, batch: ContrastiveTripleBatch, batch_idx: int
+    ) -> torch.Tensor:
         """联合三元组训练步骤：单次 training_step 内完成三路覆盖率预测 + 对比学习。
 
         L_total = lambda_ce * (L_ce_a + L_ce_b + L_ce_merged) + lambda_cl * L_contrastive
@@ -286,19 +250,22 @@ class DualGraphLightningModule(L.LightningModule):
 
         # 三路边级 CE 损失
         losses_a = self.model.compute_loss(
-            out_a, batch.batch_a,
+            out_a,
+            batch.batch_a,
             edge_loss_weight=self.edge_loss_weight,
             graph_loss_weight=self.graph_loss_weight,
             label_smoothing=self.label_smoothing,
         )
         losses_b = self.model.compute_loss(
-            out_b, batch.batch_b,
+            out_b,
+            batch.batch_b,
             edge_loss_weight=self.edge_loss_weight,
             graph_loss_weight=self.graph_loss_weight,
             label_smoothing=self.label_smoothing,
         )
         losses_m = self.model.compute_loss(
-            out_m, batch.batch_merged,
+            out_m,
+            batch.batch_merged,
             edge_loss_weight=self.edge_loss_weight,
             graph_loss_weight=0.0,  # merged 无图回归标签，只算边级
             label_smoothing=self.label_smoothing,
@@ -308,7 +275,9 @@ class DualGraphLightningModule(L.LightningModule):
 
         # 对比损失（超矩形交集对齐 Jaccard 相似度）
         l_cl = compute_contrastive_loss(
-            out_a, out_b, batch.similarity,
+            out_a,
+            out_b,
+            batch.similarity,
             loss_type=self.contrastive_loss_type,
             margin=self.contrastive_margin,
         )
@@ -319,10 +288,9 @@ class DualGraphLightningModule(L.LightningModule):
         l_or = torch.tensor(0.0, device=self.device)
         if self.or_consistency_weight > 0:
             # 仅在三路边数完全对齐时启用 OR 一致性约束
-            if (
-                out_a.edge_logits.size(0) == out_b.edge_logits.size(0)
-                and out_a.edge_logits.size(0) == out_m.edge_logits.size(0)
-            ):
+            if out_a.edge_logits.size(0) == out_b.edge_logits.size(
+                0
+            ) and out_a.edge_logits.size(0) == out_m.edge_logits.size(0):
                 prob_a = torch.softmax(out_a.edge_logits, dim=-1)[:, 1]
                 prob_b = torch.softmax(out_b.edge_logits, dim=-1)[:, 1]
                 prob_or = 1.0 - (1.0 - prob_a) * (1.0 - prob_b)
@@ -337,15 +305,21 @@ class DualGraphLightningModule(L.LightningModule):
                         total = total + self.or_consistency_weight * l_or
 
         # 日志
-        self.log_dict({
-            "train/edge_loss_a": losses_a["edge_loss"].detach(),
-            "train/edge_loss_b": losses_b["edge_loss"].detach(),
-            "train/edge_loss_merged": losses_m["edge_loss"].detach(),
-            "train/ce_loss": l_ce.detach(),
-            "train/contrastive_loss": l_cl.detach(),
-            "train/or_consistency_loss": l_or.detach(),
-            "train/total_joint_loss": total.detach(),
-        }, on_step=True, on_epoch=True, prog_bar=True, batch_size=1)
+        self.log_dict(
+            {
+                "train/edge_loss_a": losses_a["edge_loss"].detach(),
+                "train/edge_loss_b": losses_b["edge_loss"].detach(),
+                "train/edge_loss_merged": losses_m["edge_loss"].detach(),
+                "train/ce_loss": l_ce.detach(),
+                "train/contrastive_loss": l_cl.detach(),
+                "train/or_consistency_loss": l_or.detach(),
+                "train/total_joint_loss": total.detach(),
+            },
+            on_step=True,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=1,
+        )
 
         # 对比 step 指标
         c_step = self._compute_contrastive_step_metrics(out_a, out_b, batch.similarity)
@@ -358,14 +332,21 @@ class DualGraphLightningModule(L.LightningModule):
         loss, metrics = self._shared_step(batch, "val")
         self._val_outputs.append(metrics)
         self.log_dict(
-            metrics, on_step=False, on_epoch=True, prog_bar=True, batch_size=1, sync_dist=True
+            metrics,
+            on_step=False,
+            on_epoch=True,
+            prog_bar=True,
+            batch_size=1,
+            sync_dist=True,
         )
 
     def test_step(self, batch: DualGraphData, batch_idx: int):
         """测试步骤"""
         loss, metrics = self._shared_step(batch, "test")
         self._test_outputs.append(metrics)
-        self.log_dict(metrics, on_step=False, on_epoch=True, batch_size=1, sync_dist=True)
+        self.log_dict(
+            metrics, on_step=False, on_epoch=True, batch_size=1, sync_dist=True
+        )
 
     def configure_optimizers(self):
         """配置优化器和学习率调度器"""
@@ -395,6 +376,7 @@ class DualGraphLightningModule(L.LightningModule):
                 )
                 if self.scheduler_type == "cosine":
                     import math
+
                     return 0.5 * (1.0 + math.cos(math.pi * progress))
                 elif self.scheduler_type == "linear":
                     return max(0.0, 1.0 - progress)

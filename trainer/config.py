@@ -26,8 +26,8 @@ class TrainerConfig:
     gradient_clip_val: float = 1.0
     accumulate_grad_batches: int = 1
     num_workers: int = 4
-    use_bucketing: bool = False    # 按 RTL 图大小分桶的动态 batch（减少 padding 浪费）
-    token_budget: int = 8192       # bucketing 模式下每 batch 最大 RTL 节点总数
+    use_bucketing: bool = False  # 按 RTL 图大小分桶的动态 batch（减少 padding 浪费）
+    token_budget: int = 8192  # bucketing 模式下每 batch 最大 RTL 节点总数
 
     # 早停
     early_stopping_patience: int = 10
@@ -68,20 +68,18 @@ class TrainerConfig:
     enable_model_summary: bool = True
 
     # 对比学习超矩形配置
-    use_hyperrectangle: bool = False              # 启用超矩形对比学习
-    contrastive_loss_weight: float = 0.5          # 对比损失权重
-    contrastive_pairs_per_epoch: int = 512        # 每 epoch 采样的对比对数量
-    contrastive_batch_size: int = 16              # 对比 DataLoader batch 大小
-    contrastive_margin: float = 0.2               # margin 模式下不相似对的交集上限
-    contrastive_loss_type: str = "mse"            # mse / bce / margin
-    hyper_min_margin: float = 0.01                # 超矩形每维度最小宽度
+    use_hyperrectangle: bool = False  # 启用超矩形对比学习
+    contrastive_loss_weight: float = 0.5  # 对比损失权重
+    contrastive_batch_size: int = 16  # 对比 DataLoader batch 大小
+    contrastive_margin: float = 0.2  # margin 模式下不相似对的交集上限
+    contrastive_loss_type: str = "mse"  # mse / bce / margin
 
     # 联合三元组对比学习配置（joint mode）
-    joint_contrastive: bool = False               # 启用单次 forward 三元组联合训练
-    contrastive_triple_index: str = ""            # contrastive_index.jsonlines 路径（空串=禁用）
-    lambda_ce: float = 1.0                        # 三路 CE 损失的合并权重
-    lambda_cl: float = 0.5                        # 对比损失权重（joint 模式下替代 contrastive_loss_weight）
-    or_consistency_weight: float = 0.0            # merged 逻辑 OR 一致性约束权重（0=关闭）
+    joint_contrastive: bool = False  # 启用单次 forward 三元组联合训练
+    contrastive_triple_index: str = ""  # contrastive_index.jsonlines 路径（空串=禁用）
+    lambda_ce: float = 1.0  # 三路 CE 损失的合并权重
+    lambda_cl: float = 0.5  # 对比损失权重（joint 模式下替代 contrastive_loss_weight）
+    or_consistency_weight: float = 0.0  # merged 逻辑 OR 一致性约束权重（0=关闭）
 
     # 图回归目标选择
-    coverage_target_keys: tuple = ("branch",)     # 实际用于 loss 的覆盖率列子集
+    coverage_target_keys: tuple = ("branch",)  # 实际用于 loss 的覆盖率列子集

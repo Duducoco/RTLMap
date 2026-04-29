@@ -15,12 +15,20 @@ from typing import Optional
 
 import torch
 from torch.utils.data import Dataset, DataLoader
+from torch_geometric.data import Batch
 
-from .data_types import DualGraphData, ContrastiveTripleBatch, COVERAGE_KEYS
-from .coverage_similarity import compute_edge_jaccard
+from .data_types import (
+    DualGraphData,
+    ContrastiveTripleBatch,
+    COVERAGE_KEYS,
+    coverage_key_index,
+)
+from .coverage_similarity import compute_rate_jaccard
 from .datamodule import _build_rtl_structure, _build_asm_graph
 
 logger = logging.getLogger(__name__)
+
+_BRANCH_IDX = coverage_key_index("branch")
 
 
 def _extract_rtl_labels_from_json(rtl: dict) -> tuple[torch.Tensor, torch.Tensor]:
@@ -65,7 +73,11 @@ class ContrastiveTripleDataset(Dataset):
         processed_dir: Optional[str | Path] = None,
     ):
         self.dataset_dir = Path(dataset_dir)
-        self.index_file = Path(index_file) if index_file else self.dataset_dir / "contrastive_index.jsonlines"
+        self.index_file = (
+            Path(index_file)
+            if index_file
+            else self.dataset_dir / "contrastive_index.jsonlines"
+        )
         # processed_dir 用于加载预处理好的 RTL/ASM .pt 图结构缓存（可选）
         self.processed_dir = Path(processed_dir) if processed_dir else None
 
@@ -74,7 +86,9 @@ class ContrastiveTripleDataset(Dataset):
 
     def _load_index(self):
         if not self.index_file.exists():
-            raise FileNotFoundError(f"contrastive_index.jsonlines 不存在: {self.index_file}")
+            raise FileNotFoundError(
+                f"contrastive_index.jsonlines 不存在: {self.index_file}"
+            )
         with open(self.index_file, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -85,7 +99,9 @@ class ContrastiveTripleDataset(Dataset):
     def __len__(self) -> int:
         return len(self._entries)
 
-    def __getitem__(self, idx: int) -> tuple[DualGraphData, DualGraphData, DualGraphData, float]:
+    def __getitem__(
+        self, idx: int
+    ) -> tuple[DualGraphData, DualGraphData, DualGraphData, float]:
         entry = self._entries[idx]
         dd = self.dataset_dir
 
@@ -134,7 +150,11 @@ class ContrastiveTripleDataset(Dataset):
             y=y_merged,
         )
 
-        similarity = float(compute_edge_jaccard(labels_a, labels_b))
+        similarity = compute_rate_jaccard(
+            y_a[0, _BRANCH_IDX].item(),
+            y_b[0, _BRANCH_IDX].item(),
+            y_merged[0, _BRANCH_IDX].item(),
+        )
         return data_a, data_b, data_merged, similarity
 
 
@@ -145,9 +165,9 @@ def contrastive_triple_collate(
     items_a, items_b, items_merged, sims = zip(*triple_list)
 
     follow = ["asm_node_type"]
-    batch_a = DualGraphData.from_data_list(list(items_a), follow_batch=follow)
-    batch_b = DualGraphData.from_data_list(list(items_b), follow_batch=follow)
-    batch_merged = DualGraphData.from_data_list(list(items_merged), follow_batch=follow)
+    batch_a = Batch.from_data_list(list(items_a), follow_batch=follow)
+    batch_b = Batch.from_data_list(list(items_b), follow_batch=follow)
+    batch_merged = Batch.from_data_list(list(items_merged), follow_batch=follow)
     similarity = torch.tensor(sims, dtype=torch.float32)
 
     return ContrastiveTripleBatch(
