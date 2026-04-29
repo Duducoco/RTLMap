@@ -11,6 +11,7 @@ PyTorch Lightning 训练模块
 """
 
 from .config import TrainerConfig
+from .app_config import AppConfig, DataConfig, RuntimeConfig
 from .lightning_module import DualGraphLightningModule
 from .callbacks import CallbackFactory
 from .utils import train_model
@@ -19,6 +20,10 @@ from .lightning_trainer import LightningTrainer
 __all__ = [
     # 配置
     "TrainerConfig",
+    # 配置聚合
+    "AppConfig",
+    "DataConfig",
+    "RuntimeConfig",
     # 模型
     "DualGraphLightningModule",
     # Callbacks

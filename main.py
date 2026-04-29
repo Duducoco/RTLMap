@@ -32,6 +32,7 @@ import torch
 from datasets import DualGraphDataModule
 from models.data_types import ModelConfig
 from trainer.config import TrainerConfig
+from trainer.app_config import AppConfig, DataConfig, RuntimeConfig
 from trainer.lightning_module import DualGraphLightningModule
 from trainer.lightning_trainer import LightningTrainer
 from trainer.utils import train_model
@@ -140,13 +141,39 @@ def parse_args() -> argparse.Namespace:
 
     # ── 对比学习 (超矩形) ──────────────────────────────
     hyper = p.add_argument_group("对比学习 (Hyperrectangle)")
-    hyper.add_argument("--use-hyperrectangle", action="store_true", help="启用超矩形对比学习")
-    hyper.add_argument("--contrastive-loss-weight", type=float, default=0.5, help="对比损失权重")
-    hyper.add_argument("--contrastive-pairs-per-epoch", type=int, default=512, help="每 epoch 采样对比对数量")
-    hyper.add_argument("--contrastive-batch-size", type=int, default=16, help="对比 DataLoader batch 大小")
-    hyper.add_argument("--contrastive-margin", type=float, default=0.2, help="margin 模式下不相似对交集上限")
-    hyper.add_argument("--contrastive-loss-type", choices=["mse", "bce", "margin"], default="mse", help="对比损失类型")
-    hyper.add_argument("--hyper-min-margin", type=float, default=0.01, help="超矩形每维度最小宽度")
+    hyper.add_argument(
+        "--use-hyperrectangle", action="store_true", help="启用超矩形对比学习"
+    )
+    hyper.add_argument(
+        "--contrastive-loss-weight", type=float, default=0.5, help="对比损失权重"
+    )
+    hyper.add_argument(
+        "--contrastive-pairs-per-epoch",
+        type=int,
+        default=512,
+        help="每 epoch 采样对比对数量",
+    )
+    hyper.add_argument(
+        "--contrastive-batch-size",
+        type=int,
+        default=16,
+        help="对比 DataLoader batch 大小",
+    )
+    hyper.add_argument(
+        "--contrastive-margin",
+        type=float,
+        default=0.2,
+        help="margin 模式下不相似对交集上限",
+    )
+    hyper.add_argument(
+        "--contrastive-loss-type",
+        choices=["mse", "bce", "margin"],
+        default="mse",
+        help="对比损失类型",
+    )
+    hyper.add_argument(
+        "--hyper-min-margin", type=float, default=0.01, help="超矩形每维度最小宽度"
+    )
 
     # ── 联合三元组对比学习 (joint mode) ───────────────────
     joint = p.add_argument_group("联合训练 (Joint Contrastive)")
@@ -161,8 +188,12 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="contrastive_index.jsonlines 路径（空串时自动拼接 dataset-dir/contrastive_index.jsonlines）",
     )
-    joint.add_argument("--lambda-ce", type=float, default=1.0, help="三路 CE 损失的合并权重")
-    joint.add_argument("--lambda-cl", type=float, default=0.5, help="joint 模式下对比损失权重")
+    joint.add_argument(
+        "--lambda-ce", type=float, default=1.0, help="三路 CE 损失的合并权重"
+    )
+    joint.add_argument(
+        "--lambda-cl", type=float, default=0.5, help="joint 模式下对比损失权重"
+    )
     joint.add_argument(
         "--or-consistency-weight",
         type=float,
@@ -191,7 +222,6 @@ def build_model_config(args: argparse.Namespace) -> ModelConfig:
         use_hyperrectangle=args.use_hyperrectangle,
         hyper_min_margin=args.hyper_min_margin,
         coverage_target_keys=tuple(args.coverage_targets),
-        num_graph_targets=len(args.coverage_targets),
     )
 
 
@@ -272,6 +302,21 @@ def main() -> None:
     trainer_config = build_trainer_config(args)
     text_encoder_config = build_text_encoder_config(args)
 
+    app_config = AppConfig(
+        data=DataConfig(
+            data_root=args.data_root,
+            dataset_dir=args.dataset_dir,
+        ),
+        model=model_config,
+        trainer=trainer_config,
+        text_encoder=text_encoder_config,
+        runtime=RuntimeConfig(
+            logger_type=args.logger_type,
+            experiment_name=args.experiment_name,
+            ckpt_path=args.ckpt_path,
+        ),
+    )
+
     logger.info("实验: %s", args.experiment_name)
     logger.info(
         "模型: hidden_dim=%d, gnn_layers=%d, hyperrectangle=%s",
@@ -313,16 +358,7 @@ def main() -> None:
         lt.test(module, datamodule)
     else:
         module, trainer = train_model(
-            model_config=model_config,
-            trainer_config=trainer_config,
-            data_root=args.data_root,
-            dataset_dir=args.dataset_dir,
-            text_encoder_config=text_encoder_config,
-            has_validation=True,
-            has_test=False,
-            logger_type=args.logger_type,
-            experiment_name=args.experiment_name,
-            ckpt_path=args.ckpt_path,
+            app_config=app_config,
         )
         logger.info("训练完成")
 

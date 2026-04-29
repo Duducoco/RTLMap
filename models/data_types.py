@@ -2,7 +2,7 @@
 """模型配置和输出数据类型"""
 
 import torch
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 # 从 cdfg_rtl 导入 cell 类型数量
@@ -20,7 +20,7 @@ class ModelConfig:
 
     # 任务配置
     num_edge_classes: int = 2  # {0: 未覆盖, 1: 已覆盖}，-1 被 mask 掉
-    num_graph_targets: int = 1
+    num_graph_targets: int = field(init=False, default=1)
     coverage_target_keys: tuple = ("branch",)  # 实际用于 loss 的覆盖率列子集
 
     # RTL 特征配置
@@ -36,15 +36,18 @@ class ModelConfig:
     asm_instruction_dim: int = 256  # ASM 指令编码维度（由外部模型生成）
 
     # 融合配置（PerceiverCrossFusion）
-    perceiver_num_latents: int = 16   # latent token 数量 K
-    perceiver_num_heads: int = 4      # Multi-head Attention 头数
+    perceiver_num_latents: int = 16  # latent token 数量 K
+    perceiver_num_heads: int = 4  # Multi-head Attention 头数
 
     # ASM 节点编码器适配器
-    use_asm_adapter: bool = True      # 在 instruction_encoding 投影前插入可训练 Adapter
+    use_asm_adapter: bool = True  # 在 instruction_encoding 投影前插入可训练 Adapter
 
     # 对比学习超矩形配置
     use_hyperrectangle: bool = False  # 启用超矩形对比学习
-    hyper_min_margin: float = 0.01    # 超矩形每个维度的最小宽度
+    hyper_min_margin: float = 0.01  # 超矩形每个维度的最小宽度
+
+    def __post_init__(self):
+        self.num_graph_targets = len(self.coverage_target_keys)
 
 
 @dataclass
@@ -56,6 +59,6 @@ class ModelOutput:
     rtl_final: Optional[torch.Tensor] = None
     asm_final: Optional[torch.Tensor] = None
     matching_matrix: Optional[torch.Tensor] = None
-    hyper_min: Optional[torch.Tensor] = None       # [B, D] 超矩形下界
-    hyper_max: Optional[torch.Tensor] = None       # [B, D] 超矩形上界
-    rtl_graph_emb: Optional[torch.Tensor] = None   # [B, D] 图级 RTL 嵌入（对比学习用）
+    hyper_min: Optional[torch.Tensor] = None  # [B, D] 超矩形下界
+    hyper_max: Optional[torch.Tensor] = None  # [B, D] 超矩形上界
+    rtl_graph_emb: Optional[torch.Tensor] = None  # [B, D] 图级 RTL 嵌入（对比学习用）
