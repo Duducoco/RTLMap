@@ -135,25 +135,12 @@ class DualGraphLightningModule(L.LightningModule):
         for k, v in edge_m.items():
             metrics[f"{stage}/{k}"] = v
 
-        # 图回归指标（选列 + NaN 行过滤）
+        # 图回归指标（选列，指标内部按覆盖率列独立过滤 NaN）
         col_idx = [self._coverage_key_index(k) for k in self.coverage_target_keys]
         y_target = batch.y[:, col_idx] if batch.y is not None else None
-        valid_rows = (
-            ~torch.isnan(y_target).any(dim=-1) if y_target is not None else None
-        )
-        pred_valid = (
-            output.graph_pred[valid_rows]
-            if valid_rows is not None and valid_rows.any()
-            else None
-        )
-        target_valid = (
-            y_target[valid_rows]
-            if valid_rows is not None and valid_rows.any()
-            else None
-        )
         graph_m = self.regression_metrics.compute(
-            pred_valid,
-            target_valid,
+            output.graph_pred if y_target is not None else None,
+            y_target,
             lite=lite,
             coverage_keys=self.coverage_target_keys,
         )

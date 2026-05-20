@@ -38,7 +38,7 @@ class CoverageRegressionMetrics:
 
         Args:
             pred: [B, K] 预测覆盖率（None 时返回零指标）
-            target: [B, K] 真实覆盖率（None 时返回零指标，NaN 行应在调用前过滤）
+            target: [B, K] 真实覆盖率（None 时返回零指标，NaN 值会按列过滤）
             lite: True 时仅计算核心指标
             coverage_keys: 与 pred/target 列对应的覆盖率类型名（用于多列时的指标后缀）
         """
@@ -73,7 +73,34 @@ class CoverageRegressionMetrics:
             sfx = _suffix(key)
             p = pred[:, col] if pred.dim() == 2 else pred.view(-1)
             t = target[:, col] if target.dim() == 2 else target.view(-1)
-            result.update(self._compute_single(p, t, lite=lite, suffix=sfx))
+            valid = ~torch.isnan(t)
+            if valid.any():
+                result.update(self._compute_single(p[valid], t[valid], lite=lite, suffix=sfx))
+            else:
+                result.update(self._zero_single(device=pred.device, lite=lite, suffix=sfx))
+        return result
+
+    def _zero_single(
+        self,
+        device: torch.device,
+        lite: bool,
+        suffix: str,
+    ) -> Dict[str, torch.Tensor]:
+        _zero = torch.tensor(0.0, device=device)
+        result = {
+            f"graph_mse{suffix}": _zero,
+            f"graph_mae{suffix}": _zero,
+        }
+        if not lite:
+            result.update({
+                f"graph_rmse{suffix}": _zero,
+                f"graph_mape{suffix}": _zero,
+                f"graph_smape{suffix}": _zero,
+                f"graph_medae{suffix}": _zero,
+                f"graph_r2{suffix}": _zero,
+                f"graph_r{suffix}": _zero,
+                f"graph_mase{suffix}": _zero,
+            })
         return result
 
     def _compute_single(

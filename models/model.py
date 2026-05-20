@@ -12,10 +12,11 @@
 - Label Smoothing 防止过拟合
 """
 
+from typing import Dict, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Optional
 
 from datasets import DualGraphData
 from datasets.data_types import coverage_key_index
@@ -88,6 +89,22 @@ class EdgeClassifier(nn.Module):
         return self.net(combined)
 
 
+class CoverageHead(nn.Module):
+    """单个图级覆盖率预测头。"""
+
+    def __init__(self, hidden_dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, rtl_graph_emb: torch.Tensor) -> torch.Tensor:
+        return self.net(rtl_graph_emb)
+
+
 class GraphRegressor(nn.Module):
     """
     图级回归器
@@ -95,13 +112,19 @@ class GraphRegressor(nn.Module):
     仅使用 RTL CDFG 的图级嵌入进行回归
     """
 
-    def __init__(self, hidden_dim: int, num_targets: int = 1, dropout: float = 0.1):
+    def __init__(
+        self,
+        hidden_dim: int,
+        coverage_target_keys: tuple[str, ...] = ("branch",),
+        dropout: float = 0.1,
+    ):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_targets),
+        self.coverage_target_keys = tuple(coverage_target_keys)
+        self.heads = nn.ModuleDict(
+            {
+                key: CoverageHead(hidden_dim, dropout)
+                for key in self.coverage_target_keys
+            }
         )
 
     def forward(self, rtl_graph_emb: torch.Tensor) -> torch.Tensor:
@@ -112,7 +135,8 @@ class GraphRegressor(nn.Module):
         Returns:
             [B, num_targets] 图级预测
         """
-        return self.net(rtl_graph_emb)
+        preds = [self.heads[key](rtl_graph_emb) for key in self.coverage_target_keys]
+        return torch.cat(preds, dim=-1)
 
 
 class DualGraphFusionModel(nn.Module):
@@ -161,7 +185,7 @@ class DualGraphFusionModel(nn.Module):
 
         # 图回归器（仅 RTL）
         self.graph_regressor = GraphRegressor(
-            config.hidden_dim, config.num_graph_targets, config.dropout
+            config.hidden_dim, config.coverage_target_keys, config.dropout
         )
 
         # 超矩形头（条件创建）
@@ -274,18 +298,21 @@ class DualGraphFusionModel(nn.Module):
             losses["edge_loss"] = torch.tensor(0.0, device=device)
             losses["num_valid_edges"] = 0
 
-        # 图回归损失（按 coverage_target_keys 选列，NaN 行跳过）
+        # 图回归损失（每个覆盖率 head 独立按 NaN mask 训练）
         if data.y is not None:
             col_idx = [coverage_key_index(k) for k in self.config.coverage_target_keys]
             target = data.y[:, col_idx]                        # [B, K]
-            valid = ~torch.isnan(target).any(dim=-1)           # [B]
+            valid = ~torch.isnan(target)                       # [B, K]
             if valid.any():
                 graph_loss = F.smooth_l1_loss(output.graph_pred[valid], target[valid])
+                losses["num_valid_graph_targets"] = int(valid.sum().item())
             else:
                 graph_loss = output.graph_pred.sum() * 0.0
+                losses["num_valid_graph_targets"] = 0
             losses["graph_loss"] = graph_loss * graph_loss_weight
         else:
             losses["graph_loss"] = torch.tensor(0.0, device=device)
+            losses["num_valid_graph_targets"] = 0
 
         losses["total_loss"] = losses["edge_loss"] + losses["graph_loss"]
         return losses
