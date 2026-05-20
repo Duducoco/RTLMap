@@ -113,7 +113,7 @@ class DualGraphData(Data):
 
 @dataclass
 class ContrastiveTripleBatch:
-    """对比学习三元组批数据（来自 contrastive_index.jsonlines）
+    """对比学习三元组批数据（来自 contrastive_samples.jsonlines）
 
     Attributes:
         batch_a:      test_a 的双图批数据（RTL+ASM，含 edge_labels）

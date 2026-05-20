@@ -9,7 +9,7 @@ import logging
 import os
 from multiprocessing import Pool
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional, Callable, Union
+from typing import TYPE_CHECKING, List, Optional, Callable, Union, Sequence
 
 if TYPE_CHECKING:
     from text_encoder import TextEncoderConfig
@@ -30,6 +30,7 @@ _EDGE_TYPE_MAP = {e.name: e.value - 1 for e in EdgeType}
 _ASM_NODE_TYPE_MAP = {e.name: e.value - 1 for e in AsmNodeType}
 _ASM_EDGE_TYPE_MAP = {e.name: e.value - 1 for e in AsmEdgeType}
 _NODE_TYPE_MAP = {idx: nt for idx, nt in enumerate(CELL_TYPE_TO_NODE_TYPE)}
+_EMPTY_ASM_KEY = "__empty_asm__"
 
 
 def _make_edge_index(src: list, tgt: list) -> torch.Tensor:
@@ -37,6 +38,14 @@ def _make_edge_index(src: list, tgt: list) -> torch.Tensor:
     if src:
         return torch.tensor([src, tgt], dtype=torch.long)
     return torch.empty((2, 0), dtype=torch.long)
+
+
+def _normalize_cell_type(cell_type: str) -> str:
+    if cell_type == "input":
+        return "INPUT"
+    if cell_type == "output":
+        return "OUTPUT"
+    return cell_type
 
 
 def _build_rtl_structure(rtl: dict) -> dict:
@@ -48,7 +57,7 @@ def _build_rtl_structure(rtl: dict) -> dict:
     nodes = rtl["nodes"]
     node_id_to_idx = {n["id"]: i for i, n in enumerate(nodes)}
 
-    node_cell_type = [get_cell_type_index(n["cell_type"]) for n in nodes]
+    node_cell_type = [get_cell_type_index(_normalize_cell_type(n["cell_type"])) for n in nodes]
     node_width = [n["width"] for n in nodes]
 
     src_list, tgt_list = [], []
@@ -125,55 +134,122 @@ def _build_asm_graph(asm_json_path: str, asm_encoding: Optional[torch.Tensor]) -
     }
 
 
-def _read_dataset_index(dataset_dir: Path) -> list[tuple[str, str]]:
-    """读取 dataset_index.jsonlines，返回 [(rtl_abs, asm_abs), ...]"""
-    index_file = dataset_dir / "dataset_index.jsonlines"
-    results: list[tuple[str, str]] = []
-    with open(index_file, encoding="utf-8") as f:
+def _empty_asm_graph() -> dict:
+    return {
+        "asm_node_type": torch.zeros(1, dtype=torch.long),
+        "asm_instruction_encoding": torch.zeros(1, 256),
+        "asm_edge_index": torch.empty((2, 0), dtype=torch.long),
+        "asm_edge_type": torch.empty(0, dtype=torch.long),
+    }
+
+
+DatasetDirInput = Union[str, Path, Sequence[Union[str, Path]]]
+
+
+def _normalize_dataset_dirs(
+    dataset_dir: Optional[DatasetDirInput],
+) -> list[Path]:
+    if dataset_dir is None:
+        return []
+    if isinstance(dataset_dir, (str, Path)):
+        return [Path(dataset_dir)]
+    return [Path(p) for p in dataset_dir]
+
+
+def _read_manifest_samples(dataset_dir: Path) -> list[dict]:
+    """读取 coverage-report-extractor 新格式 manifest/samples。"""
+    manifest_file = dataset_dir / "manifest.json"
+    if not manifest_file.exists():
+        raise FileNotFoundError(f"manifest.json 不存在: {manifest_file}")
+
+    with open(manifest_file, encoding="utf-8") as f:
+        manifest = json.load(f)
+    if manifest.get("schema_version") != "dataset.v1":
+        raise ValueError(
+            f"不支持的数据集 schema: {manifest.get('schema_version')!r}, "
+            "期望 dataset.v1"
+        )
+
+    samples_file = dataset_dir / manifest.get("samples", "samples.jsonlines")
+    if not samples_file.exists():
+        raise FileNotFoundError(f"samples.jsonlines 不存在: {samples_file}")
+
+    results: list[dict] = []
+    with open(samples_file, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
             entry = json.loads(line)
-            rtl = str(dataset_dir / entry["rtl"])
-            asm = str(dataset_dir / entry["asm"])
-            results.append((rtl, asm))
+            if entry.get("schema_version") != "sample.v1":
+                raise ValueError(
+                    f"不支持的样本 schema: {entry.get('schema_version')!r}"
+                )
+            sample = dict(entry)
+            sample["_rtl_path"] = str(dataset_dir / entry["rtl_graph"])
+            sample["_asm_path"] = (
+                str(dataset_dir / entry["asm_graph"]) if entry.get("asm_graph") else None
+            )
+            results.append(sample)
     return results
 
 
+def _read_manifest_samples_from_dirs(dataset_dirs: list[Path]) -> list[dict]:
+    samples: list[dict] = []
+    for dataset_dir in dataset_dirs:
+        samples.extend(_read_manifest_samples(dataset_dir))
+    return samples
+
+
+def _extract_targets_from_sample(sample: dict, valid_edge_mask: list[bool]) -> tuple[torch.Tensor, torch.Tensor]:
+    targets = sample.get("targets", {})
+    edge_target = targets.get("edge_coverage", {})
+    default_label = int(edge_target.get("default", -1))
+    labels_by_edge_id = [default_label] * len(valid_edge_mask)
+    for item in edge_target.get("labels", []):
+        edge_id = int(item["edge_id"])
+        if 0 <= edge_id < len(labels_by_edge_id):
+            labels_by_edge_id[edge_id] = int(item["label"])
+
+    elabel_list = [
+        label
+        for label, valid in zip(labels_by_edge_id, valid_edge_mask)
+        if valid
+    ]
+
+    graph_values = targets.get("graph_coverage", {}).get("values", {})
+    y_vals = []
+    for key in COVERAGE_KEYS:
+        v = graph_values.get(key)
+        y_vals.append(float("nan") if v is None else float(v) / 100.0)
+
+    return (
+        torch.tensor(elabel_list, dtype=torch.long),
+        torch.tensor([y_vals], dtype=torch.float),
+    )
+
+
 def _build_and_save_labels(
-    args: tuple[str, str, str, str, int],
+    args: tuple[dict, str, str, str, int],
 ) -> bool:
     """阶段 2 worker: 仅提取标签并保存轻量 data_{idx}.pt
 
     RTL 图结构和 ASM 图已去重保存，此处仅保存 edge_labels + y + 引用文件名。
     通过 _valid_edge_mask 保证标签与图结构的边过滤一致。
     """
-    rtl_json_path, rtl_filename, asm_filename, processed_dir, idx = args
+    sample, rtl_filename, asm_filename, processed_dir, idx = args
 
     try:
+        rtl_json_path = sample["_rtl_path"]
         with open(rtl_json_path, encoding="utf-8") as f:
             rtl = json.load(f)
 
-        nodes = rtl["nodes"]
-        node_id_to_idx = {n["id"]: i for i, n in enumerate(nodes)}
-
-        elabel_list = []
-        for e in rtl["edges"]:
-            si = node_id_to_idx.get(e["source"])
-            ti = node_id_to_idx.get(e["target"])
-            if si is None or ti is None:
-                continue
-            elabel_list.append(e["coverage_label"])
-
-        y_vals = []
-        for key in COVERAGE_KEYS:
-            v = rtl.get(key)
-            y_vals.append(float("nan") if v is None else float(v) / 100.0)
+        valid_edge_mask = _build_rtl_structure(rtl)["_valid_edge_mask"]
+        edge_labels, y = _extract_targets_from_sample(sample, valid_edge_mask)
 
         data = DualGraphData(
-            edge_labels=torch.tensor(elabel_list, dtype=torch.long),
-            y=torch.tensor([y_vals], dtype=torch.float),
+            edge_labels=edge_labels,
+            y=y,
             _rtl_file=rtl_filename,
             _asm_file=asm_filename,
         )
@@ -183,11 +259,13 @@ def _build_and_save_labels(
         return True
 
     except Exception as e:
-        logger.error("构建/保存标签失败 [%s]: %s", rtl_json_path, e)
+        logger.error("构建/保存标签失败 [%s]: %s", sample.get("_rtl_path"), e)
         return False
 
 
 def _compute_asm_cache_key(asm_path: str, config_fingerprint: str) -> str:
+    if asm_path == _EMPTY_ASM_KEY:
+        return _EMPTY_ASM_KEY
     h = hashlib.sha256()
     with open(asm_path, "rb") as f:
         for chunk in iter(lambda: f.read(65536), b""):
@@ -201,11 +279,11 @@ class DualGraphDataset(Dataset):
     双图数据集 - 继承自 PyG Dataset
 
     从 coverage-report-extractor 生成的数据集目录加载数据。
-    目录须包含 dataset_index.jsonlines 索引文件。
+    目录须包含 manifest.json 和 samples.jsonlines。
 
     Args:
         root: 数据集根目录，包含 processed/ 子目录（PyG 约定）
-        dataset_dir: coverage-report-extractor 输出目录（含 dataset_index.jsonlines）
+        dataset_dir: coverage-report-extractor 输出目录（含 manifest.json）
         text_encoder_config: 文本编码器配置，None 时回退到零向量
         transform: 每次获取数据时应用的变换
         pre_transform: 处理前应用的变换（保存到磁盘）
@@ -215,7 +293,7 @@ class DualGraphDataset(Dataset):
     def __init__(
         self,
         root: Optional[str] = "dataset_root",
-        dataset_dir: Optional[Union[str, Path]] = None,
+        dataset_dir: Optional[DatasetDirInput] = None,
         text_encoder_config: Optional["TextEncoderConfig"] = None,
         num_workers: int = 0,
         transform: Optional[Callable] = None,
@@ -223,7 +301,7 @@ class DualGraphDataset(Dataset):
         pre_filter: Optional[Callable] = None,
     ):
         self.root = root
-        self._dataset_dir = Path(dataset_dir) if dataset_dir else None
+        self._dataset_dirs = _normalize_dataset_dirs(dataset_dir)
         self._num_samples: Optional[int] = None
         self._idx_to_file: list[str] = []
         self._text_encoder_config = text_encoder_config
@@ -232,9 +310,9 @@ class DualGraphDataset(Dataset):
 
     @property
     def raw_file_names(self) -> List[str]:
-        if self._dataset_dir is None:
+        if not self._dataset_dirs:
             return []
-        return [str(self._dataset_dir / "dataset_index.jsonlines")]
+        return [str(dataset_dir / "manifest.json") for dataset_dir in self._dataset_dirs]
 
     def _scan_processed_files(self) -> list[str]:
         processed_path = Path(self.processed_dir)
@@ -261,28 +339,42 @@ class DualGraphDataset(Dataset):
 
     def process(self):
         """两阶段流水线：批量 GPU 编码 → 多进程张量构建"""
-        if self._dataset_dir is None:
+        if not self._dataset_dirs:
             logger.warning("未指定 dataset_dir，跳过处理")
             self._num_samples = 0
             return
 
-        index_file = self._dataset_dir / "dataset_index.jsonlines"
-        if not index_file.exists():
-            logger.error("dataset_index.jsonlines 不存在: %s", index_file)
+        for dataset_dir in self._dataset_dirs:
+            manifest_file = dataset_dir / "manifest.json"
+            if not manifest_file.exists():
+                logger.error("manifest.json 不存在: %s", manifest_file)
+                self._num_samples = 0
+                return
+
+        try:
+            samples = _read_manifest_samples_from_dirs(self._dataset_dirs)
+        except Exception as e:
+            logger.error("读取 manifest/samples 失败: %s", e)
+            self._num_samples = 0
+            return
+        if not samples:
+            logger.warning("samples.jsonlines 为空")
             self._num_samples = 0
             return
 
-        flat_results = _read_dataset_index(self._dataset_dir)
-        if not flat_results:
-            logger.warning("dataset_index.jsonlines 为空")
-            self._num_samples = 0
-            return
-
-        logger.info("读取索引完成: %d 个 (rtl, asm) 对", len(flat_results))
+        logger.info(
+            "读取 manifest 完成: %d 个数据集, %d 个样本",
+            len(self._dataset_dirs),
+            len(samples),
+        )
 
         # ── 阶段 1: 批量 GPU 编码（CodeBERT）+ 磁盘缓存 ──
         asm_encodings: dict[str, "torch.Tensor"] = {}
-        unique_asm_paths = list({asm for _, asm in flat_results})
+        unique_asm_paths = sorted({
+            sample["_asm_path"]
+            for sample in samples
+            if sample.get("_asm_path") is not None
+        })
 
         if self._text_encoder_config is not None and unique_asm_paths:
             cache_dir = Path(self.root) / "asm_encoding_cache"
@@ -352,15 +444,14 @@ class DualGraphDataset(Dataset):
         processed_dir = self.processed_dir
 
         # --- RTL 图去重 ---
-        rtl_module_to_path: dict[str, str] = {}
-        for rtl_path, _ in flat_results:
-            module_name = Path(rtl_path).stem
-            if module_name not in rtl_module_to_path:
-                rtl_module_to_path[module_name] = rtl_path
-
-        rtl_module_to_file: dict[str, str] = {}
-        for module_name, rtl_path in rtl_module_to_path.items():
-            rtl_filename = f"rtl_{module_name}.pt"
+        rtl_path_to_file: dict[str, str] = {}
+        for sample in samples:
+            rtl_path = sample["_rtl_path"]
+            if rtl_path in rtl_path_to_file:
+                continue
+            module_name = sample.get("module_name") or Path(rtl_path).stem
+            graph_key = hashlib.sha256(rtl_path.encode("utf-8")).hexdigest()[:16]
+            rtl_filename = f"rtl_{module_name}_{graph_key}.pt"
             rtl_file_path = Path(processed_dir) / rtl_filename
             if not rtl_file_path.exists():
                 with open(rtl_path, encoding="utf-8") as f:
@@ -368,12 +459,18 @@ class DualGraphDataset(Dataset):
                 rtl_data = _build_rtl_structure(rtl_json)
                 rtl_data.pop("_valid_edge_mask", None)
                 torch.save(rtl_data, rtl_file_path)
-            rtl_module_to_file[module_name] = rtl_filename
+            rtl_path_to_file[rtl_path] = rtl_filename
 
-        logger.info("阶段 1.5a: 保存 %d 个去重 RTL 图结构", len(rtl_module_to_file))
+        logger.info("阶段 1.5a: 保存 %d 个去重 RTL 图结构", len(rtl_path_to_file))
 
         # --- ASM 图去重 ---
-        asm_path_to_file: dict[str, str] = {}
+        asm_path_to_file: dict[Optional[str], str] = {}
+        empty_asm_filename = "asm_empty.pt"
+        empty_asm_path = Path(processed_dir) / empty_asm_filename
+        if not empty_asm_path.exists():
+            torch.save(_empty_asm_graph(), empty_asm_path)
+        asm_path_to_file[None] = empty_asm_filename
+
         for asm_path in unique_asm_paths:
             asm_hash = hashlib.sha256(asm_path.encode("utf-8")).hexdigest()[:16]
             asm_filename = f"asm_{asm_hash}.pt"
@@ -389,16 +486,17 @@ class DualGraphDataset(Dataset):
         del asm_encodings
 
         # ── 阶段 2: 多进程标签提取 + 保存（轻量） ──
-        save_args: list[tuple[str, str, str, str, int]] = []
+        save_args: list[tuple[dict, str, str, str, int]] = []
 
-        for i, (rtl_path, asm_path) in enumerate(flat_results):
-            module_name = Path(rtl_path).stem
-            rtl_filename = rtl_module_to_file.get(module_name)
+        for i, sample in enumerate(samples):
+            rtl_path = sample["_rtl_path"]
+            asm_path = sample.get("_asm_path")
+            rtl_filename = rtl_path_to_file.get(rtl_path)
             asm_filename = asm_path_to_file.get(asm_path)
             if rtl_filename is None or asm_filename is None:
                 logger.error("图文件缺失，跳过: rtl=%s asm=%s", rtl_path, asm_path)
                 continue
-            save_args.append((rtl_path, rtl_filename, asm_filename, processed_dir, i))
+            save_args.append((sample, rtl_filename, asm_filename, processed_dir, i))
 
         logger.info(
             "阶段 2/2: 多进程标签提取 + 保存 (%d 个样本, %d workers)",
@@ -569,7 +667,7 @@ class DualGraphDataModule(L.LightningDataModule):
     def __init__(
         self,
         root: str,
-        dataset_dir: Optional[Union[str, Path]] = None,
+        dataset_dir: Optional[DatasetDirInput] = None,
         text_encoder_config: Optional["TextEncoderConfig"] = None,
         batch_size: int = 32,
         num_workers: int = 4,
@@ -580,7 +678,7 @@ class DualGraphDataModule(L.LightningDataModule):
         """
         Args:
             root: 数据集根目录（存放 processed/ .pt 文件）
-            dataset_dir: coverage-report-extractor 输出目录（含 dataset_index.jsonlines）
+            dataset_dir: coverage-report-extractor 输出目录（含 manifest.json）
             text_encoder_config: 文本编码器配置，None 时回退到零向量
             batch_size: 固定 batch 大小（use_bucketing=False 时生效）
             num_workers: 数据加载线程数
@@ -607,6 +705,7 @@ class DualGraphDataModule(L.LightningDataModule):
             root=str(Path(self.root) / split),
             dataset_dir=self.dataset_dir,
             text_encoder_config=self.text_encoder_config,
+            num_workers=self.num_workers,
             transform=self.transform,
         )
 

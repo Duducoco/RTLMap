@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """联合三元组对比学习数据管线
 
-从 contrastive_index.jsonlines 加载三元组 (test_a, test_b, merged)，
+从 manifest.json/contrastive_samples.jsonlines 加载三元组 (test_a, test_b, merged)，
 每条样本包含三张 DualGraphData（共享图拓扑，仅 edge_labels/y 不同），
 用于单次 forward 内同时计算三路覆盖率预测损失和对比损失。
 """
@@ -20,43 +20,34 @@ from torch_geometric.data import Batch
 from .data_types import (
     DualGraphData,
     ContrastiveTripleBatch,
-    COVERAGE_KEYS,
     coverage_key_index,
 )
 from .coverage_similarity import compute_rate_jaccard
-from .datamodule import _build_rtl_structure, _build_asm_graph
+from .datamodule import (
+    DatasetDirInput,
+    _build_rtl_structure,
+    _build_asm_graph,
+    _empty_asm_graph,
+    _extract_targets_from_sample,
+    _normalize_dataset_dirs,
+)
 
 logger = logging.getLogger(__name__)
 
 _BRANCH_IDX = coverage_key_index("branch")
 
 
-def _extract_rtl_labels_from_json(rtl: dict) -> tuple[torch.Tensor, torch.Tensor]:
-    """从已加载 RTL JSON 中提取 edge_labels 和图级覆盖率 y。"""
-    nodes = rtl["nodes"]
-    node_id_set = {n["id"] for n in nodes}
-
-    elabel_list = []
-    for e in rtl["edges"]:
-        if e["source"] not in node_id_set or e["target"] not in node_id_set:
-            continue
-        elabel_list.append(e["coverage_label"])
-
-    y_vals = []
-    for key in COVERAGE_KEYS:
-        v = rtl.get(key)
-        y_vals.append(float("nan") if v is None else float(v) / 100.0)
-
-    return (
-        torch.tensor(elabel_list, dtype=torch.long),
-        torch.tensor([y_vals], dtype=torch.float),
-    )
+def _sample_with_targets(entry: dict, targets: dict) -> dict:
+    return {
+        "targets": targets,
+        "_rtl_path": entry["_rtl_path"],
+    }
 
 
 class ContrastiveTripleDataset(Dataset):
     """三元组对比学习数据集
 
-    从 contrastive_index.jsonlines 每行加载 (rtl_a, asm_a, rtl_b, asm_b, rtl_merged)。
+    从 manifest.json 指向的 contrastive_samples.jsonlines 加载三元组。
     RTL 图结构（节点/边拓扑）在同一模块的所有测试中相同，边标签随测试不同。
     为降低磁盘读取，图结构只加载一次，三路数据共享结构、各自持有自己的标签。
 
@@ -68,33 +59,68 @@ class ContrastiveTripleDataset(Dataset):
 
     def __init__(
         self,
-        dataset_dir: str | Path,
+        dataset_dir: DatasetDirInput,
         index_file: Optional[str | Path] = None,
         processed_dir: Optional[str | Path] = None,
     ):
-        self.dataset_dir = Path(dataset_dir)
-        self.index_file = (
-            Path(index_file)
-            if index_file
-            else self.dataset_dir / "contrastive_index.jsonlines"
-        )
+        self.dataset_dirs = _normalize_dataset_dirs(dataset_dir)
+        self.index_file = Path(index_file) if index_file else None
         # processed_dir 用于加载预处理好的 RTL/ASM .pt 图结构缓存（可选）
         self.processed_dir = Path(processed_dir) if processed_dir else None
 
         self._entries: list[dict] = []
-        self._load_index()
+        self._load_entries()
 
-    def _load_index(self):
-        if not self.index_file.exists():
+    def _load_entries(self):
+        if not self.dataset_dirs:
+            raise ValueError("未指定 dataset_dir")
+        if self.index_file is not None:
+            if len(self.dataset_dirs) != 1:
+                raise ValueError("多 dataset_dir 模式不支持单个 index_file 覆盖")
+            self._load_index(self.dataset_dirs[0], self.index_file)
+        else:
+            for dataset_dir in self.dataset_dirs:
+                self._load_index(dataset_dir, self._default_index_file(dataset_dir))
+        logger.info("ContrastiveTripleDataset: 加载 %d 条三元组", len(self._entries))
+
+    def _load_index(self, dataset_dir: Path, index_file: Path):
+        if not index_file.exists():
             raise FileNotFoundError(
-                f"contrastive_index.jsonlines 不存在: {self.index_file}"
+                f"contrastive_samples.jsonlines 不存在: {index_file}"
             )
-        with open(self.index_file, encoding="utf-8") as f:
+        with open(index_file, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
-                    self._entries.append(json.loads(line))
-        logger.info("ContrastiveTripleDataset: 加载 %d 条三元组", len(self._entries))
+                    entry = json.loads(line)
+                    if entry.get("schema_version") != "contrastive_sample.v1":
+                        raise ValueError(
+                            f"不支持的样本 schema: {entry.get('schema_version')!r}"
+                        )
+                    entry["_rtl_path"] = str(dataset_dir / entry["rtl_graph"])
+                    entry["_asm_a_path"] = (
+                        str(dataset_dir / entry["asm_a"])
+                        if entry.get("asm_a")
+                        else None
+                    )
+                    entry["_asm_b_path"] = (
+                        str(dataset_dir / entry["asm_b"])
+                        if entry.get("asm_b")
+                        else None
+                    )
+                    self._entries.append(entry)
+
+    def _default_index_file(self, dataset_dir: Path) -> Path:
+        manifest_file = dataset_dir / "manifest.json"
+        if not manifest_file.exists():
+            raise FileNotFoundError(f"manifest.json 不存在: {manifest_file}")
+        with open(manifest_file, encoding="utf-8") as f:
+            manifest = json.load(f)
+        if manifest.get("schema_version") != "contrastive_dataset.v1":
+            raise ValueError(
+                f"不支持的对比数据集 schema: {manifest.get('schema_version')!r}"
+            )
+        return dataset_dir / manifest.get("samples", "contrastive_samples.jsonlines")
 
     def __len__(self) -> int:
         return len(self._entries)
@@ -103,29 +129,27 @@ class ContrastiveTripleDataset(Dataset):
         self, idx: int
     ) -> tuple[DualGraphData, DualGraphData, DualGraphData, float]:
         entry = self._entries[idx]
-        dd = self.dataset_dir
 
-        rtl_a_path = str(dd / entry["rtl_a"])
-        rtl_b_path = str(dd / entry["rtl_b"])
-        rtl_merged_path = str(dd / entry["rtl_merged"])
-        asm_a_path = str(dd / entry["asm_a"]) if entry.get("asm_a") else None
-        asm_b_path = str(dd / entry["asm_b"]) if entry.get("asm_b") else None
+        asm_a_path = entry.get("_asm_a_path")
+        asm_b_path = entry.get("_asm_b_path")
 
-        # 一次读取 rtl_a：同时得到图结构与标签
-        with open(rtl_a_path, encoding="utf-8") as f:
-            rtl_a_json = json.load(f)
-        rtl_struct = _build_rtl_structure(rtl_a_json)
+        with open(entry["_rtl_path"], encoding="utf-8") as f:
+            rtl_json = json.load(f)
+        rtl_struct = _build_rtl_structure(rtl_json)
+        valid_edge_mask = rtl_struct["_valid_edge_mask"]
         rtl_struct.pop("_valid_edge_mask", None)
-        labels_a, y_a = _extract_rtl_labels_from_json(rtl_a_json)
-
-        # 读取 rtl_b / merged 标签
-        with open(rtl_b_path, encoding="utf-8") as f:
-            rtl_b_json = json.load(f)
-        labels_b, y_b = _extract_rtl_labels_from_json(rtl_b_json)
-
-        with open(rtl_merged_path, encoding="utf-8") as f:
-            rtl_merged_json = json.load(f)
-        labels_merged, y_merged = _extract_rtl_labels_from_json(rtl_merged_json)
+        labels_a, y_a = _extract_targets_from_sample(
+            _sample_with_targets(entry, entry["targets"]["a"]),
+            valid_edge_mask,
+        )
+        labels_b, y_b = _extract_targets_from_sample(
+            _sample_with_targets(entry, entry["targets"]["b"]),
+            valid_edge_mask,
+        )
+        labels_merged, y_merged = _extract_targets_from_sample(
+            _sample_with_targets(entry, entry["targets"]["merged"]),
+            valid_edge_mask,
+        )
 
         # 加载 ASM 图
         asm_a = _load_asm_graph(asm_a_path) if asm_a_path else _empty_asm()
@@ -186,13 +210,13 @@ class ContrastiveTripleDataModule:
 
     def __init__(
         self,
-        dataset_dir: str | Path,
+        dataset_dir: DatasetDirInput,
         index_file: Optional[str | Path] = None,
         batch_size: int = 8,
         num_workers: int = 0,
         shuffle: bool = True,
     ):
-        self.dataset_dir = Path(dataset_dir)
+        self.dataset_dir = dataset_dir
         self.index_file = index_file
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -231,9 +255,4 @@ def _load_asm_graph(asm_json_path: str) -> dict:
 
 def _empty_asm() -> dict:
     """返回空 ASM 图（合并覆盖或无 ASM 时使用）"""
-    return {
-        "asm_node_type": torch.zeros(1, dtype=torch.long),
-        "asm_instruction_encoding": torch.zeros(1, 256),
-        "asm_edge_index": torch.empty((2, 0), dtype=torch.long),
-        "asm_edge_type": torch.empty(0, dtype=torch.long),
-    }
+    return _empty_asm_graph()

@@ -32,7 +32,7 @@ designs/openc910
 *.js
 *.html
 *.css
-tests/
+temp/
 dataset_root/
 data/
 data

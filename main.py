@@ -25,7 +25,6 @@
 import argparse
 import logging
 import sys
-from pathlib import Path
 
 import torch
 
@@ -54,8 +53,9 @@ def parse_args() -> argparse.Namespace:
     data.add_argument(
         "--dataset-dir",
         type=str,
+        nargs="+",
         required=True,
-        help="coverage-report-extractor 输出目录（含 dataset_index.jsonlines）",
+        help="coverage-report-extractor 输出目录（含 manifest.json），可传多个目录合并训练",
     )
     data.add_argument("--data-root", type=str, required=True, help="数据集缓存根目录")
 
@@ -180,7 +180,7 @@ def parse_args() -> argparse.Namespace:
         "--contrastive-triple-index",
         type=str,
         default="",
-        help="contrastive_index.jsonlines 路径（空串时自动拼接 dataset-dir/contrastive_index.jsonlines）",
+        help="contrastive_samples.jsonlines 路径（空串时读取 dataset-dir/manifest.json）",
     )
     joint.add_argument(
         "--lambda-ce", type=float, default=1.0, help="三路 CE 损失的合并权重"
@@ -222,8 +222,6 @@ def build_model_config(args: argparse.Namespace) -> ModelConfig:
 def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
     # joint 模式下自动推断 triple index 路径
     triple_index = args.contrastive_triple_index
-    if args.joint_contrastive and not triple_index:
-        triple_index = str(Path(args.dataset_dir) / "contrastive_index.jsonlines")
 
     return TrainerConfig(
         learning_rate=args.lr,

@@ -2,7 +2,8 @@
 """应用级配置聚合对象。"""
 
 from dataclasses import dataclass
-from typing import Optional, TYPE_CHECKING
+from typing import Optional, TYPE_CHECKING, Union
+from pathlib import Path
 
 from models.data_types import ModelConfig
 from .config import TrainerConfig
@@ -16,7 +17,7 @@ class DataConfig:
     """数据路径配置。"""
 
     data_root: str
-    dataset_dir: Optional[str] = None
+    dataset_dir: Optional[Union[str, Path, list[str], list[Path]]] = None
 
 
 @dataclass
