@@ -11,21 +11,7 @@ class CoverageRegressionMetrics:
 
     支持 lite 模式（训练 step 级）和 full 模式（验证/测试 step 级）。
 
-    MASE（Mean Absolute Scaled Error）需要训练集的 y 均值作为朴素基准。
-    调用 update_naive_baseline() 在训练集扫描后设置基准。
     """
-
-    def __init__(self):
-        self._naive_mae: Optional[float] = None
-
-    def update_naive_baseline(self, targets: torch.Tensor) -> None:
-        """用训练集的 y 均值设置 MASE 朴素基准
-
-        MASE = MAE / MAE_naive，其中 MAE_naive = mean(|y_i - y_mean|)
-        """
-        y_mean = targets.mean()
-        mae_naive = (targets - y_mean).abs().mean().item()
-        self._naive_mae = mae_naive if mae_naive > 1e-8 else None
 
     def compute(
         self,
@@ -64,7 +50,6 @@ class CoverageRegressionMetrics:
                         f"graph_medae{sfx}": _zero,
                         f"graph_r2{sfx}": _zero,
                         f"graph_r{sfx}": _zero,
-                        f"graph_mase{sfx}": _zero,
                     })
             return result
 
@@ -99,7 +84,6 @@ class CoverageRegressionMetrics:
                 f"graph_medae{suffix}": _zero,
                 f"graph_r2{suffix}": _zero,
                 f"graph_r{suffix}": _zero,
-                f"graph_mase{suffix}": _zero,
             })
         return result
 
@@ -157,11 +141,6 @@ class CoverageRegressionMetrics:
         else:
             r = _zero
 
-        if self._naive_mae is not None and self._naive_mae > 1e-8:
-            mase = mae / self._naive_mae
-        else:
-            mase = mae
-
         result.update({
             f"graph_rmse{suffix}": rmse,
             f"graph_mape{suffix}": mape,
@@ -169,7 +148,6 @@ class CoverageRegressionMetrics:
             f"graph_medae{suffix}": medae,
             f"graph_r2{suffix}": r2,
             f"graph_r{suffix}": r,
-            f"graph_mase{suffix}": mase,
         })
 
         return result
