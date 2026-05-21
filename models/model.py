@@ -16,157 +16,12 @@ from typing import Dict, Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-
 from datasets import DualGraphData
-from datasets.data_types import coverage_key_index
 from .data_types import ModelConfig, ModelOutput
-from .encoder import PerceiverDualEncoder, RTLEdgeFeatureEncoder
+from .encoder import PerceiverDualEncoder
+from .heads import EdgeClassifier, GraphRegressor
 from .hyperrectangle import HyperrectangleHead
-
-
-class EdgeClassifier(nn.Module):
-    """
-    边分类器
-
-    仅使用 RTL CDFG 的节点特征和边特征进行分类
-    边特征 = edge_type 嵌入 + edge_width 编码 + 端口位置编码（加法融合）
-    """
-
-    def __init__(
-        self,
-        hidden_dim: int,
-        num_classes: int = 2,
-        num_edge_types: int = 5,
-        max_ports: int = 8,
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-
-        # 边特征编码器（支持端口位置索引）
-        self.edge_encoder = RTLEdgeFeatureEncoder(num_edge_types, hidden_dim, max_ports)
-
-        # 输入维度：src + tgt + edge_feat = 3 * hidden_dim
-        self.net = nn.Sequential(
-            nn.Linear(hidden_dim * 3, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, num_classes),
-        )
-
-    def forward(
-        self,
-        node_features: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_type: torch.Tensor,
-        edge_width: Optional[torch.Tensor] = None,
-        source_port_idx: Optional[torch.Tensor] = None,
-        target_port_idx: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Args:
-            node_features: [N, D] RTL 节点特征
-            edge_index: [2, E] RTL 边索引
-            edge_type: [E] RTL 边类型
-            edge_width: [E] RTL 边 width（可选）
-            source_port_idx: [E] 源端口位置索引（可选）
-            target_port_idx: [E] 目标端口位置索引（可选）
-
-        Returns:
-            [E, num_classes] 边分类 logits
-        """
-        src, tgt = edge_index
-        src_feat = node_features[src]  # [E, D]
-        tgt_feat = node_features[tgt]  # [E, D]
-
-        # 边特征编码（包含端口位置索引）
-        edge_feat = self.edge_encoder(
-            edge_type, edge_width, source_port_idx, target_port_idx
-        )  # [E, D]
-
-        combined = torch.cat([src_feat, tgt_feat, edge_feat], dim=-1)
-        return self.net(combined)
-
-
-class CoverageHead(nn.Module):
-    """单个图级覆盖率预测头。"""
-
-    def __init__(self, hidden_dim: int, dropout: float = 0.1):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1),
-        )
-
-    def forward(self, rtl_graph_emb: torch.Tensor) -> torch.Tensor:
-        return self.net(rtl_graph_emb)
-
-
-class GraphRegressor(nn.Module):
-    """
-    图级回归器
-
-    仅使用 RTL CDFG 的图级嵌入进行回归
-    """
-
-    def __init__(
-        self,
-        hidden_dim: int,
-        coverage_target_keys: tuple[str, ...] = ("branch",),
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-        self.coverage_target_keys = tuple(coverage_target_keys)
-        self.heads = nn.ModuleDict(
-            {
-                key: CoverageHead(hidden_dim, dropout)
-                for key in self.coverage_target_keys
-            }
-        )
-
-    def forward(self, rtl_graph_emb: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            rtl_graph_emb: [B, D] RTL 图级嵌入
-
-        Returns:
-            [B, num_targets] 图级预测
-        """
-        preds = [self.heads[key](rtl_graph_emb) for key in self.coverage_target_keys]
-        return torch.cat(preds, dim=-1)
-
-
-class SymmetricUnionFusion(nn.Module):
-    """Order-invariant gated union fusion for two aligned feature tensors."""
-
-    def __init__(self, hidden_dim: int, dropout: float = 0.1):
-        super().__init__()
-        self.gate = nn.Sequential(
-            nn.Linear(hidden_dim * 4, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Sigmoid(),
-        )
-        self.norm = nn.LayerNorm(hidden_dim)
-
-    def forward(self, feat_a: torch.Tensor, feat_b: torch.Tensor) -> torch.Tensor:
-        union_input = torch.cat(
-            [
-                feat_a + feat_b,
-                torch.maximum(feat_a, feat_b),
-                torch.abs(feat_a - feat_b),
-                feat_a * feat_b,
-            ],
-            dim=-1,
-        )
-        gate = self.gate(union_input)
-        h_base = 0.5 * (feat_a + feat_b)
-        h_max = torch.maximum(feat_a, feat_b)
-        return self.norm(gate * h_max + (1.0 - gate) * h_base)
+from .union_fusion import SymmetricUnionFusion
 
 
 class DualGraphFusionModel(nn.Module):
@@ -350,61 +205,17 @@ class DualGraphFusionModel(nn.Module):
         graph_loss_weight: float = 1.0,
         label_smoothing: float = 0.1,
     ) -> Dict[str, torch.Tensor]:
-        """
-        计算损失
+        """计算模型基础监督损失。"""
+        from .losses import compute_supervised_losses
 
-        Args:
-            output: 模型输出
-            data: 输入数据（含标签）
-            edge_loss_weight: 边分类损失权重
-            graph_loss_weight: 图回归损失权重
-            label_smoothing: Label Smoothing 系数
-
-        Returns:
-            损失字典 {'edge_loss', 'graph_loss', 'total_loss', 'num_valid_edges'}
-        """
-        device = output.edge_logits.device
-        losses = {}
-
-        # 边分类损失（mask 掉 label=-1 的边）
-        edge_labels = getattr(data, "edge_labels", None)
-        if edge_labels is not None:
-            valid_mask = edge_labels != -1
-            num_valid = valid_mask.sum().item()
-
-            if num_valid > 0:
-                valid_logits = output.edge_logits[valid_mask]
-                valid_labels = edge_labels[valid_mask]
-                edge_loss = F.cross_entropy(
-                    valid_logits, valid_labels, label_smoothing=label_smoothing
-                )
-                losses["edge_loss"] = edge_loss * edge_loss_weight
-            else:
-                losses["edge_loss"] = torch.tensor(0.0, device=device)
-
-            losses["num_valid_edges"] = num_valid
-        else:
-            losses["edge_loss"] = torch.tensor(0.0, device=device)
-            losses["num_valid_edges"] = 0
-
-        # 图回归损失（每个覆盖率 head 独立按 NaN mask 训练）
-        if data.y is not None:
-            col_idx = [coverage_key_index(k) for k in self.config.coverage_target_keys]
-            target = data.y[:, col_idx]                        # [B, K]
-            valid = ~torch.isnan(target)                       # [B, K]
-            if valid.any():
-                graph_loss = F.smooth_l1_loss(output.graph_pred[valid], target[valid])
-                losses["num_valid_graph_targets"] = int(valid.sum().item())
-            else:
-                graph_loss = output.graph_pred.sum() * 0.0
-                losses["num_valid_graph_targets"] = 0
-            losses["graph_loss"] = graph_loss * graph_loss_weight
-        else:
-            losses["graph_loss"] = torch.tensor(0.0, device=device)
-            losses["num_valid_graph_targets"] = 0
-
-        losses["total_loss"] = losses["edge_loss"] + losses["graph_loss"]
-        return losses
+        return compute_supervised_losses(
+            output,
+            data,
+            coverage_target_keys=self.config.coverage_target_keys,
+            edge_loss_weight=edge_loss_weight,
+            graph_loss_weight=graph_loss_weight,
+            label_smoothing=label_smoothing,
+        )
 
 
 def create_model(

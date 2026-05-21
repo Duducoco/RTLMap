@@ -17,6 +17,7 @@ from .encoder import (
 from .interaction import PerceiverCrossFusion
 from .hyperrectangle import HyperrectangleHead, hyperrectangle_intersection
 from .contrastive_loss import compute_contrastive_loss
+from .losses import compute_supervised_losses
 from .model import (
     DualGraphFusionModel,
     create_model,
@@ -41,6 +42,7 @@ __all__ = [
     "HyperrectangleHead",
     "hyperrectangle_intersection",
     "compute_contrastive_loss",
+    "compute_supervised_losses",
     "DualGraphFusionModel",
     "create_model",
     "create_small_model",
