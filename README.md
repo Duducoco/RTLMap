@@ -1,516 +1,391 @@
 # RTLMap
 
-RTLMap 是一个用于从 Yosys RTLIL JSON 提取控制数据流图 (CDFG) 并用 VCS/URG 覆盖率数据进行标注的工具。标注后的图可用于基于 GNN 的硬件验证训练数据。
+RTLMap 是一个面向硬件验证覆盖率预测的双图 GNN 训练项目。项目从 coverage-report-extractor 产出的 manifest 数据集中读取 RTL CDFG 与 ASM CDFG，将它们编码为 PyTorch Geometric 数据，并使用 PyTorch Lightning 训练覆盖率预测模型。
+
+当前仓库的主要能力集中在训练链路，而不是直接生成覆盖率标注数据。输入数据应已按 `manifest.json`、`samples.jsonlines` 或 `contrastive_samples.jsonlines` 组织好。
 
 ## 功能特性
 
-- **CDFG 提取**：从 Yosys 综合后的 RTLIL JSON 中提取控制数据流图
-- **覆盖率标注**：解析 VCS/URG HTML 覆盖率报告，将分支覆盖信息映射到 CDFG 边
-- **可视化输出**：生成带覆盖率着色的 SVG 图形（绿色=已覆盖，红色=未覆盖）
-- **ASM CDFG 提取**：从 RISC-V 汇编代码提取基本块级 CDFG，支持 RV32I/M/F/C 和 Xpulp 扩展
-- **双图融合 GNN**：RTL-Assembly 双图交互式编码，用于覆盖率预测
-- **PyTorch Lightning 训练**：多任务训练框架（边分类 + 图回归），支持 TensorBoard
-- **自动综合**：自动调用 Yosys（需要 oss-cad-suite）生成 RTLIL JSON
-- **智能缓存**：自动缓存源文件到 HTML 的映射关系，加速重复运行
-
-## 数据流管线
-
-```
-RTL (SystemVerilog)                      Assembly (.S)
-        │ (YosysRunner + slang plugin)          │ (asm_cdfg.AsmParser)
-        ▼                                       ▼
-design.json (RTLIL JSON)                 Instruction list
-        │ (cdfg.CDFGExtractor)                  │ (asm_cdfg.BasicBlockBuilder)
-        ▼                                       ▼
-CDFG object (nodes + edges)              BasicBlock list
-        │ (annotation.CoverageParser)           │ (asm_cdfg.AsmCDFGExtractor)
-        ▼                                       ▼
-coverage.html -> BranchCoverage data     ASM CDFG (基本块级图)
-        │ (annotation.CoverageAnnotator)        │
-        ▼                                       │
-Annotated CDFG (edges with coverage_label)      │
-        │ (cdfg.CDFGExporter)                   │
-        ▼                                       │
-cdfg_annotated.json / cdfg_output.svg           │
-        │                                       │
-        └───────────────┬───────────────────────┘
-                        │ (datasets.DualGraphData)
-                        ▼
-            DualGraphFusionModel (双图交互编码)
-                        │ (trainer.train_model)
-                        ▼
-            覆盖率预测模型 (边分类 + 图回归)
-```
-
-## 安装
-
-### 依赖
-
-- Python >= 3.13
-- [uv](https://github.com/astral-sh/uv) (推荐的 Python 包管理器)
-- [oss-cad-suite](https://github.com/YosysHQ/oss-cad-suite-build) (用于 Yosys 综合)
-- Graphviz (用于 SVG 可视化)
-- PyTorch 2.6+ with CUDA 12.4 (用于 GNN 训练)
-- PyTorch Geometric 2.7+ (图神经网络库)
-- PyTorch Lightning 2.6+ (训练框架)
-
-### 安装步骤
-
-```bash
-# 克隆仓库
-git clone https://github.com/Duducoco/RTLMap
-cd RTLMap
-
-# 使用 uv 安装依赖
-uv sync
-
-# 验证安装
-uv run python data_annotate.py --help
-```
-
-### 环境配置
-
-确保 oss-cad-suite 已安装并可用。YosysRunner 会自动设置以下环境变量：
-- `YOSYSHQ_ROOT`
-- `PATH`
-- `SSL_CERT_FILE`
-
-## 使用方法
-
-### 快速开始
-
-```bash
-# 基本 CDFG 提取与覆盖率标注
-uv run python data_annotate.py \
-    --design_name cv32e40p \
-    --module_name cv32e40p_core \
-    -c designs/cv32e40p/coverage_reports/coverage_report1
-```
-
-### 完整示例
-
-```bash
-# 1. 仅提取 CDFG（不标注覆盖率）
-uv run python data_annotate.py \
-    --design_name cv32e40p \
-    --module_name cv32e40p_core \
-    --no-coverage
-
-# 2. 提取并标注覆盖率
-uv run python data_annotate.py \
-    --design_name cv32e40p \
-    --module_name cv32e40p_core \
-    -c designs/cv32e40p/coverage_reports/coverage_report1
-
-# 3. 启用覆盖率传播（标注非分支边）
-uv run python data_annotate.py \
-    --design_name cv32e40p \
-    --module_name cv32e40p_core \
-    -c designs/cv32e40p/coverage_reports/coverage_report1 \
-    --propagate
-
-# 4. 生成 SVG 可视化
-uv run python data_annotate.py \
-    --design_name cv32e40p \
-    --module_name cv32e40p_core \
-    -c designs/cv32e40p/coverage_reports/coverage_report1 \
-    --svg
-
-# 5. 完整流程（标注 + 传播 + 可视化 + 详细输出）
-uv run python data_annotate.py \
-    --design_name cv32e40p \
-    --module_name cv32e40p_core \
-    -c designs/cv32e40p/coverage_reports/coverage_report1 \
-    --propagate --svg -v
-```
-
-### 命令行参数
-
-| 参数 | 说明 | 默认值 |
-|------|------|--------|
-| `--design_name` | 设计名称（对应 `designs/` 下的文件夹名） | **必需** |
-| `--module_name` | 顶层模块名称 | **必需** |
-| `-c, --coverage-dir` | 覆盖率报告目录 | - |
-| `-o, --output` | 输出 JSON 文件路径 | `cdfg_annotated.json` |
-| `-i, --instance` | 覆盖率实例标签 | 使用最后一个实例 |
-| `--no-coverage` | 仅提取 CDFG，不标注覆盖率 | `false` |
-| `--propagate` | 启用覆盖率传播到非分支边 | `false` |
-| `--svg` | 生成 SVG 可视化图 | `false` |
-| `--svg-output` | SVG 输出文件路径 | `cdfg_output.svg` |
-| `-v, --verbose` | 显示详细信息 | `false` |
-
-### 直接使用 YosysRunner
-
-```bash
-# 从文件列表生成 RTLIL JSON
-uv run python -m tools.yosys_runner \
-    --top <module_name> \
-    --flist <manifest.flist> \
-    --output-dir json/
-
-# 从指定文件生成
-uv run python -m tools.yosys_runner \
-    --top <module_name> \
-    --files file1.sv file2.sv \
-    --output-dir json/
-```
-
-### ASM CDFG 提取
-
-```bash
-# 从 RISC-V 汇编文件提取基本块级 CDFG
-uv run python -m asm_cdfg.extractor input.S -o output.json -v
-```
-
-### 运行测试
-
-```bash
-# 模型单元测试
-uv run python -m models.test_model
-
-# 训练器单元测试
-uv run python -m trainer.test_trainer
-```
+- **Manifest 数据集加载**：支持 `dataset.v1` 普通样本与 `contrastive_dataset.v1` 三元组样本。
+- **RTL/ASM 双图建模**：RTL 图提供节点、边、位宽、端口位置等结构特征，ASM 图提供基本块类型与指令编码。
+- **双图融合模型**：使用 Perceiver 风格跨图融合，对 RTL 与 ASM 上下文进行交互式编码。
+- **多任务训练**：同时支持 RTL 边覆盖分类和图级覆盖率回归。
+- **多覆盖率目标**：图级回归可选择 `branch`、`line`、`fsm`、`toggle`、`condition` 子集。
+- **CodeBERT 指令编码**：可选启用 HuggingFace CodeBERT 为 ASM 指令生成文本编码；未启用时回退为零向量。
+- **缓存与去重**：预处理阶段缓存 RTL/ASM 图结构与 ASM 编码，减少重复构建成本。
+- **Joint Contrastive 训练**：支持 `(test_a, test_b, merged)` 三元组联合训练和超矩形对比损失。
+- **Lightning 训练封装**：提供 checkpoint、early stopping、TensorBoard/CSV 日志和测试入口。
 
 ## 项目结构
 
-```
+```text
 RTLMap/
-├── data_annotate.py          # 主入口脚本
-├── pyproject.toml            # 项目配置
-├── CLAUDE.md                 # Claude Code 指导文档
-├── README.md                 # 项目说明
-│
-├── cdfg/                     # CDFG 提取与可视化模块
-│   ├── __init__.py
-│   ├── data_types.py         # 节点/边类型定义 (Node, Edge, CDFG)
-│   ├── extractor.py          # RTLIL JSON -> CDFG 提取
-│   ├── classifier.py         # Yosys cell 类型分类
-│   ├── exporter.py           # 导出 JSON/Graphviz
-│   ├── visualizer.py         # SVG 可视化
-│   └── analyzer.py           # 图分析工具
-│
-├── annotation/               # 覆盖率标注模块
-│   ├── __init__.py
-│   ├── parser.py             # VCS/URG HTML 解析
-│   └── annotator.py          # 覆盖率 -> CDFG 边标注
-│
-├── asm_cdfg/                 # RISC-V 汇编 CDFG 模块
-│   ├── __init__.py
-│   ├── data_types.py         # 指令和基本块类型定义
-│   ├── parser.py             # 汇编文件解析器
-│   ├── classifier.py         # 指令分类器 (RV32I/M/F/C, Xpulp)
-│   ├── bb_builder.py         # 基本块构建器
-│   ├── extractor.py          # 基本块 -> CDFG 提取
-│   └── visualizer.py         # ASM CDFG 可视化
-│
-├── datasets/                 # 数据集加载模块
-│   ├── __init__.py
-│   ├── data_types.py         # DualGraphData 数据类型
-│   └── datamodule.py         # DualGraphDataset + DualGraphDataModule
-│
-├── models/                   # 双图融合 GNN 模型
-│   ├── __init__.py
-│   ├── data_types.py         # ModelConfig, ModelOutput
-│   ├── encoder.py            # 图编码器 (GINEConv + 跨图交互)
-│   ├── interaction.py        # 跨图注意力机制
-│   ├── model.py              # 完整模型 + 任务头
-│   └── test_model.py         # 模型单元测试
-│
-├── trainer/                  # PyTorch Lightning 训练框架
-│   ├── __init__.py
-│   ├── config.py             # 训练超参数配置
-│   ├── callbacks.py          # Callback 工厂类
-│   ├── module.py             # Lightning 模型封装
-│   ├── utils.py              # 便捷训练函数
-│   └── test_trainer.py       # 训练器单元测试
-│
-├── tools/                    # 工具脚本
-│   ├── __init__.py
-│   └── yosys_runner.py       # Yosys 执行封装
-│
-└── designs/                  # 设计文件目录
-    ├── cv32e40p/             # CV32E40P RISC-V 处理器
-    └── openc910/             # OpenC910 处理器
+├── main.py                         # 训练/测试 CLI 入口
+├── pyproject.toml                  # Python 版本、依赖和 uv 配置
+├── run_train.sh                    # 普通训练示例脚本
+├── run_contrastive.sh              # joint contrastive 训练示例脚本
+├── datasets/
+│   ├── data_types.py               # DualGraphData、覆盖率目标定义
+│   ├── datamodule.py               # 普通 manifest 数据集与 Lightning DataModule
+│   ├── triple_datamodule.py        # 三元组对比学习数据管线
+│   └── coverage_similarity.py      # 覆盖率相似度计算
+├── cdfg_rtl/                       # RTL 图枚举和数据类型
+├── cdfg_asm/                       # ASM 图枚举和数据类型
+├── models/
+│   ├── data_types.py               # ModelConfig、ModelOutput
+│   ├── encoder.py                  # RTL/ASM 编码器
+│   ├── interaction.py              # Perceiver 跨图融合
+│   ├── model.py                    # DualGraphFusionModel 与任务头
+│   ├── hyperrectangle.py           # 超矩形表示
+│   └── contrastive_loss.py         # 对比损失
+├── trainer/
+│   ├── config.py                   # TrainerConfig
+│   ├── app_config.py               # AppConfig/DataConfig/RuntimeConfig
+│   ├── lightning_module.py         # LightningModule 训练逻辑
+│   ├── lightning_trainer.py        # Lightning Trainer 包装
+│   ├── callbacks.py                # checkpoint/early stopping callbacks
+│   └── utils.py                    # train_model 与 DataModule 构建
+├── text_encoder/                   # CodeBERT 指令编码
+├── metrics/                        # 分类、回归、对比指标
+└── tests/                          # pytest 测试
 ```
 
-## 设计文件结构
+## 环境要求
 
-每个设计需要按以下结构组织：
+- Python `>=3.12,<3.13`
+- uv
+- PyTorch `2.2.1+cu121`
+- PyTorch Geometric `2.5.0`
+- Lightning `>=2.3.0,<=2.4.0`
+- Transformers `>=4.40.0,<4.46.0`（仅启用文本编码器时需要下载模型）
 
-```
-designs/<design_name>/
-├── <design_name>.flist          # Verilog/SystemVerilog 文件列表
-├── source/                      # RTL 源文件目录
-│   └── rtl/
-│       └── *.sv
-├── RTLIL_json/                  # 自动生成的 RTLIL JSON
-│   └── <module_name>.json
-├── source2html.json             # 源文件名 -> 覆盖率 HTML 映射（自动生成）
-└── coverage_reports/
-    └── <report_name>/           # VCS/URG 生成的覆盖率报告
-        └── *.html
-```
-
-
-## 输出格式
-
-### 标注后的 JSON
-
-```json
-{
-    "module_name": "cv32e40p_int_controller",
-    "nodes": [
-        {
-            "id": "$procmux$1614",
-            "node_type": "MUX",
-            "cell_type": "$mux",
-            "source_file": "cv32e40p_int_controller.sv",
-            "source_line": 97,
-            "width": 32,
-            "input_ports": ["A", "B", "S"],
-            "output_ports": ["Y"]
-        }
-    ],
-    "edges": [
-        {
-            "source": "$4",
-            "target": "$procmux$1614",
-            "source_port": "Y",
-            "target_port": "S",
-            "edge_type": "CONTROL",
-            "coverage_label": 1,
-            "coverage_type": "control",
-            "branch_index": 0
-        }
-    ]
-}
-```
-
-### 覆盖标签说明
-
-| coverage_label | 含义 |
-|----------------|------|
-| -1 | 未标注（无对应覆盖率数据） |
-| 0 | 未覆盖 |
-| 1 | 已覆盖 |
-
-| coverage_type | 含义 |
-|---------------|------|
-| control | 控制边（MUX 的 S 端口） |
-| data_true | 真分支数据边（MUX 的 B 端口） |
-| data_false | 假分支数据边（MUX 的 A 端口） |
-| propagated | 传播标注边 |
-| always | 必然执行边（输入/常量） |
-
-## 核心模块说明
-
-### CDFG 节点类型
-
-| NodeType | 说明 | 对应 Yosys Cell |
-|----------|------|-----------------|
-| INPUT | 输入端口 | - |
-| OUTPUT | 输出端口 | - |
-| CONSTANT | 常量 | - |
-| MUX | 多路选择器 | `$mux`, `$pmux` |
-| SEQUENTIAL | 时序元件 | `$dff`, `$aldff`, `$adff` 等 |
-| LOGIC | 逻辑运算 | `$and`, `$or`, `$not` 等 |
-| ARITHMETIC | 算术运算 | `$add`, `$sub`, `$mul` 等 |
-| COMPARE | 比较运算 | `$eq`, `$lt`, `$gt` 等 |
-| SHIFT | 移位运算 | `$shl`, `$shr` 等 |
-
-### CDFG 边类型
-
-| EdgeType | 说明 |
-|----------|------|
-| DATA | 数据流边 |
-| CONTROL | 控制流边（MUX 选择信号） |
-| CLOCK | 时钟信号边 |
-| RESET | 复位信号边 |
-| ENABLE | 使能信号边 |
-
-### 覆盖率标注
-
-标注器支持三种分支类型的自动检测和标注：
-
-1. **IF 语句**
-   - 支持 `if-else` 和 `if-else-if` 链
-   - 支持带或不带 `begin`/`end` 块
-   - 自动处理优先编码器风格的级联 if-else
-
-2. **CASE 语句**
-   - 支持 `case`/`casex`/`casez`
-   - 支持 `unique case`
-   - 自动解析 `case`/`endcase` 边界
-
-3. **三元表达式**
-   - 支持 `cond ? true_val : false_val`
-   - 支持嵌套三元表达式
-
-## 示例输出
-
-```
-正在从 designs/cv32e40p/RTLIL_json/cv32e40p_int_controller.json 提取 CDFG...
-模块: cv32e40p_int_controller
-节点数: 54
-边数: 149
-
-CDFG 中包含 1 个源文件的节点
-匹配到 1 个覆盖率报告文件
-
---- 正在处理: mod36.html ---
-  模块: cv32e40p_int_controller
-  源文件: cv32e40p_int_controller.sv
-  实例: inst_tag_59
-  从源码解析到 if 范围: 97-148
-行 96: 找到 32 个 MUX 节点，对应 33 个分支
-  标注: 32 MUX, 136 边
-
-正在传播覆盖率...
-
-==================================================
-总体标注统计:
-  处理文件数: 1
-  MUX 节点: 32/32 (直接匹配覆盖率分支)
-  已标注边: 149/149
-  已覆盖边: 55
-  未覆盖边: 94
-
-边覆盖率: 36.91%
-
-已导出 CDFG: cdfg_annotated.json
-已导出 SVG: cdfg_output.svg
-```
-
-## 故障排查
-
-### 常见问题
-
-1. **所有边都显示为已覆盖 (100%)**
-   - 原因：行号匹配不正确
-   - 解决：使用 `-v` 查看详细输出，检查警告信息
-   - 标注器内置验证：MUX 数量超过预期 3 倍时会报警
-
-2. **If-else-if 链未被检测**
-   - 原因：源文件不符合预期模式
-   - 解决：检查是否为不带 `begin`/`end` 的优先编码器风格
-
-3. **覆盖率报告中找不到模块**
-   - 原因：`module2html.json` 映射不正确
-   - 解决：检查映射文件或重新生成
-
-4. **Yosys 综合失败**
-   - 原因：oss-cad-suite 未正确安装
-   - 解决：确保 Yosys 和 slang 插件可用
-
-5. **SVG 生成失败**
-   - 原因：Graphviz 未安装
-   - 解决：安装 Graphviz (`apt install graphviz` 或 `brew install graphviz`)
-
-## 开发指南
-
-### 添加新设计
-
-1. 在 `designs/` 下创建设计目录：
-   ```bash
-   mkdir -p designs/my_design/{source/rtl,coverage_reports,RTLIL_json}
-   ```
-
-2. 创建文件列表 `my_design.flist`：
-   ```
-   source/rtl/module1.sv
-   source/rtl/module2.sv
-   ```
-
-3. 将 VCS/URG 覆盖率报告放入 `coverage_reports/report1/`
-
-4. 运行标注：
-   ```bash
-   uv run python data_annotate.py \
-       --design_name my_design \
-       --module_name top_module \
-       -c designs/my_design/coverage_reports/report1
-   ```
-
-### API 使用
-
-```python
-from cdfg import CDFGExtractor, CDFGExporter, CDFG
-from annotation import CoverageParser, annotate_cdfg_with_coverage
-
-# 提取 CDFG
-extractor = CDFGExtractor("design.json")
-cdfg = extractor.extract()
-
-# 标注覆盖率
-stats = annotate_cdfg_with_coverage(
-    cdfg,
-    "coverage.html",
-    instance_tag="inst_tag_1",
-    propagate=True
-)
-
-# 导出
-exporter = CDFGExporter(cdfg)
-exporter.to_json("output.json")
-exporter.to_graphviz("output.svg", show_coverage=True)
-```
-
-### GNN 训练 API
-
-```python
-from datasets import DualGraphData
-from models import create_model, ModelConfig
-from trainer import train_model, TrainerConfig
-
-# 创建模型配置
-model_config = ModelConfig(
-    rtl_node_dim=64,
-    asm_node_dim=64,
-    hidden_dim=256,
-    num_gnn_layers=4
-)
-
-# 创建训练配置
-trainer_config = TrainerConfig(
-    learning_rate=1e-4,
-    max_epochs=100,
-    batch_size=32
-)
-
-# 准备数据（DualGraphData 包含 RTL 和 ASM 双图）
-# train_data, val_data = ...  # List[DualGraphData]
-
-# 训练模型（数据自动保存到磁盘并按需加载）
-module, trainer = train_model(
-    model_config=model_config,
-    trainer_config=trainer_config,
-    data_root='./data',  # 数据集根目录
-    train_data=train_data,
-    val_data=val_data,
-    experiment_name="coverage_prediction"
-)
-```
-
-### ASM CDFG API
-
-```python
-from cdfg_asm import AsmCDFGExtractor
-
-# 从汇编文件提取 CDFG
-extractor = AsmCDFGExtractor(verbose=True)
-cdfg = extractor.extract_from_file("test.S")
-
-print(f"节点数: {len(cdfg.nodes)}")
-print(f"边数: {len(cdfg.edges)}")
-```
-
-### 开发环境设置
+安装依赖：
 
 ```bash
-# 克隆并安装开发依赖
-git clone https://github.com/Duducoco/RTLMap
-cd RTLMap
 uv sync
 ```
 
+查看入口参数：
+
+```bash
+uv run python main.py --help
+```
+
+## 数据集格式
+
+### 普通训练数据集
+
+普通训练目录需要包含 `manifest.json`，其 `schema_version` 为 `dataset.v1`，并指向样本文件，默认是 `samples.jsonlines`。
+
+```json
+{
+  "schema_version": "dataset.v1",
+  "dataset_name": "example",
+  "samples": "samples.jsonlines",
+  "rtl_graphs": "rtl_graphs",
+  "asm_graphs": "asm_graphs",
+  "total": 1,
+  "errors": 0
+}
+```
+
+每行样本使用 `sample.v1`：
+
+```json
+{
+  "schema_version": "sample.v1",
+  "sample_id": "test_a::ALU",
+  "test_id": "test_a",
+  "module_name": "ALU",
+  "rtl_graph": "rtl_graphs/ALU.json",
+  "asm_graph": "asm_graphs/test_a.json",
+  "targets": {
+    "edge_coverage": {
+      "default": -1,
+      "labels": [
+        {"edge_id": 0, "label": 1},
+        {"edge_id": 1, "label": 0}
+      ]
+    },
+    "graph_coverage": {
+      "unit": "percent",
+      "values": {
+        "branch": 50.0,
+        "line": null,
+        "fsm": 0.0,
+        "toggle": 100.0,
+        "condition": null
+      }
+    }
+  }
+}
+```
+
+说明：
+
+- `edge_coverage.labels[*].edge_id` 对应 RTL 图中的原始边序号。
+- `label=-1` 表示忽略，`0` 表示未覆盖，`1` 表示已覆盖。
+- 图级覆盖率以百分比输入，加载时会归一化到 `[0, 1]`。
+- 图级覆盖率缺失值使用 `null`，训练时按目标列独立 mask。
+- `asm_graph` 可为 `null` 或缺失，加载器会使用一个空 ASM 图占位。
+
+### RTL 图字段
+
+RTL JSON 至少需要包含：
+
+```json
+{
+  "schema_version": "rtl_graph.v1",
+  "module_name": "ALU",
+  "nodes": [
+    {
+      "id": "n0",
+      "cell_type": "INPUT",
+      "width": 1
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": 0,
+      "source": "n0",
+      "target": "n1",
+      "source_port_idx": 0,
+      "target_port_idx": 0,
+      "type": "DATA_TRUE",
+      "width": 1
+    }
+  ]
+}
+```
+
+加载器会过滤 source/target 不存在的边，并保持过滤后的边标签对齐。
+
+### ASM 图字段
+
+ASM JSON 至少需要包含：
+
+```json
+{
+  "entry_node": "bb_0",
+  "exit_nodes": ["bb_0"],
+  "nodes": {
+    "bb_0": {
+      "id": "bb_0",
+      "node_type": "ARITHMETIC",
+      "instructions": [
+        {"mnemonic": "add", "operands": ["x1", "x2", "x3"]}
+      ]
+    }
+  },
+  "edges": []
+}
+```
+
+## 训练
+
+### 基础训练
+
+```bash
+uv run python main.py \
+    --dataset-dir /path/to/dataset \
+    --data-root ./data \
+    --max-epochs 100 \
+    --batch-size 16
+```
+
+`--dataset-dir` 支持传入多个目录，样本会合并训练：
+
+```bash
+uv run python main.py \
+    --dataset-dir /path/to/dataset_a /path/to/dataset_b \
+    --data-root ./data
+```
+
+### 启用 CodeBERT ASM 编码
+
+```bash
+uv run python main.py \
+    --dataset-dir /path/to/dataset \
+    --data-root ./data \
+    --use-text-encoder \
+    --text-model-name microsoft/codebert-base \
+    --text-output-dim 256 \
+    --text-max-length 512 \
+    --text-pooling mean
+```
+
+未传 `--use-text-encoder` 时，ASM 指令编码为零向量，仍可训练结构路径。
+
+### 多覆盖率目标
+
+默认只训练 `branch` 图级回归目标。可显式选择多个目标：
+
+```bash
+uv run python main.py \
+    --dataset-dir /path/to/dataset \
+    --data-root ./data \
+    --coverage-targets branch line toggle condition
+```
+
+### 仅测试 checkpoint
+
+```bash
+uv run python main.py \
+    --dataset-dir /path/to/dataset \
+    --data-root ./data \
+    --test-only \
+    --ckpt-path checkpoints/dual_graph_gnn/version_0/checkpoints/best.ckpt
+```
+
+## Joint Contrastive 训练
+
+Joint contrastive 模式使用 `contrastive_dataset.v1` 数据集。`manifest.json` 默认指向 `contrastive_samples.jsonlines`。
+
+```json
+{
+  "schema_version": "contrastive_dataset.v1",
+  "dataset_name": "contrastive_example",
+  "samples": "contrastive_samples.jsonlines",
+  "rtl_graphs": "rtl_graphs",
+  "asm_graphs": "asm_graphs",
+  "total": 1,
+  "errors": 0
+}
+```
+
+每行样本使用 `contrastive_sample.v1`，包含 `a`、`b` 和 `merged` 三路 targets：
+
+```json
+{
+  "schema_version": "contrastive_sample.v1",
+  "sample_id": "test_a::test_b::ALU",
+  "module_name": "ALU",
+  "rtl_graph": "rtl_graphs/ALU.json",
+  "asm_a": "asm_graphs/test_a.json",
+  "asm_b": null,
+  "targets": {
+    "a": {},
+    "b": {},
+    "merged": {}
+  }
+}
+```
+
+训练命令：
+
+```bash
+uv run python main.py \
+    --dataset-dir /path/to/contrastive_dataset \
+    --data-root ./data \
+    --joint-contrastive \
+    --use-hyperrectangle \
+    --contrastive-batch-size 16 \
+    --lambda-ce 1.0 \
+    --lambda-cl 0.5
+```
+
+可选项：
+
+- `--contrastive-triple-index`：指定三元组 jsonlines 文件；为空时读取 manifest 中的 `samples`。
+- `--contrastive-loss-type`：`mse`、`bce` 或 `margin`。
+- `--contrastive-margin`：`margin` loss 的不相似对交集上限。
+- `--or-consistency-weight`：启用 merged 逻辑 OR 一致性约束，默认关闭。
+
+## 常用 CLI 参数
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--dataset-dir` | 必需 | 一个或多个 manifest 数据集目录 |
+| `--data-root` | 必需 | 预处理缓存根目录 |
+| `--hidden-dim` | `256` | 模型隐藏维度 |
+| `--num-gnn-layers` | `6` | GNN 层数 |
+| `--dropout` | `0.1` | dropout |
+| `--max-epochs` | `100` | 最大训练 epoch |
+| `--lr` | `1e-4` | 学习率 |
+| `--weight-decay` | `1e-5` | AdamW weight decay |
+| `--batch-size` | `16` | 普通 DataLoader batch 大小 |
+| `--num-workers` | `4` | 数据加载 worker 数 |
+| `--precision` | `bf16-mixed` | Lightning precision |
+| `--logger-type` | `tensorboard` | `tensorboard` 或 `csv` |
+| `--checkpoint-dir` | `checkpoints` | checkpoint 和日志根目录 |
+| `--use-text-encoder` | `false` | 启用 CodeBERT ASM 编码 |
+| `--coverage-targets` | `branch` | 图级覆盖率目标 |
+| `--use-hyperrectangle` | `false` | 启用超矩形表示 |
+| `--joint-contrastive` | `false` | 启用三元组联合训练 |
+| `--fast-dev-run` | `false` | Lightning 快速调试模式 |
+| `--seed` | `None` | 全局随机种子 |
+
+注意：`TrainerConfig` 中还存在 `use_bucketing`、`token_budget`、`strategy` 等配置，目前未在 `main.py` CLI 暴露。如需使用，可通过 Python API 构造配置。
+
+## Python API
+
+```python
+from models import ModelConfig
+from trainer import AppConfig, DataConfig, RuntimeConfig, TrainerConfig, train_model
+
+app_config = AppConfig(
+    data=DataConfig(
+        data_root="./data",
+        dataset_dir="/path/to/dataset",
+    ),
+    model=ModelConfig(
+        hidden_dim=256,
+        num_gnn_layers=6,
+        coverage_target_keys=("branch",),
+    ),
+    trainer=TrainerConfig(
+        max_epochs=100,
+        batch_size=16,
+        learning_rate=1e-4,
+    ),
+    text_encoder=None,
+    runtime=RuntimeConfig(
+        experiment_name="dual_graph_gnn",
+        logger_type="tensorboard",
+    ),
+)
+
+module, lightning_trainer = train_model(app_config)
+```
+
+## 测试
+
+运行完整测试：
+
+```bash
+uv run python -m pytest -q
+```
+
+也可以运行指定测试：
+
+```bash
+uv run python -m pytest -q tests/test_manifest_dataset.py
+uv run python -m pytest -q tests/test_multi_coverage_heads.py
+uv run python -m pytest -q tests/test_union_fusion.py
+```
+
+当前测试重点覆盖：
+
+- manifest 数据集加载与稀疏标签处理
+- 多 dataset 目录合并
+- contrastive 三元组数据加载
+- joint train DataModule 构建
+- 多覆盖率 graph heads
+- union fusion 的对称性与 merged 路径
+
+## 缓存与输出
+
+- `data_root/train/processed/`：普通训练样本缓存。
+- `data_root/train/processed/rtl_*.pt`：去重后的 RTL 图结构缓存。
+- `data_root/train/processed/asm_*.pt`：去重后的 ASM 图缓存。
+- `data_root/asm_encoding_cache/`：CodeBERT pooled ASM 编码缓存。
+- `checkpoint-dir/experiment-name/`：Lightning 日志和 checkpoint。
+
+如果数据集内容或编码器配置变化，建议使用新的 `--data-root`，避免复用旧缓存导致实验不一致。
+
+## 已知边界
+
+- 本仓库当前 README 描述的是训练侧；原始 RTL/覆盖率报告提取工具不在当前代码树中作为主入口维护。
+- 普通训练默认会在没有显式 val cache 时，从 train 数据集中按固定随机种子划分 9:1 验证集。
+- `main.py` 暂未暴露所有 `TrainerConfig` 字段，高级训练配置建议使用 Python API。
+- 启用 `--use-text-encoder` 需要可访问 HuggingFace 模型权重，离线环境需提前准备缓存。
