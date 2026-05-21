@@ -23,14 +23,16 @@ from .data_types import (
     coverage_key_index,
 )
 from .coverage_similarity import compute_rate_jaccard
-from .datamodule import (
-    DatasetDirInput,
-    _build_rtl_structure,
-    _build_asm_graph,
-    _empty_asm_graph,
-    _extract_targets_from_sample,
-    _normalize_dataset_dirs,
+from .graph_builders import (
+    build_asm_graph as _build_asm_graph,
+    build_rtl_structure as _build_rtl_structure,
+    empty_asm_graph as _empty_asm_graph,
 )
+from .manifest import (
+    DatasetDirInput,
+    normalize_dataset_dirs as _normalize_dataset_dirs,
+)
+from .targets import extract_targets_from_sample as _extract_targets_from_sample
 
 logger = logging.getLogger(__name__)
 

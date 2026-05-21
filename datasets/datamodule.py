@@ -9,7 +9,7 @@ import logging
 import os
 from multiprocessing import Pool
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional, Callable, Union, Sequence
+from typing import TYPE_CHECKING, List, Optional, Callable
 
 if TYPE_CHECKING:
     from text_encoder import TextEncoderConfig
@@ -19,214 +19,23 @@ import lightning as L
 from torch_geometric.data import Dataset
 from torch_geometric.loader import DataLoader as PyGDataLoader
 
-from cdfg_rtl.data_types import EdgeType, get_cell_type_index, CELL_TYPE_TO_NODE_TYPE
-from cdfg_asm.data_types import AsmNodeType, AsmEdgeType
-from .data_types import DualGraphData, COVERAGE_KEYS
+from .data_types import DualGraphData
+from .graph_builders import (
+    build_asm_graph as _build_asm_graph,
+    build_rtl_structure as _build_rtl_structure,
+    empty_asm_graph as _empty_asm_graph,
+)
+from .manifest import (
+    DatasetDirInput,
+    normalize_dataset_dirs as _normalize_dataset_dirs,
+    read_manifest_samples_from_dirs as _read_manifest_samples_from_dirs,
+)
+from .samplers import RtlSizeBucketSampler
+from .targets import extract_targets_from_sample as _extract_targets_from_sample
 
 logger = logging.getLogger(__name__)
 
-# 枚举名 → 0-indexed 映射表
-_EDGE_TYPE_MAP = {e.name: e.value - 1 for e in EdgeType}
-_ASM_NODE_TYPE_MAP = {e.name: e.value - 1 for e in AsmNodeType}
-_ASM_EDGE_TYPE_MAP = {e.name: e.value - 1 for e in AsmEdgeType}
-_NODE_TYPE_MAP = {idx: nt for idx, nt in enumerate(CELL_TYPE_TO_NODE_TYPE)}
 _EMPTY_ASM_KEY = "__empty_asm__"
-
-
-def _make_edge_index(src: list, tgt: list) -> torch.Tensor:
-    """构建 edge_index 张量，空列表时返回 shape=(2,0) 的空张量"""
-    if src:
-        return torch.tensor([src, tgt], dtype=torch.long)
-    return torch.empty((2, 0), dtype=torch.long)
-
-
-def _normalize_cell_type(cell_type: str) -> str:
-    if cell_type == "input":
-        return "INPUT"
-    if cell_type == "output":
-        return "OUTPUT"
-    return cell_type
-
-
-def _build_rtl_structure(rtl: dict) -> dict:
-    """构建 RTL 图结构张量（不含 coverage_label），返回 dict
-
-    额外返回 _valid_edge_mask: list[bool]，标记原始 edges 中哪些边通过了
-    node_id 过滤，用于标签提取时保持一致性。
-    """
-    nodes = rtl["nodes"]
-    node_id_to_idx = {n["id"]: i for i, n in enumerate(nodes)}
-
-    node_cell_type = [get_cell_type_index(_normalize_cell_type(n["cell_type"])) for n in nodes]
-    node_width = [n["width"] for n in nodes]
-
-    src_list, tgt_list = [], []
-    etype_list, ewidth_list = [], []
-    esrc_port_list, etgt_port_list = [], []
-    valid_edge_mask: list[bool] = []
-
-    for e in rtl["edges"]:
-        si = node_id_to_idx.get(e["source"])
-        ti = node_id_to_idx.get(e["target"])
-        if si is None or ti is None:
-            valid_edge_mask.append(False)
-            continue
-        valid_edge_mask.append(True)
-        src_list.append(si)
-        tgt_list.append(ti)
-        etype_list.append(_EDGE_TYPE_MAP.get(e["type"], 0))
-        ewidth_list.append(e["width"])
-        esrc_port_list.append(e["source_port_idx"])
-        etgt_port_list.append(e["target_port_idx"])
-
-    return {
-        "node_cell_type": torch.tensor(node_cell_type, dtype=torch.long),
-        "node_type": torch.tensor(
-            [_NODE_TYPE_MAP[ct] for ct in node_cell_type], dtype=torch.long
-        ),
-        "node_width": torch.tensor(node_width, dtype=torch.long),
-        "edge_index": _make_edge_index(src_list, tgt_list),
-        "edge_type": torch.tensor(etype_list, dtype=torch.long),
-        "edge_width": torch.tensor(ewidth_list, dtype=torch.long),
-        "edge_source_port_idx": torch.tensor(esrc_port_list, dtype=torch.long),
-        "edge_target_port_idx": torch.tensor(etgt_port_list, dtype=torch.long),
-        "_valid_edge_mask": valid_edge_mask,
-    }
-
-
-def _build_asm_graph(asm_json_path: str, asm_encoding: Optional[torch.Tensor]) -> dict:
-    """构建 ASM 图张量，返回 dict"""
-    with open(asm_json_path, encoding="utf-8") as f:
-        asm = json.load(f)
-
-    asm_node_ids = list(asm["nodes"].keys())
-    asm_id_to_idx = {nid: i for i, nid in enumerate(asm_node_ids)}
-
-    asm_nt = [
-        _ASM_NODE_TYPE_MAP.get(
-            asm["nodes"][nid]["node_type"],
-            AsmNodeType.UNKNOWN.value - 1,
-        )
-        for nid in asm_node_ids
-    ]
-
-    asm_src, asm_tgt, asm_et = [], [], []
-    for ae in asm["edges"]:
-        s = asm_id_to_idx.get(ae["source"])
-        t = asm_id_to_idx.get(ae["target"])
-        if s is None or t is None:
-            continue
-        asm_src.append(s)
-        asm_tgt.append(t)
-        asm_et.append(_ASM_EDGE_TYPE_MAP.get(ae["edge_type"], 0))
-
-    # 使用预计算的编码，或回退到零向量
-    if asm_encoding is not None:
-        asm_instr_enc = asm_encoding
-    else:
-        asm_instr_enc = torch.zeros(len(asm_node_ids), 256)
-
-    return {
-        "asm_node_type": torch.tensor(asm_nt, dtype=torch.long),
-        "asm_instruction_encoding": asm_instr_enc,
-        "asm_edge_index": _make_edge_index(asm_src, asm_tgt),
-        "asm_edge_type": torch.tensor(asm_et, dtype=torch.long),
-    }
-
-
-def _empty_asm_graph() -> dict:
-    return {
-        "asm_node_type": torch.zeros(1, dtype=torch.long),
-        "asm_instruction_encoding": torch.zeros(1, 256),
-        "asm_edge_index": torch.empty((2, 0), dtype=torch.long),
-        "asm_edge_type": torch.empty(0, dtype=torch.long),
-    }
-
-
-DatasetDirInput = Union[str, Path, Sequence[Union[str, Path]]]
-
-
-def _normalize_dataset_dirs(
-    dataset_dir: Optional[DatasetDirInput],
-) -> list[Path]:
-    if dataset_dir is None:
-        return []
-    if isinstance(dataset_dir, (str, Path)):
-        return [Path(dataset_dir)]
-    return [Path(p) for p in dataset_dir]
-
-
-def _read_manifest_samples(dataset_dir: Path) -> list[dict]:
-    """读取 coverage-report-extractor 新格式 manifest/samples。"""
-    manifest_file = dataset_dir / "manifest.json"
-    if not manifest_file.exists():
-        raise FileNotFoundError(f"manifest.json 不存在: {manifest_file}")
-
-    with open(manifest_file, encoding="utf-8") as f:
-        manifest = json.load(f)
-    if manifest.get("schema_version") != "dataset.v1":
-        raise ValueError(
-            f"不支持的数据集 schema: {manifest.get('schema_version')!r}, "
-            "期望 dataset.v1"
-        )
-
-    samples_file = dataset_dir / manifest.get("samples", "samples.jsonlines")
-    if not samples_file.exists():
-        raise FileNotFoundError(f"samples.jsonlines 不存在: {samples_file}")
-
-    results: list[dict] = []
-    with open(samples_file, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            entry = json.loads(line)
-            if entry.get("schema_version") != "sample.v1":
-                raise ValueError(
-                    f"不支持的样本 schema: {entry.get('schema_version')!r}"
-                )
-            sample = dict(entry)
-            sample["_rtl_path"] = str(dataset_dir / entry["rtl_graph"])
-            sample["_asm_path"] = (
-                str(dataset_dir / entry["asm_graph"]) if entry.get("asm_graph") else None
-            )
-            results.append(sample)
-    return results
-
-
-def _read_manifest_samples_from_dirs(dataset_dirs: list[Path]) -> list[dict]:
-    samples: list[dict] = []
-    for dataset_dir in dataset_dirs:
-        samples.extend(_read_manifest_samples(dataset_dir))
-    return samples
-
-
-def _extract_targets_from_sample(sample: dict, valid_edge_mask: list[bool]) -> tuple[torch.Tensor, torch.Tensor]:
-    targets = sample.get("targets", {})
-    edge_target = targets.get("edge_coverage", {})
-    default_label = int(edge_target.get("default", -1))
-    labels_by_edge_id = [default_label] * len(valid_edge_mask)
-    for item in edge_target.get("labels", []):
-        edge_id = int(item["edge_id"])
-        if 0 <= edge_id < len(labels_by_edge_id):
-            labels_by_edge_id[edge_id] = int(item["label"])
-
-    elabel_list = [
-        label
-        for label, valid in zip(labels_by_edge_id, valid_edge_mask)
-        if valid
-    ]
-
-    graph_values = targets.get("graph_coverage", {}).get("values", {})
-    y_vals = []
-    for key in COVERAGE_KEYS:
-        v = graph_values.get(key)
-        y_vals.append(float("nan") if v is None else float(v) / 100.0)
-
-    return (
-        torch.tensor(elabel_list, dtype=torch.long),
-        torch.tensor([y_vals], dtype=torch.float),
-    )
 
 
 def _build_and_save_labels(
@@ -562,103 +371,6 @@ class DualGraphDataset(Dataset):
             )
         return self._file_cache[filename]
 
-
-class RtlSizeBucketSampler(torch.utils.data.Sampler):
-    """
-    按 RTL 图节点数分桶的动态 batch sampler。
-
-    原理：
-    - 预扫描每个样本的 N_rtl（节点数），按对数桶分组
-    - 桶内按 total_nodes ≤ token_budget 装箱，输出 List[List[int]]
-    - 避免 batch 内出现 N_rtl 差异极大的样本，减少 padding 浪费
-
-    与 follow_batch=["asm_node_type"] 兼容（PyGDataLoader 的 batch_sampler 路径）。
-    """
-
-    _BUCKET_EDGES = (128, 512, 2048)  # 按节点数划分的桶边界
-
-    def __init__(
-        self,
-        dataset,
-        token_budget: int = 8192,
-        shuffle: bool = True,
-        seed: int = 0,
-    ):
-        """
-        Args:
-            dataset:      DualGraphDataset 实例
-            token_budget: 每个 batch 的最大节点总数
-            shuffle:      是否在桶内随机打散
-            seed:         随机种子
-        """
-        super().__init__()
-        self.token_budget = token_budget
-        self.shuffle = shuffle
-        self.seed = seed
-        self._epoch = 0
-
-        # 预扫描：获取每个样本的 RTL 节点数
-        sizes = self._scan_sizes(dataset)
-        # 按桶分组
-        buckets: dict[int, list[int]] = {
-            k: [] for k in range(len(self._BUCKET_EDGES) + 1)
-        }
-        for idx, n in enumerate(sizes):
-            bkt = sum(n >= e for e in self._BUCKET_EDGES)
-            buckets[bkt].append(idx)
-        self._buckets = [v for v in buckets.values() if v]
-        self._sizes = sizes
-
-    @staticmethod
-    def _scan_sizes(dataset) -> list[int]:
-        sizes = []
-        for i in range(len(dataset)):
-            data = dataset[i]
-            # node_cell_type 是 RTL 节点的可靠代理字段
-            n = (
-                int(data.node_cell_type.size(0))
-                if hasattr(data, "node_cell_type")
-                else 1
-            )
-            sizes.append(max(n, 1))
-        return sizes
-
-    def _make_batches(self) -> list[list[int]]:
-        rng = torch.Generator()
-        rng.manual_seed(self.seed + self._epoch)
-        batches = []
-        for bucket in self._buckets:
-            indices = list(bucket)
-            if self.shuffle:
-                perm = torch.randperm(len(indices), generator=rng).tolist()
-                indices = [indices[p] for p in perm]
-            batch, total = [], 0
-            for idx in indices:
-                n = self._sizes[idx]
-                if batch and total + n > self.token_budget:
-                    batches.append(batch)
-                    batch, total = [], 0
-                batch.append(idx)
-                total += n
-            if batch:
-                batches.append(batch)
-        if self.shuffle:
-            perm = torch.randperm(len(batches), generator=rng).tolist()
-            batches = [batches[p] for p in perm]
-        return batches
-
-    def __iter__(self):
-        self._cached_batches = self._make_batches()
-        yield from self._cached_batches
-
-    def __len__(self) -> int:
-        if not hasattr(self, "_cached_batches"):
-            self._cached_batches = self._make_batches()
-        return len(self._cached_batches)
-
-    def set_epoch(self, epoch: int):
-        self._epoch = epoch
-        self._cached_batches = self._make_batches()
 
 
 class DualGraphDataModule(L.LightningDataModule):
