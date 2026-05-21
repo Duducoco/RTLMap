@@ -1,19 +1,20 @@
 #!/usr/bin/env bash
-# RTLMap 基础训练脚本（边分类 + 图回归）
+# RTLMap 基础训练脚本（4 个 coverage-report-extractor 数据集，启用 CodeBERT）
 #
 # 用法:
-#   bash run_train.sh [DATASET_DIR] [DATA_ROOT]
-#
-# 示例:
-#   bash run_train.sh /path/to/dataset /path/to/data_root
+#   bash run_train.sh [DATA_ROOT]
 
 set -euo pipefail
 
-DATASET_DIR="${1:-/data/rtlmap/dataset}"
-DATA_ROOT="${2:-./data}"
+DATA_ROOT="${1:-./data}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/base}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-base}"
 
 uv run python main.py \
-    --dataset-dir "$DATASET_DIR" \
+    --dataset-dir /home/u1/projects/coverage-report-extractor/out/archgen_single \
+    --dataset-dir /home/u1/projects/coverage-report-extractor/out/ibex \
+    --dataset-dir /home/u1/projects/coverage-report-extractor/out/picorv32 \
+    --dataset-dir /home/u1/projects/coverage-report-extractor/out/riscv_simple_multicycle \
     --data-root "$DATA_ROOT" \
     --hidden-dim 256 \
     --num-gnn-layers 4 \
@@ -31,9 +32,12 @@ uv run python main.py \
     --label-smoothing 0.1 \
     --precision bf16-mixed \
     --use-text-encoder \
-    --experiment-name baseline \
+    --text-model-name microsoft/codebert-base \
+    --text-max-length 512 \
+    --text-pooling mean \
+    --experiment-name "$EXPERIMENT_NAME" \
     --logger-type tensorboard \
-    --checkpoint-dir checkpoints/baseline \
+    --checkpoint-dir "$CHECKPOINT_DIR" \
     --save-top-k 3 \
     --early-stopping-patience 10 \
     --seed 42
