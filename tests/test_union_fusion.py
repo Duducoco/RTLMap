@@ -10,11 +10,10 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from datasets import DualGraphData
+from datasets import ContrastiveTripleBatch, DualGraphData
 from models import DualGraphFusionModel, ModelConfig
 from models.data_types import ModelOutput
 from trainer import DualGraphLightningModule
-from trainer.test_trainer import make_contrastive_triple_batch
 
 
 def _reference_graph(num_nodes: int = 6, num_edges: int = 8) -> DualGraphData:
@@ -26,6 +25,73 @@ def _reference_graph(num_nodes: int = 6, num_edges: int = 8) -> DualGraphData:
         edge_target_port_idx=torch.zeros(num_edges, dtype=torch.long),
         edge_labels=torch.randint(-1, 2, (num_edges,)),
         y=torch.rand(1, 1),
+    )
+
+
+def make_contrastive_triple_batch(
+    batch_size: int = 2, asm_instruction_dim: int = 32
+) -> ContrastiveTripleBatch:
+    items_a = []
+    items_b = []
+    items_m = []
+    for _ in range(batch_size):
+        num_nodes = 6
+        num_edges = 8
+        edge_index = torch.randint(0, num_nodes, (2, num_edges))
+        common = dict(
+            node_cell_type=torch.randint(0, 74, (num_nodes,)),
+            node_type=torch.randint(0, 12, (num_nodes,)),
+            node_width=torch.ones(num_nodes, dtype=torch.long),
+            edge_index=edge_index,
+            edge_type=torch.randint(0, 7, (num_edges,)),
+            edge_width=torch.ones(num_edges, dtype=torch.long),
+            edge_source_port_idx=torch.zeros(num_edges, dtype=torch.long),
+            edge_target_port_idx=torch.zeros(num_edges, dtype=torch.long),
+        )
+        asm_common = dict(
+            asm_node_type=torch.randint(0, 22, (3,)),
+            asm_instruction_encoding=torch.randn(3, asm_instruction_dim),
+            asm_edge_index=torch.tensor([[0, 1], [1, 2]], dtype=torch.long),
+            asm_edge_type=torch.randint(0, 10, (2,)),
+        )
+        empty_asm = dict(
+            asm_node_type=torch.zeros(1, dtype=torch.long),
+            asm_instruction_encoding=torch.zeros(1, asm_instruction_dim),
+            asm_edge_index=torch.empty((2, 0), dtype=torch.long),
+            asm_edge_type=torch.empty(0, dtype=torch.long),
+        )
+        items_a.append(
+            DualGraphData(
+                **common,
+                **asm_common,
+                edge_labels=torch.randint(-1, 2, (num_edges,)),
+                y=torch.rand(1, 1),
+            )
+        )
+        items_b.append(
+            DualGraphData(
+                **common,
+                **asm_common,
+                edge_labels=torch.randint(-1, 2, (num_edges,)),
+                y=torch.rand(1, 1),
+            )
+        )
+        items_m.append(
+            DualGraphData(
+                **common,
+                **empty_asm,
+                edge_labels=torch.randint(-1, 2, (num_edges,)),
+                y=torch.rand(1, 1),
+            )
+        )
+
+    from torch_geometric.data import Batch
+
+    return ContrastiveTripleBatch(
+        batch_a=Batch.from_data_list(items_a, follow_batch=["asm_node_type"]),
+        batch_b=Batch.from_data_list(items_b, follow_batch=["asm_node_type"]),
+        batch_merged=Batch.from_data_list(items_m, follow_batch=["asm_node_type"]),
+        similarity=torch.rand(batch_size),
     )
 
 
