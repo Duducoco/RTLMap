@@ -230,10 +230,10 @@ class DualGraphLightningModule(L.LightningModule):
         batch.batch_merged = batch.batch_merged.to(self.device)
         batch.similarity = batch.similarity.to(self.device)
 
-        # 三次 forward（共享编码器参数）
+        # 两次真实 forward（共享编码器参数）；merged 由 a/b 特征级 union fusion 得到
         out_a = self(batch.batch_a)
         out_b = self(batch.batch_b)
-        out_m = self(batch.batch_merged)
+        out_m = self.model.merge_outputs(out_a, out_b, batch.batch_merged)
 
         # 三路边级 CE 损失
         losses_a = self.model.compute_loss(

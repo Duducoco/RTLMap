@@ -213,7 +213,7 @@ def build_model_config(args: argparse.Namespace) -> ModelConfig:
         num_gnn_layers=args.num_gnn_layers,
         dropout=args.dropout,
         asm_instruction_dim=args.text_output_dim,
-        use_hyperrectangle=args.use_hyperrectangle,
+        use_hyperrectangle=args.use_hyperrectangle or args.joint_contrastive,
         hyper_min_margin=args.hyper_min_margin,
         coverage_target_keys=tuple(args.coverage_targets),
     )

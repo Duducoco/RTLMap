@@ -15,6 +15,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from datasets import DualGraphDataset
 from datasets.triple_datamodule import ContrastiveTripleDataset
+from trainer.config import TrainerConfig
+from trainer.utils import _build_training_datamodule
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -274,7 +276,54 @@ def test_contrastive_manifest_dataset_uses_shared_graph_and_targets() -> None:
         assert 0.0 <= similarity <= 1.0
 
 
+def test_contrastive_manifest_builds_joint_train_datamodule_without_index() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        dataset_dir = base / "contrastive"
+        _write_json(dataset_dir / "rtl_graphs" / "ALU.json", _minimal_rtl_graph())
+        _write_json(dataset_dir / "asm_graphs" / "test_a.json", _minimal_asm_graph())
+        _write_json(
+            dataset_dir / "manifest.json",
+            {
+                "schema_version": "contrastive_dataset.v1",
+                "dataset_name": "unit",
+                "samples": "contrastive_samples.jsonlines",
+                "rtl_graphs": "rtl_graphs",
+                "asm_graphs": "asm_graphs",
+                "total": 1,
+                "errors": 0,
+            },
+        )
+        (dataset_dir / "contrastive_samples.jsonlines").write_text(
+            json.dumps(_contrastive_entry()) + "\n",
+            encoding="utf-8",
+        )
+
+        dm, has_validation = _build_training_datamodule(
+            data_root=str(base / "cache"),
+            dataset_dir=str(dataset_dir),
+            text_encoder_config=None,
+            trainer_config=TrainerConfig(
+                joint_contrastive=True,
+                contrastive_triple_index="",
+                batch_size=2,
+                contrastive_batch_size=2,
+                num_workers=0,
+            ),
+        )
+        dm.setup("fit")
+        batch = next(iter(dm.train_dataloader()))
+
+        assert has_validation is False
+        assert dm.val_dataloader() == []
+        assert dm.test_dataloader() == []
+        assert batch.batch_a.edge_labels.numel() == 1
+        assert batch.batch_b.edge_labels.numel() == 1
+        assert batch.batch_merged.edge_labels.numel() == 1
+
+
 if __name__ == "__main__":
     test_manifest_dataset_loads_sparse_targets_without_legacy_index()
     test_manifest_dataset_merges_multiple_dataset_dirs()
     test_contrastive_manifest_dataset_uses_shared_graph_and_targets()
+    test_contrastive_manifest_builds_joint_train_datamodule_without_index()

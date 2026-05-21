@@ -139,6 +139,36 @@ class GraphRegressor(nn.Module):
         return torch.cat(preds, dim=-1)
 
 
+class SymmetricUnionFusion(nn.Module):
+    """Order-invariant gated union fusion for two aligned feature tensors."""
+
+    def __init__(self, hidden_dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.gate = nn.Sequential(
+            nn.Linear(hidden_dim * 4, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Sigmoid(),
+        )
+        self.norm = nn.LayerNorm(hidden_dim)
+
+    def forward(self, feat_a: torch.Tensor, feat_b: torch.Tensor) -> torch.Tensor:
+        union_input = torch.cat(
+            [
+                feat_a + feat_b,
+                torch.maximum(feat_a, feat_b),
+                torch.abs(feat_a - feat_b),
+                feat_a * feat_b,
+            ],
+            dim=-1,
+        )
+        gate = self.gate(union_input)
+        h_base = 0.5 * (feat_a + feat_b)
+        h_max = torch.maximum(feat_a, feat_b)
+        return self.norm(gate * h_max + (1.0 - gate) * h_base)
+
+
 class DualGraphFusionModel(nn.Module):
     """
     双图融合模型
@@ -193,6 +223,13 @@ class DualGraphFusionModel(nn.Module):
             self.hyperrectangle_head = HyperrectangleHead(
                 hidden_dim=config.hidden_dim, margin=config.hyper_min_margin
             )
+
+        self.union_node_fusion = SymmetricUnionFusion(
+            config.hidden_dim, config.dropout
+        )
+        self.union_graph_fusion = SymmetricUnionFusion(
+            config.hidden_dim, config.dropout
+        )
 
     def forward(self, data: DualGraphData) -> ModelOutput:
         """
@@ -251,6 +288,58 @@ class DualGraphFusionModel(nn.Module):
             hyper_min=hyper_min,
             hyper_max=hyper_max,
             rtl_graph_emb=rtl_graph,
+        )
+
+    def merge_outputs(
+        self,
+        output_a: ModelOutput,
+        output_b: ModelOutput,
+        reference: DualGraphData,
+    ) -> ModelOutput:
+        """Fuse two aligned test-conditioned outputs into merged coverage output."""
+        if output_a.rtl_final is None or output_b.rtl_final is None:
+            raise ValueError("merge_outputs requires rtl_final in both outputs")
+        if output_a.rtl_graph_emb is None or output_b.rtl_graph_emb is None:
+            raise ValueError("merge_outputs requires rtl_graph_emb in both outputs")
+        if output_a.rtl_final.shape != output_b.rtl_final.shape:
+            raise ValueError(
+                "merge_outputs requires aligned node features: "
+                f"{tuple(output_a.rtl_final.shape)} != {tuple(output_b.rtl_final.shape)}"
+            )
+        if output_a.rtl_graph_emb.shape != output_b.rtl_graph_emb.shape:
+            raise ValueError(
+                "merge_outputs requires aligned graph features: "
+                f"{tuple(output_a.rtl_graph_emb.shape)} != "
+                f"{tuple(output_b.rtl_graph_emb.shape)}"
+            )
+
+        rtl_union = self.union_node_fusion(output_a.rtl_final, output_b.rtl_final)
+        graph_union = self.union_graph_fusion(
+            output_a.rtl_graph_emb, output_b.rtl_graph_emb
+        )
+
+        edge_logits = self.edge_classifier(
+            rtl_union,
+            reference.edge_index,
+            reference.edge_type,
+            getattr(reference, "edge_width", None),
+            getattr(reference, "edge_source_port_idx", None),
+            getattr(reference, "edge_target_port_idx", None),
+        )
+        graph_pred = self.graph_regressor(graph_union)
+
+        hyper_min, hyper_max = None, None
+        if self.config.use_hyperrectangle and hasattr(self, "hyperrectangle_head"):
+            hyper_min, hyper_max = self.hyperrectangle_head(graph_union)
+
+        return ModelOutput(
+            edge_logits=edge_logits,
+            graph_pred=graph_pred,
+            rtl_final=rtl_union,
+            asm_final=None,
+            hyper_min=hyper_min,
+            hyper_max=hyper_max,
+            rtl_graph_emb=graph_union,
         )
 
     def compute_loss(
