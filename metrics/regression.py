@@ -43,14 +43,16 @@ class CoverageRegressionMetrics:
                 result[f"graph_mse{sfx}"] = _zero
                 result[f"graph_mae{sfx}"] = _zero
                 if not lite:
-                    result.update({
-                        f"graph_rmse{sfx}": _zero,
-                        f"graph_mape{sfx}": _zero,
-                        f"graph_smape{sfx}": _zero,
-                        f"graph_medae{sfx}": _zero,
-                        f"graph_r2{sfx}": _zero,
-                        f"graph_r{sfx}": _zero,
-                    })
+                    result.update(
+                        {
+                            f"graph_rmse{sfx}": _zero,
+                            f"graph_mape{sfx}": _zero,
+                            f"graph_smape{sfx}": _zero,
+                            f"graph_medae{sfx}": _zero,
+                            f"graph_r2{sfx}": _zero,
+                            f"graph_r{sfx}": _zero,
+                        }
+                    )
             return result
 
         result = {}
@@ -60,9 +62,13 @@ class CoverageRegressionMetrics:
             t = target[:, col] if target.dim() == 2 else target.view(-1)
             valid = ~torch.isnan(t)
             if valid.any():
-                result.update(self._compute_single(p[valid], t[valid], lite=lite, suffix=sfx))
+                result.update(
+                    self._compute_single(p[valid], t[valid], lite=lite, suffix=sfx)
+                )
             else:
-                result.update(self._zero_single(device=pred.device, lite=lite, suffix=sfx))
+                result.update(
+                    self._zero_single(device=pred.device, lite=lite, suffix=sfx)
+                )
         return result
 
     def _zero_single(
@@ -77,14 +83,16 @@ class CoverageRegressionMetrics:
             f"graph_mae{suffix}": _zero,
         }
         if not lite:
-            result.update({
-                f"graph_rmse{suffix}": _zero,
-                f"graph_mape{suffix}": _zero,
-                f"graph_smape{suffix}": _zero,
-                f"graph_medae{suffix}": _zero,
-                f"graph_r2{suffix}": _zero,
-                f"graph_r{suffix}": _zero,
-            })
+            result.update(
+                {
+                    f"graph_rmse{suffix}": _zero,
+                    f"graph_mape{suffix}": _zero,
+                    f"graph_smape{suffix}": _zero,
+                    f"graph_medae{suffix}": _zero,
+                    f"graph_r2{suffix}": _zero,
+                    f"graph_r{suffix}": _zero,
+                }
+            )
         return result
 
     def _compute_single(
@@ -141,13 +149,15 @@ class CoverageRegressionMetrics:
         else:
             r = _zero
 
-        result.update({
-            f"graph_rmse{suffix}": rmse,
-            f"graph_mape{suffix}": mape,
-            f"graph_smape{suffix}": smape,
-            f"graph_medae{suffix}": medae,
-            f"graph_r2{suffix}": r2,
-            f"graph_r{suffix}": r,
-        })
+        result.update(
+            {
+                f"graph_rmse{suffix}": rmse,
+                f"graph_mape{suffix}": mape,
+                f"graph_smape{suffix}": smape,
+                f"graph_medae{suffix}": medae,
+                f"graph_r2{suffix}": r2,
+                f"graph_r{suffix}": r,
+            }
+        )
 
         return result

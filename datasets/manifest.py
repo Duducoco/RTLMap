@@ -48,7 +48,9 @@ def read_manifest_samples(dataset_dir: Path) -> list[dict]:
             sample = dict(entry)
             sample["_rtl_path"] = str(dataset_dir / entry["rtl_graph"])
             sample["_asm_path"] = (
-                str(dataset_dir / entry["asm_graph"]) if entry.get("asm_graph") else None
+                str(dataset_dir / entry["asm_graph"])
+                if entry.get("asm_graph")
+                else None
             )
             results.append(sample)
     return results

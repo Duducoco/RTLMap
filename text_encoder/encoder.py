@@ -4,7 +4,6 @@ import json
 import logging
 import math
 import os
-import warnings
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from copy import copy
@@ -26,41 +25,41 @@ _IO_WORKERS = os.cpu_count() or 1
 
 def _clean_json_control_chars(raw: bytes) -> bytes:
     """清理 JSON 中的非法控制字符
-    
+
     JSON 规范要求字符串内的控制字符（U+0000 到 U+001F）必须被转义。
     此函数将非法控制字符替换为空格，保留合法的空白字符（制表符、换行符、回车符）。
-    
+
     使用空格替换而非删除，以保持 JSON 结构完整性（避免破坏字符串边界）。
-    
+
     Args:
         raw: 原始 JSON 字节数据
-        
+
     Returns:
         清理后的 JSON 字节数据
     """
     # 将控制字符替换为空格，除了：
     # - \x09 (制表符 \t)
-    # - \x0a (换行符 \n)  
+    # - \x0a (换行符 \n)
     # - \x0d (回车符 \r)
     # 同时处理 DEL 字符 \x7f 和扩展控制字符 \x80-\x9f
-    return re.sub(rb'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', b' ', raw)
+    return re.sub(rb"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", b" ", raw)
 
 
 def _parse_json_lenient(raw: bytes, path: str) -> dict:
     """宽松模式解析 JSON，处理各种非法字符
-    
+
     尝试顺序：
     1. orjson 直接解析（最快）
     2. 清理控制字符后 orjson 解析
     3. Python json 模块 strict=False 模式（最宽松）
-    
+
     Args:
         raw: 原始 JSON 字节数据
         path: 文件路径（用于错误日志）
-        
+
     Returns:
         解析后的字典
-        
+
     Raises:
         json.JSONDecodeError: 所有方法都失败时抛出
     """
@@ -69,19 +68,19 @@ def _parse_json_lenient(raw: bytes, path: str) -> dict:
         return orjson.loads(raw)
     except orjson.JSONDecodeError:
         pass
-    
+
     # 方法2：清理控制字符后重试 orjson
     cleaned = _clean_json_control_chars(raw)
     try:
         return orjson.loads(cleaned)
     except orjson.JSONDecodeError:
         pass
-    
+
     # 方法3：使用 Python json 模块的宽松模式
     # strict=False 允许字符串中包含控制字符
     try:
         # 先解码为字符串，忽略无法解码的字节
-        text = cleaned.decode('utf-8', errors='replace')
+        text = cleaned.decode("utf-8", errors="replace")
         return json.loads(text, strict=False)
     except json.JSONDecodeError as e:
         logger.error("JSON 解析失败（所有方法）: %s, 错误: %s", path, str(e))
@@ -194,7 +193,9 @@ class InstructionEncoder:
 
     def _forward_tokens(self, tokens: dict[str, torch.Tensor]) -> torch.Tensor:
         """已 tokenize 的输入 → GPU forward + pooling → [B, hidden_size]"""
-        tokens = {k: v.to(self.config.device, non_blocking=True) for k, v in tokens.items()}
+        tokens = {
+            k: v.to(self.config.device, non_blocking=True) for k, v in tokens.items()
+        }
 
         with torch.no_grad():
             outputs = self.model(**tokens)
@@ -221,10 +222,8 @@ class InstructionEncoder:
             half = len(batch_texts) // 2
             if half == 0:
                 raise  # 单条文本仍 OOM，无法降级
-            logger.warning(
-                "CUDA OOM，batch %d → %d 重试", len(batch_texts), half
-            )
-            left = self._pool_batch_safe(batch_texts[:half])   # 已在 CPU
+            logger.warning("CUDA OOM，batch %d → %d 重试", len(batch_texts), half)
+            left = self._pool_batch_safe(batch_texts[:half])  # 已在 CPU
             right = self._pool_batch_safe(batch_texts[half:])  # 已在 CPU
             return torch.cat([left, right], dim=0)
 
@@ -256,9 +255,7 @@ class InstructionEncoder:
             tokens = next_tokens.result()
             # 提前提交下一个 batch 的 tokenize
             if i + 1 < len(batches):
-                next_tokens = prefetch_pool.submit(
-                    self._tokenize_batch, batches[i + 1]
-                )
+                next_tokens = prefetch_pool.submit(self._tokenize_batch, batches[i + 1])
             try:
                 pooled = self._forward_tokens(tokens)
             except torch.cuda.OutOfMemoryError:
@@ -397,7 +394,9 @@ class MultiGPUInstructionEncoder:
             if chunk_start == 0:
                 logger.info(
                     "批量编码 %d 个文件（%d GPU，每 %d 文件一批）",
-                    total_files, len(self._encoders), chunk_files,
+                    total_files,
+                    len(self._encoders),
+                    chunk_files,
                 )
 
             # 编码当前批次
@@ -418,4 +417,3 @@ class MultiGPUInstructionEncoder:
             del chunk_data, chunk_texts, chunk_pooled
 
         logger.info("批量编码完成，共 %d 个节点", total_nodes)
-

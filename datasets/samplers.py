@@ -43,9 +43,7 @@ class RtlSizeBucketSampler(torch.utils.data.Sampler):
                 else 0
             )
             asm_nodes = (
-                int(data.asm_node_type.size(0))
-                if hasattr(data, "asm_node_type")
-                else 0
+                int(data.asm_node_type.size(0)) if hasattr(data, "asm_node_type") else 0
             )
             n = rtl_nodes + asm_nodes
             sizes.append(max(n, 1))

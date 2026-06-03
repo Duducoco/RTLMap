@@ -35,6 +35,7 @@ from .targets import extract_targets_from_sample as _extract_targets_from_sample
 
 logger = logging.getLogger(__name__)
 
+
 def _sample_with_targets(entry: dict, targets: dict) -> dict:
     return {
         "targets": targets,

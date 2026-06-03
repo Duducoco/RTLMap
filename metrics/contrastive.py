@@ -40,11 +40,15 @@ class ContrastiveMetrics:
             "alignment_mse": alignment_mse,
             "alignment_mae": alignment_mae,
             "intersection_mean": intersection.mean(),
-            "intersection_std": intersection.std() if intersection.numel() > 1 else torch.tensor(0.0, device=intersection.device),
+            "intersection_std": intersection.std()
+            if intersection.numel() > 1
+            else torch.tensor(0.0, device=intersection.device),
             "intersection_min": intersection.min(),
             "intersection_max": intersection.max(),
             "jaccard_mean": jaccard.mean(),
-            "jaccard_std": jaccard.std() if jaccard.numel() > 1 else torch.tensor(0.0, device=jaccard.device),
+            "jaccard_std": jaccard.std()
+            if jaccard.numel() > 1
+            else torch.tensor(0.0, device=jaccard.device),
             "jaccard_min": jaccard.min(),
             "jaccard_max": jaccard.max(),
         }
@@ -85,6 +89,7 @@ class ContrastiveMetrics:
         # Spearman R (需要 scipy)
         try:
             from scipy.stats import spearmanr
+
             sr, _ = spearmanr(all_inter.numpy(), all_jacc.numpy())
             result["alignment_spearman_r"] = float(sr)
         except (ImportError, ValueError):

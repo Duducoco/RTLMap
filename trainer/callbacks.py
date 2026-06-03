@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 from pathlib import Path
 from typing import Any, List, Optional, Union
 
@@ -26,12 +27,7 @@ try:
 except (ImportError, ModuleNotFoundError):
     _RICH_AVAILABLE = False
 
-try:
-    # 检查 rich 库是否可用
-    import rich
-
-    _RICH_AVAILABLE = _RICH_AVAILABLE and True
-except ImportError:
+if importlib.util.find_spec("rich") is None:
     _RICH_AVAILABLE = False
 
 
@@ -127,7 +123,9 @@ class EvalMetricJsonLogger(Callback):
             metrics[key_str] = scalar
         return metrics
 
-    def on_validation_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+    def on_validation_epoch_end(
+        self, trainer: L.Trainer, pl_module: L.LightningModule
+    ) -> None:
         if getattr(trainer, "sanity_checking", False):
             return
 
@@ -161,7 +159,9 @@ class CallbackFactory:
         return LearningRateMonitor(logging_interval="step")
 
     @staticmethod
-    def create_progress_bar(use_rich: bool = True) -> Union[ProgressBar, Callback, None]:
+    def create_progress_bar(
+        use_rich: bool = True,
+    ) -> Union[ProgressBar, Callback, None]:
         """
         创建进度条 callback
 

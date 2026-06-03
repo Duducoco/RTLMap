@@ -27,22 +27,30 @@ def compute_contrastive_loss(
         对比损失 scalar
     """
     intersection = hyperrectangle_intersection(
-        output_a.hyper_min, output_a.hyper_max,
-        output_b.hyper_min, output_b.hyper_max,
+        output_a.hyper_min,
+        output_a.hyper_max,
+        output_b.hyper_min,
+        output_b.hyper_max,
     )  # [B]
 
     if loss_type == "mse":
         return F.mse_loss(intersection, similarity)
 
     elif loss_type == "bce":
-        return F.binary_cross_entropy(
-            intersection.clamp(1e-7, 1 - 1e-7), similarity
-        )
+        return F.binary_cross_entropy(intersection.clamp(1e-7, 1 - 1e-7), similarity)
 
     elif loss_type == "margin":
         sim_mask = similarity > 0.5
-        loss_sim = F.mse_loss(intersection[sim_mask], similarity[sim_mask]) if sim_mask.any() else torch.tensor(0.0, device=intersection.device)
-        loss_dissim = F.relu(intersection[~sim_mask] - margin).mean() if (~sim_mask).any() else torch.tensor(0.0, device=intersection.device)
+        loss_sim = (
+            F.mse_loss(intersection[sim_mask], similarity[sim_mask])
+            if sim_mask.any()
+            else torch.tensor(0.0, device=intersection.device)
+        )
+        loss_dissim = (
+            F.relu(intersection[~sim_mask] - margin).mean()
+            if (~sim_mask).any()
+            else torch.tensor(0.0, device=intersection.device)
+        )
         return loss_sim + loss_dissim
 
     else:

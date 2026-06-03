@@ -79,9 +79,7 @@ class DualGraphFusionModel(nn.Module):
                 hidden_dim=config.hidden_dim, margin=config.hyper_min_margin
             )
 
-        self.union_node_fusion = SymmetricUnionFusion(
-            config.hidden_dim, config.dropout
-        )
+        self.union_node_fusion = SymmetricUnionFusion(config.hidden_dim, config.dropout)
         self.union_graph_fusion = SymmetricUnionFusion(
             config.hidden_dim, config.dropout
         )

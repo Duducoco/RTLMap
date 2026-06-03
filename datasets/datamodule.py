@@ -121,7 +121,9 @@ class DualGraphDataset(Dataset):
     def raw_file_names(self) -> List[str]:
         if not self._dataset_dirs:
             return []
-        return [str(dataset_dir / "manifest.json") for dataset_dir in self._dataset_dirs]
+        return [
+            str(dataset_dir / "manifest.json") for dataset_dir in self._dataset_dirs
+        ]
 
     def _scan_processed_files(self) -> list[str]:
         processed_path = Path(self.processed_dir)
@@ -179,11 +181,13 @@ class DualGraphDataset(Dataset):
 
         # ── 阶段 1: 批量 GPU 编码（CodeBERT）+ 磁盘缓存 ──
         asm_encodings: dict[str, "torch.Tensor"] = {}
-        unique_asm_paths = sorted({
-            sample["_asm_path"]
-            for sample in samples
-            if sample.get("_asm_path") is not None
-        })
+        unique_asm_paths = sorted(
+            {
+                sample["_asm_path"]
+                for sample in samples
+                if sample.get("_asm_path") is not None
+            }
+        )
 
         if self._text_encoder_config is not None and unique_asm_paths:
             cache_dir = Path(self.root) / "asm_encoding_cache"
@@ -370,7 +374,6 @@ class DualGraphDataset(Dataset):
                 Path(self.processed_dir) / filename, weights_only=False
             )
         return self._file_cache[filename]
-
 
 
 class DualGraphDataModule(L.LightningDataModule):

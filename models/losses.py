@@ -22,7 +22,9 @@ def _compute_edge_loss(
     focal_gamma: float,
     edge_class_weight: tuple[float, float],
 ) -> torch.Tensor:
-    class_weight = torch.tensor(edge_class_weight, device=logits.device, dtype=logits.dtype)
+    class_weight = torch.tensor(
+        edge_class_weight, device=logits.device, dtype=logits.dtype
+    )
 
     if edge_loss_type == "ce":
         return F.cross_entropy(
@@ -37,7 +39,6 @@ def _compute_edge_loss(
     pt = probs.gather(1, labels.unsqueeze(1)).squeeze(1).clamp_min(1e-8)
     focal_factor = (1.0 - pt).pow(focal_gamma)
     return (focal_factor * ce).mean()
-
 
 
 def compute_supervised_losses(

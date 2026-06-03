@@ -55,7 +55,9 @@ def test_graph_regressor_uses_one_head_per_coverage_target() -> None:
         "toggle",
         "condition",
     }
-    assert model.graph_regressor.heads["branch"] is not model.graph_regressor.heads["line"]
+    assert (
+        model.graph_regressor.heads["branch"] is not model.graph_regressor.heads["line"]
+    )
 
     batch = _batch_with_missing_targets()
     output = model(batch)

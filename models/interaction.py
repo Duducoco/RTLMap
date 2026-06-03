@@ -11,11 +11,8 @@
 """
 
 import math
-from typing import Tuple
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch import Tensor
 from torch_geometric.utils import to_dense_batch
 
@@ -145,5 +142,7 @@ class PerceiverCrossFusion(nn.Module):
 
         # ── Step 3：Gated 残差注入 ───────────────────────────────────────────
         ctx_normed = self.ln_ctx(ctx)
-        g = torch.sigmoid(self.gate(torch.cat([target_h, ctx_normed], dim=-1)))  # [N_tgt,D]
+        g = torch.sigmoid(
+            self.gate(torch.cat([target_h, ctx_normed], dim=-1))
+        )  # [N_tgt,D]
         return target_h + g * self.mlp(ctx_normed)

@@ -80,7 +80,9 @@ class TrainerConfig:
 
     # 联合三元组对比学习配置（joint mode）
     joint_contrastive: bool = False  # 启用单次 forward 三元组联合训练
-    contrastive_triple_index: str = ""  # contrastive_samples.jsonlines 路径（空串=用 manifest）
+    contrastive_triple_index: str = (
+        ""  # contrastive_samples.jsonlines 路径（空串=用 manifest）
+    )
     lambda_ce: float = 1.0  # 三路 CE 损失的合并权重
     lambda_cl: float = 0.5  # 对比损失权重（joint 模式下替代 contrastive_loss_weight）
     or_consistency_weight: float = 0.0  # merged 逻辑 OR 一致性约束权重（0=关闭）
