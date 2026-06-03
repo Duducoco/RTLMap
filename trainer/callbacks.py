@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Union
+import json
+from pathlib import Path
+from typing import Any, List, Optional, Union
 
 import lightning as L
 from lightning.pytorch.callbacks import (
@@ -71,6 +73,83 @@ if _RICH_AVAILABLE:
             if self._disabled:
                 return
             super().on_train_batch_end(*args, **kwargs)
+
+
+class EvalMetricJsonLogger(Callback):
+    """在 logger 的 version 目录下导出每个验证 epoch 的指标 JSON。"""
+
+    _FILENAME = "eval_metric.json"
+
+    @staticmethod
+    def _resolve_log_dir(trainer: L.Trainer) -> Optional[Path]:
+        logger = getattr(trainer, "logger", None)
+        log_dir = getattr(logger, "log_dir", None)
+        if not log_dir:
+            return None
+        return Path(log_dir)
+
+    @staticmethod
+    def _to_scalar(value: Any) -> Optional[float]:
+        if hasattr(value, "detach"):
+            value = value.detach()
+        if hasattr(value, "cpu"):
+            value = value.cpu()
+        if hasattr(value, "numel"):
+            if value.numel() != 1:
+                return None
+            value = value.item()
+        if isinstance(value, bool):
+            return float(value)
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+
+    @classmethod
+    def _load_payload(cls, output_path: Path) -> list[dict[str, Any]]:
+        if not output_path.exists():
+            return []
+        try:
+            payload = json.loads(output_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return []
+        return payload if isinstance(payload, list) else []
+
+    @classmethod
+    def _collect_metrics(cls, trainer: L.Trainer) -> dict[str, float]:
+        metrics: dict[str, float] = {}
+        for key, value in trainer.callback_metrics.items():
+            key_str = str(key)
+            if not (key_str.startswith("val/") or key_str.startswith("hp/val_")):
+                continue
+            scalar = cls._to_scalar(value)
+            if scalar is None:
+                continue
+            metrics[key_str] = scalar
+        return metrics
+
+    def on_validation_epoch_end(self, trainer: L.Trainer, pl_module: L.LightningModule) -> None:
+        if getattr(trainer, "sanity_checking", False):
+            return
+
+        log_dir = self._resolve_log_dir(trainer)
+        if log_dir is None:
+            return
+
+        metrics = self._collect_metrics(trainer)
+        if not metrics:
+            return
+
+        output_path = log_dir / self._FILENAME
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = self._load_payload(output_path)
+        payload.append(
+            {
+                "epoch": int(trainer.current_epoch),
+                "step": int(trainer.global_step),
+                "metrics": metrics,
+            }
+        )
+        output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True))
 
 
 class CallbackFactory:
@@ -147,7 +226,7 @@ class CallbackFactory:
         Returns:
             callback 列表
         """
-        callbacks = [cls.create_lr_monitor()]
+        callbacks = [cls.create_lr_monitor(), EvalMetricJsonLogger()]
 
         # 确定是否启用进度条
         if enable_progress_bar is None:

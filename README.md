@@ -379,7 +379,8 @@ uv run python -m pytest -q tests/test_union_fusion.py
 - `data_root/train/processed/rtl_*.pt`：去重后的 RTL 图结构缓存。
 - `data_root/train/processed/asm_*.pt`：去重后的 ASM 图缓存。
 - `data_root/asm_encoding_cache/`：CodeBERT pooled ASM 编码缓存。
-- `checkpoint-dir/experiment-name/`：Lightning 日志和 checkpoint。
+- `checkpoint-dir/experiment-name/`：checkpoint 文件，以及 logger 的 `version_xx/` 子目录。
+- `checkpoint-dir/experiment-name/version_xx/eval_metric.json`：每个验证 epoch 的评估指标 JSON 导出。
 
 如果数据集内容或编码器配置变化，建议使用新的 `--data-root`，避免复用旧缓存导致实验不一致。
 
