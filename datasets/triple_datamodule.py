@@ -20,9 +20,8 @@ from torch_geometric.data import Batch
 from .data_types import (
     DualGraphData,
     ContrastiveTripleBatch,
-    coverage_key_index,
 )
-from .coverage_similarity import compute_rate_jaccard
+from .coverage_similarity import compute_mean_rate_jaccard
 from .graph_builders import (
     build_asm_graph as _build_asm_graph,
     build_rtl_structure as _build_rtl_structure,
@@ -35,9 +34,6 @@ from .manifest import (
 from .targets import extract_targets_from_sample as _extract_targets_from_sample
 
 logger = logging.getLogger(__name__)
-
-_BRANCH_IDX = coverage_key_index("branch")
-
 
 def _sample_with_targets(entry: dict, targets: dict) -> dict:
     return {
@@ -56,7 +52,7 @@ class ContrastiveTripleDataset(Dataset):
     每条样本返回 (data_a, data_b, data_merged, similarity)：
     - data_a / data_b：完整双图数据（RTL 结构 + ASM + edge_labels_a / edge_labels_b）
     - data_merged：只含 RTL 部分（merged 不含 ASM），edge_labels 来自 merged 覆盖
-    - similarity：data_a 与 data_b 的 edge-level Jaccard 相似度（float）
+    - similarity：data_a 与 data_b 的覆盖率 Jaccard 平均相似度（float）
     """
 
     def __init__(
@@ -176,10 +172,10 @@ class ContrastiveTripleDataset(Dataset):
             y=y_merged,
         )
 
-        similarity = compute_rate_jaccard(
-            y_a[0, _BRANCH_IDX].item(),
-            y_b[0, _BRANCH_IDX].item(),
-            y_merged[0, _BRANCH_IDX].item(),
+        similarity = compute_mean_rate_jaccard(
+            y_a[0].tolist(),
+            y_b[0].tolist(),
+            y_merged[0].tolist(),
         )
         return data_a, data_b, data_merged, similarity
 

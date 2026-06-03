@@ -276,6 +276,59 @@ def test_contrastive_manifest_dataset_uses_shared_graph_and_targets() -> None:
         assert 0.0 <= similarity <= 1.0
 
 
+def test_contrastive_similarity_averages_all_coverage_targets() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        dataset_dir = base / "contrastive"
+        _write_json(dataset_dir / "rtl_graphs" / "ALU.json", _minimal_rtl_graph())
+        _write_json(dataset_dir / "asm_graphs" / "test_a.json", _minimal_asm_graph())
+        _write_json(
+            dataset_dir / "manifest.json",
+            {
+                "schema_version": "contrastive_dataset.v1",
+                "dataset_name": "unit",
+                "samples": "contrastive_samples.jsonlines",
+                "rtl_graphs": "rtl_graphs",
+                "asm_graphs": "asm_graphs",
+                "total": 1,
+                "errors": 0,
+            },
+        )
+
+        entry = _contrastive_entry()
+        entry["targets"]["a"]["graph_coverage"]["values"] = {
+            "branch": 50.0,
+            "line": 40.0,
+            "fsm": 20.0,
+            "toggle": 80.0,
+            "condition": 30.0,
+        }
+        entry["targets"]["b"]["graph_coverage"]["values"] = {
+            "branch": 25.0,
+            "line": 20.0,
+            "fsm": 10.0,
+            "toggle": 60.0,
+            "condition": 15.0,
+        }
+        entry["targets"]["merged"]["graph_coverage"]["values"] = {
+            "branch": 75.0,
+            "line": 50.0,
+            "fsm": 25.0,
+            "toggle": 100.0,
+            "condition": 40.0,
+        }
+        (dataset_dir / "contrastive_samples.jsonlines").write_text(
+            json.dumps(entry) + "\n",
+            encoding="utf-8",
+        )
+
+        dataset = ContrastiveTripleDataset(dataset_dir=dataset_dir)
+
+        _, _, _, similarity = dataset[0]
+        expected = (0.0 + 0.2 + 0.2 + 0.4 + 0.125) / 5.0
+        assert math.isclose(similarity, expected, rel_tol=1e-6)
+
+
 def test_contrastive_manifest_builds_joint_train_datamodule_without_index() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
@@ -326,4 +379,5 @@ if __name__ == "__main__":
     test_manifest_dataset_loads_sparse_targets_without_legacy_index()
     test_manifest_dataset_merges_multiple_dataset_dirs()
     test_contrastive_manifest_dataset_uses_shared_graph_and_targets()
+    test_contrastive_similarity_averages_all_coverage_targets()
     test_contrastive_manifest_builds_joint_train_datamodule_without_index()
