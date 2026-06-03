@@ -101,7 +101,7 @@ class EdgeClassificationMetrics:
         """收集 step 级 logits 和 labels，用于 epoch 级 AUC 计算"""
         valid_mask = labels != -1
         if valid_mask.any():
-            self._step_logits.append(logits[valid_mask].detach().cpu())
+            self._step_logits.append(logits[valid_mask].detach().float().cpu())
             self._step_labels.append(labels[valid_mask].detach().cpu())
 
     def compute_epoch(self) -> Dict[str, float]:
