@@ -84,6 +84,7 @@ class LightningTrainer:
             # 性能
             deterministic=config.deterministic,
             benchmark=config.benchmark,
+            use_distributed_sampler=not config.use_bucketing,
             # 日志
             log_every_n_steps=config.log_every_n_steps,
             # sanity check

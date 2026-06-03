@@ -5,7 +5,7 @@ import torch
 
 
 class RtlSizeBucketSampler(torch.utils.data.Sampler):
-    """按 RTL 图节点数分桶的动态 batch sampler。"""
+    """按图节点数分桶的动态 batch sampler。"""
 
     _BUCKET_EDGES = (128, 512, 2048)
 
@@ -37,7 +37,17 @@ class RtlSizeBucketSampler(torch.utils.data.Sampler):
         sizes = []
         for i in range(len(dataset)):
             data = dataset[i]
-            n = int(data.node_cell_type.size(0)) if hasattr(data, "node_cell_type") else 1
+            rtl_nodes = (
+                int(data.node_cell_type.size(0))
+                if hasattr(data, "node_cell_type")
+                else 0
+            )
+            asm_nodes = (
+                int(data.asm_node_type.size(0))
+                if hasattr(data, "asm_node_type")
+                else 0
+            )
+            n = rtl_nodes + asm_nodes
             sizes.append(max(n, 1))
         return sizes
 
@@ -63,7 +73,24 @@ class RtlSizeBucketSampler(torch.utils.data.Sampler):
         if self.shuffle:
             perm = torch.randperm(len(batches), generator=rng).tolist()
             batches = [batches[p] for p in perm]
+        batches = self._shard_batches(batches)
         return batches
+
+    @staticmethod
+    def _distributed_info() -> tuple[int, int]:
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            return torch.distributed.get_world_size(), torch.distributed.get_rank()
+        return 1, 0
+
+    def _shard_batches(self, batches: list[list[int]]) -> list[list[int]]:
+        world_size, rank = self._distributed_info()
+        if world_size <= 1 or not batches:
+            return batches
+
+        remainder = len(batches) % world_size
+        if remainder:
+            batches = batches + batches[: world_size - remainder]
+        return batches[rank::world_size]
 
     def __iter__(self):
         self._cached_batches = self._make_batches()
@@ -73,3 +100,8 @@ class RtlSizeBucketSampler(torch.utils.data.Sampler):
         if not hasattr(self, "_cached_batches"):
             self._cached_batches = self._make_batches()
         return len(self._cached_batches)
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch = epoch
+        if hasattr(self, "_cached_batches"):
+            del self._cached_batches

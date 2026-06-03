@@ -75,6 +75,17 @@ def parse_args() -> argparse.Namespace:
     train_g.add_argument("--weight-decay", type=float, default=1e-5)
     train_g.add_argument("--batch-size", type=int, default=16)
     train_g.add_argument("--num-workers", type=int, default=4)
+    train_g.add_argument(
+        "--use-bucketing",
+        action="store_true",
+        help="按图大小动态组 batch，减少 dense padding 和显存峰值",
+    )
+    train_g.add_argument(
+        "--token-budget",
+        type=int,
+        default=8192,
+        help="bucketing 模式下每个 batch 的 RTL+ASM 节点预算",
+    )
     train_g.add_argument("--gradient-clip-val", type=float, default=1.0)
     train_g.add_argument("--accumulate-grad-batches", type=int, default=1)
     train_g.add_argument("--warmup-steps", type=int, default=100)
@@ -236,6 +247,8 @@ def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
         gradient_clip_val=args.gradient_clip_val,
         accumulate_grad_batches=args.accumulate_grad_batches,
         num_workers=args.num_workers,
+        use_bucketing=args.use_bucketing,
+        token_budget=args.token_budget,
         early_stopping_patience=args.early_stopping_patience,
         checkpoint_dir=args.checkpoint_dir,
         save_top_k=args.save_top_k,
