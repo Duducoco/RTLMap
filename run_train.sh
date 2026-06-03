@@ -32,7 +32,11 @@ uv run python main.py \
     --scheduler cosine \
     --edge-loss-weight 1.0 \
     --graph-loss-weight 1.0 \
-    --label-smoothing 0.1 \
+    --edge-loss-type focal \
+    --focal-gamma 2.0 \
+    --edge-class-weight-neg 8.0 \
+    --edge-class-weight-pos 1.0 \
+    --label-smoothing 0.0 \
     --precision bf16-mixed \
     --use-text-encoder \
     --text-model-name microsoft/codebert-base \

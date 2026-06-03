@@ -27,7 +27,11 @@ class DualGraphLightningModule(L.LightningModule):
         weight_decay: float = 1e-5,
         edge_loss_weight: float = 1.0,
         graph_loss_weight: float = 1.0,
-        label_smoothing: float = 0.1,
+        label_smoothing: float = 0.0,
+        edge_loss_type: str = "focal",
+        focal_gamma: float = 2.0,
+        edge_class_weight_neg: float = 8.0,
+        edge_class_weight_pos: float = 1.0,
         warmup_steps: int = 100,
         scheduler_type: str = "cosine",
         contrastive_loss_weight: float = 0.0,
@@ -68,6 +72,10 @@ class DualGraphLightningModule(L.LightningModule):
         self.edge_loss_weight = edge_loss_weight
         self.graph_loss_weight = graph_loss_weight
         self.label_smoothing = label_smoothing
+        self.edge_loss_type = edge_loss_type
+        self.focal_gamma = focal_gamma
+        self.edge_class_weight_neg = edge_class_weight_neg
+        self.edge_class_weight_pos = edge_class_weight_pos
         self.warmup_steps = warmup_steps
         self.scheduler_type = scheduler_type
         self.contrastive_loss_weight = contrastive_loss_weight
@@ -111,6 +119,9 @@ class DualGraphLightningModule(L.LightningModule):
             edge_loss_weight=self.edge_loss_weight,
             graph_loss_weight=self.graph_loss_weight,
             label_smoothing=self.label_smoothing,
+            edge_loss_type=self.edge_loss_type,
+            focal_gamma=self.focal_gamma,
+            edge_class_weight=(self.edge_class_weight_neg, self.edge_class_weight_pos),
         )
 
         # 损失指标
@@ -211,14 +222,6 @@ class DualGraphLightningModule(L.LightningModule):
         self.log_dict(metrics, on_step=True, on_epoch=True, prog_bar=True, batch_size=1)
         return loss
 
-    def _joint_training_step(
-        self, batch: ContrastiveTripleBatch, batch_idx: int
-    ) -> torch.Tensor:
-        """联合三元组训练步骤。"""
-        from .joint_steps import run_joint_training_step
-
-        return run_joint_training_step(self, batch)
-
     def validation_step(self, batch: DualGraphData, batch_idx: int):
         """验证步骤"""
         loss, metrics = self._shared_step(batch, "val")
@@ -239,6 +242,14 @@ class DualGraphLightningModule(L.LightningModule):
         self.log_dict(
             metrics, on_step=False, on_epoch=True, batch_size=1, sync_dist=True
         )
+
+    def _joint_training_step(
+        self, batch: ContrastiveTripleBatch, batch_idx: int
+    ) -> torch.Tensor:
+        """联合三元组训练步骤。"""
+        from .joint_steps import run_joint_training_step
+
+        return run_joint_training_step(self, batch)
 
     def configure_optimizers(self):
         """配置优化器和学习率调度器"""

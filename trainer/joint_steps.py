@@ -19,26 +19,34 @@ def run_joint_training_step(module, batch: ContrastiveTripleBatch) -> torch.Tens
     out_b = module(batch.batch_b)
     out_m = module.model.merge_outputs(out_a, out_b, batch.batch_merged)
 
+    common_loss_kwargs = {
+        "edge_loss_weight": module.edge_loss_weight,
+        "label_smoothing": module.label_smoothing,
+        "edge_loss_type": module.edge_loss_type,
+        "focal_gamma": module.focal_gamma,
+        "edge_class_weight": (
+            module.edge_class_weight_neg,
+            module.edge_class_weight_pos,
+        ),
+    }
+
     losses_a = module.model.compute_loss(
         out_a,
         batch.batch_a,
-        edge_loss_weight=module.edge_loss_weight,
         graph_loss_weight=module.graph_loss_weight,
-        label_smoothing=module.label_smoothing,
+        **common_loss_kwargs,
     )
     losses_b = module.model.compute_loss(
         out_b,
         batch.batch_b,
-        edge_loss_weight=module.edge_loss_weight,
         graph_loss_weight=module.graph_loss_weight,
-        label_smoothing=module.label_smoothing,
+        **common_loss_kwargs,
     )
     losses_m = module.model.compute_loss(
         out_m,
         batch.batch_merged,
-        edge_loss_weight=module.edge_loss_weight,
         graph_loss_weight=0.0,
-        label_smoothing=module.label_smoothing,
+        **common_loss_kwargs,
     )
 
     l_ce = losses_a["total_loss"] + losses_b["total_loss"] + losses_m["total_loss"]

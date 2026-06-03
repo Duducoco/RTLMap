@@ -13,13 +13,43 @@ from datasets.data_types import coverage_key_index
 from .data_types import ModelOutput
 
 
+def _compute_edge_loss(
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    *,
+    edge_loss_type: str,
+    label_smoothing: float,
+    focal_gamma: float,
+    edge_class_weight: tuple[float, float],
+) -> torch.Tensor:
+    class_weight = torch.tensor(edge_class_weight, device=logits.device, dtype=logits.dtype)
+
+    if edge_loss_type == "ce":
+        return F.cross_entropy(
+            logits,
+            labels,
+            weight=class_weight,
+            label_smoothing=label_smoothing,
+        )
+
+    ce = F.cross_entropy(logits, labels, weight=class_weight, reduction="none")
+    probs = F.softmax(logits, dim=-1)
+    pt = probs.gather(1, labels.unsqueeze(1)).squeeze(1).clamp_min(1e-8)
+    focal_factor = (1.0 - pt).pow(focal_gamma)
+    return (focal_factor * ce).mean()
+
+
+
 def compute_supervised_losses(
     output: ModelOutput,
     data: DualGraphData,
     coverage_target_keys: tuple = ("branch",),
     edge_loss_weight: float = 1.0,
     graph_loss_weight: float = 1.0,
-    label_smoothing: float = 0.1,
+    label_smoothing: float = 0.0,
+    edge_loss_type: str = "focal",
+    focal_gamma: float = 2.0,
+    edge_class_weight: tuple[float, float] = (8.0, 1.0),
 ) -> Dict[str, torch.Tensor]:
     """计算边分类和图级回归监督损失。"""
     device = output.edge_logits.device
@@ -33,8 +63,13 @@ def compute_supervised_losses(
         if num_valid > 0:
             valid_logits = output.edge_logits[valid_mask]
             valid_labels = edge_labels[valid_mask]
-            edge_loss = F.cross_entropy(
-                valid_logits, valid_labels, label_smoothing=label_smoothing
+            edge_loss = _compute_edge_loss(
+                valid_logits,
+                valid_labels,
+                edge_loss_type=edge_loss_type,
+                label_smoothing=label_smoothing,
+                focal_gamma=focal_gamma,
+                edge_class_weight=edge_class_weight,
             )
             losses["edge_loss"] = edge_loss * edge_loss_weight
         else:

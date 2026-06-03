@@ -203,7 +203,10 @@ class DualGraphFusionModel(nn.Module):
         data: DualGraphData,
         edge_loss_weight: float = 1.0,
         graph_loss_weight: float = 1.0,
-        label_smoothing: float = 0.1,
+        label_smoothing: float = 0.0,
+        edge_loss_type: str = "focal",
+        focal_gamma: float = 2.0,
+        edge_class_weight: tuple[float, float] = (8.0, 1.0),
     ) -> Dict[str, torch.Tensor]:
         """计算模型基础监督损失。"""
         from .losses import compute_supervised_losses
@@ -215,6 +218,9 @@ class DualGraphFusionModel(nn.Module):
             edge_loss_weight=edge_loss_weight,
             graph_loss_weight=graph_loss_weight,
             label_smoothing=label_smoothing,
+            edge_loss_type=edge_loss_type,
+            focal_gamma=focal_gamma,
+            edge_class_weight=edge_class_weight,
         )
 
 

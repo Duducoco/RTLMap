@@ -18,7 +18,11 @@ class TrainerConfig:
     # 损失权重
     edge_loss_weight: float = 1.0
     graph_loss_weight: float = 1.0
-    label_smoothing: float = 0.1
+    label_smoothing: float = 0.0
+    edge_loss_type: str = "focal"  # ce / focal
+    focal_gamma: float = 2.0
+    edge_class_weight_neg: float = 8.0
+    edge_class_weight_pos: float = 1.0
 
     # 训练参数
     max_epochs: int = 100

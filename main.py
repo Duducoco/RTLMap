@@ -9,16 +9,16 @@
     uv run python main.py --dataset-dir /path/to/dataset --data-root ./data --use-text-encoder
 
     # 自定义超参数
-    uv run python main.py --dataset-dir /path/to/dataset --data-root ./data \\
-        --max-epochs 200 --lr 3e-4 --batch-size 16 \\
+    uv run python main.py --dataset-dir /path/to/dataset --data-root ./data \
+        --max-epochs 200 --lr 3e-4 --batch-size 16 \
         --fusion-type ssm_film --precision bf16-mixed
 
     # 从检查点恢复训练
-    uv run python main.py --dataset-dir /path/to/dataset --data-root ./data \\
+    uv run python main.py --dataset-dir /path/to/dataset --data-root ./data \
         --ckpt-path checkpoints/last.ckpt
 
     # 仅测试
-    uv run python main.py --dataset-dir /path/to/dataset --data-root ./data \\
+    uv run python main.py --dataset-dir /path/to/dataset --data-root ./data \
         --test-only --ckpt-path checkpoints/best.ckpt
 """
 
@@ -96,7 +96,31 @@ def parse_args() -> argparse.Namespace:
     )
     train_g.add_argument("--edge-loss-weight", type=float, default=1.0)
     train_g.add_argument("--graph-loss-weight", type=float, default=1.0)
-    train_g.add_argument("--label-smoothing", type=float, default=0.1)
+    train_g.add_argument("--label-smoothing", type=float, default=0.0)
+    train_g.add_argument(
+        "--edge-loss-type",
+        choices=["ce", "focal"],
+        default="focal",
+        help="边分类损失类型",
+    )
+    train_g.add_argument(
+        "--focal-gamma",
+        type=float,
+        default=2.0,
+        help="focal loss gamma 参数",
+    )
+    train_g.add_argument(
+        "--edge-class-weight-neg",
+        type=float,
+        default=8.0,
+        help="边分类中未覆盖类(label=0)的权重",
+    )
+    train_g.add_argument(
+        "--edge-class-weight-pos",
+        type=float,
+        default=1.0,
+        help="边分类中已覆盖类(label=1)的权重",
+    )
     train_g.add_argument(
         "--coverage-targets",
         nargs="+",
@@ -242,6 +266,10 @@ def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
         edge_loss_weight=args.edge_loss_weight,
         graph_loss_weight=args.graph_loss_weight,
         label_smoothing=args.label_smoothing,
+        edge_loss_type=args.edge_loss_type,
+        focal_gamma=args.focal_gamma,
+        edge_class_weight_neg=args.edge_class_weight_neg,
+        edge_class_weight_pos=args.edge_class_weight_pos,
         max_epochs=args.max_epochs,
         batch_size=args.batch_size,
         gradient_clip_val=args.gradient_clip_val,
@@ -339,31 +367,53 @@ def main() -> None:
             logger.error("--test-only 需要指定 --ckpt-path")
             sys.exit(1)
 
+        datamodule = DualGraphDataModule(
+            data_root=args.data_root,
+            dataset_dir=args.dataset_dir,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            use_hyperrectangle=args.use_hyperrectangle or args.joint_contrastive,
+            coverage_target_keys=tuple(args.coverage_targets),
+            trainer_config=trainer_config,
+            text_encoder_config=text_encoder_config,
+        )
+        datamodule.prepare_data()
+        datamodule.setup("test")
+
         module = DualGraphLightningModule.load_from_checkpoint(
             args.ckpt_path,
             model_config=model_config,
+            learning_rate=args.lr,
+            weight_decay=args.weight_decay,
+            edge_loss_weight=args.edge_loss_weight,
+            graph_loss_weight=args.graph_loss_weight,
+            label_smoothing=args.label_smoothing,
+            edge_loss_type=args.edge_loss_type,
+            focal_gamma=args.focal_gamma,
+            edge_class_weight_neg=args.edge_class_weight_neg,
+            edge_class_weight_pos=args.edge_class_weight_pos,
+            warmup_steps=args.warmup_steps,
+            scheduler_type=args.scheduler,
+            contrastive_loss_weight=args.contrastive_loss_weight,
+            contrastive_loss_type=args.contrastive_loss_type,
+            contrastive_margin=args.contrastive_margin,
+            coverage_target_keys=tuple(args.coverage_targets),
+            joint_contrastive=args.joint_contrastive,
+            lambda_ce=args.lambda_ce,
+            lambda_cl=args.lambda_cl,
+            or_consistency_weight=args.or_consistency_weight,
         )
-        datamodule = DualGraphDataModule(
-            root=args.data_root,
-            dataset_dir=args.dataset_dir,
-            text_encoder_config=text_encoder_config,
-            batch_size=trainer_config.batch_size,
-            num_workers=trainer_config.num_workers,
-            use_bucketing=trainer_config.use_bucketing,
-            token_budget=trainer_config.token_budget,
-        )
-        lt = LightningTrainer(
-            config=trainer_config,
+        lightning_trainer = LightningTrainer(
+            trainer_config,
             experiment_name=args.experiment_name,
             logger_type=args.logger_type,
-            has_validation=False,
+            has_validation=datamodule.val_dataloader() is not None,
         )
-        lt.test(module, datamodule)
-    else:
-        module, trainer = train_model(
-            app_config=app_config,
-        )
-        logger.info("训练完成")
+        results = lightning_trainer.test(module, datamodule, ckpt_path=args.ckpt_path)
+        print(results)
+        return
+
+    train_model(app_config)
 
 
 if __name__ == "__main__":

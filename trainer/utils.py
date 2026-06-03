@@ -36,6 +36,10 @@ def train_model(
         edge_loss_weight=trainer_config.edge_loss_weight,
         graph_loss_weight=trainer_config.graph_loss_weight,
         label_smoothing=trainer_config.label_smoothing,
+        edge_loss_type=trainer_config.edge_loss_type,
+        focal_gamma=trainer_config.focal_gamma,
+        edge_class_weight_neg=trainer_config.edge_class_weight_neg,
+        edge_class_weight_pos=trainer_config.edge_class_weight_pos,
         warmup_steps=trainer_config.warmup_steps,
         scheduler_type=trainer_config.scheduler_type,
         contrastive_loss_weight=trainer_config.contrastive_loss_weight
