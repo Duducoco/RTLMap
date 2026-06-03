@@ -48,4 +48,3 @@ uv run python main.py \
     --save-top-k 3 \
     --early-stopping-patience 10 \
     --seed 42
-find smart_run/work -mindepth 2 -maxdepth 2 \( -type d -name coverage -o -name coverage.vdb \) -print0 tar --null -T - -I 'zstd -T0 -19' -cf smart_run/work_coverage_only.tar.zst
