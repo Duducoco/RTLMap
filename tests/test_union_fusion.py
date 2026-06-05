@@ -161,6 +161,40 @@ def test_joint_training_step_does_not_forward_merged_batch() -> None:
     assert seen_ids == [id(batch.batch_a), id(batch.batch_b)]
 
 
+def test_joint_training_step_uses_graph_loss_weight_for_merged_branch(monkeypatch) -> None:
+    torch.manual_seed(0)
+    batch = make_contrastive_triple_batch(batch_size=2, asm_instruction_dim=32)
+    config = ModelConfig(
+        hidden_dim=32,
+        num_gnn_layers=1,
+        asm_instruction_dim=32,
+        use_hyperrectangle=True,
+    )
+    module = DualGraphLightningModule(
+        model_config=config,
+        graph_loss_weight=0.75,
+        joint_contrastive=True,
+        lambda_ce=1.0,
+        lambda_cl=0.5,
+    )
+    module.train()
+
+    original_compute_loss = module.model.compute_loss
+    merged_graph_weights: list[float] = []
+
+    def recording_compute_loss(output, data, *args, **kwargs):
+        if data is batch.batch_merged:
+            merged_graph_weights.append(kwargs["graph_loss_weight"])
+        return original_compute_loss(output, data, *args, **kwargs)
+
+    monkeypatch.setattr(module.model, "compute_loss", recording_compute_loss)
+
+    loss = module.training_step(batch, 0)
+
+    assert torch.isfinite(loss)
+    assert merged_graph_weights == [module.graph_loss_weight]
+
+
 if __name__ == "__main__":
     test_merge_outputs_is_symmetric_and_decodes_reference_edges()
     test_joint_training_step_does_not_forward_merged_batch()

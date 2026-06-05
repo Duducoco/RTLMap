@@ -45,7 +45,7 @@ def run_joint_training_step(module, batch: ContrastiveTripleBatch) -> torch.Tens
     losses_m = module.model.compute_loss(
         out_m,
         batch.batch_merged,
-        graph_loss_weight=0.0,
+        graph_loss_weight=module.graph_loss_weight,
         **common_loss_kwargs,
     )
 
@@ -71,6 +71,8 @@ def run_joint_training_step(module, batch: ContrastiveTripleBatch) -> torch.Tens
             "train/edge_loss_a": losses_a["edge_loss"].detach(),
             "train/edge_loss_b": losses_b["edge_loss"].detach(),
             "train/edge_loss_merged": losses_m["edge_loss"].detach(),
+            "train/graph_loss_merged": losses_m["graph_loss"].detach(),
+            "train/merged_total_loss": losses_m["total_loss"].detach(),
             "train/ce_loss": l_ce.detach(),
             "train/contrastive_loss": l_cl.detach(),
             "train/or_consistency_loss": l_or.detach(),
