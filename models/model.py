@@ -4,7 +4,7 @@
 
 设计理念：
 - ASM 和 RTL 通过双向 FiLM 注入相互增强（ASM ↔ RTL）
-- 边分类和图回归均只使用 RTL CDFG 的特征
+- 图级覆盖率回归只使用 RTL CDFG 的特征
 - RTL 节点特征：node_cell_type + node_width
 - RTL 边特征：edge_type + edge_width
 - ASM 节点特征：node_type + instruction_encoding（外部模型生成）
@@ -19,9 +19,8 @@ import torch.nn as nn
 from datasets import DualGraphData
 from .data_types import ModelConfig, ModelOutput
 from .encoder import PerceiverDualEncoder
-from .heads import EdgeClassifier, GraphRegressor
+from .heads import GraphRegressor
 from .hyperrectangle import HyperrectangleHead
-from .union_fusion import SymmetricUnionFusion
 
 
 class DualGraphFusionModel(nn.Module):
@@ -30,7 +29,7 @@ class DualGraphFusionModel(nn.Module):
 
     架构设计：
     - 编码阶段：ASM 和 RTL 通过双向融合相互增强（ASM ↔ RTL）
-    - 预测阶段：仅使用 RTL CDFG 进行边分类和图回归
+    - 预测阶段：仅使用 RTL CDFG 进行图级覆盖率回归
     - ASM CDFG 作为上下文，模拟"测试激励驱动硬件"
 
     支持两种融合模式：
@@ -59,15 +58,6 @@ class DualGraphFusionModel(nn.Module):
             perceiver_num_heads=config.perceiver_num_heads,
         )
 
-        # 边分类器（仅 RTL，支持端口位置索引）
-        self.edge_classifier = EdgeClassifier(
-            hidden_dim=config.hidden_dim,
-            num_classes=config.num_edge_classes,
-            num_edge_types=config.num_edge_types,
-            max_ports=config.max_ports,
-            dropout=config.dropout,
-        )
-
         # 图回归器（仅 RTL）
         self.graph_regressor = GraphRegressor(
             config.hidden_dim, config.coverage_target_keys, config.dropout
@@ -78,11 +68,6 @@ class DualGraphFusionModel(nn.Module):
             self.hyperrectangle_head = HyperrectangleHead(
                 hidden_dim=config.hidden_dim, margin=config.hyper_min_margin
             )
-
-        self.union_node_fusion = SymmetricUnionFusion(config.hidden_dim, config.dropout)
-        self.union_graph_fusion = SymmetricUnionFusion(
-            config.hidden_dim, config.dropout
-        )
 
     def forward(self, data: DualGraphData) -> ModelOutput:
         """
@@ -95,7 +80,7 @@ class DualGraphFusionModel(nn.Module):
                 ASM: asm_node_type, asm_instruction_encoding, asm_edge_index, asm_edge_type
 
         Returns:
-            ModelOutput: 边分类 logits 和图级预测（均基于 RTL）
+            ModelOutput: 图级覆盖率预测（基于 RTL）
         """
         # 编码阶段（双向 FiLM 注入：ASM ↔ RTL）
         rtl_node, rtl_edge_attr, rtl_graph, asm_node, _ = self.encoder(
@@ -118,14 +103,6 @@ class DualGraphFusionModel(nn.Module):
         )
 
         # 预测阶段：仅使用 RTL
-        edge_logits = self.edge_classifier(
-            rtl_node,
-            data.edge_index,
-            data.edge_type,
-            getattr(data, "edge_width", None),
-            getattr(data, "edge_source_port_idx", None),
-            getattr(data, "edge_target_port_idx", None),
-        )
         graph_pred = self.graph_regressor(rtl_graph)
 
         # 超矩形输出（条件计算）
@@ -134,7 +111,6 @@ class DualGraphFusionModel(nn.Module):
             hyper_min, hyper_max = self.hyperrectangle_head(rtl_graph)
 
         return ModelOutput(
-            edge_logits=edge_logits,
             graph_pred=graph_pred,
             rtl_final=rtl_node,
             asm_final=asm_node,
@@ -143,68 +119,11 @@ class DualGraphFusionModel(nn.Module):
             rtl_graph_emb=rtl_graph,
         )
 
-    def merge_outputs(
-        self,
-        output_a: ModelOutput,
-        output_b: ModelOutput,
-        reference: DualGraphData,
-    ) -> ModelOutput:
-        """Fuse two aligned test-conditioned outputs into merged coverage output."""
-        if output_a.rtl_final is None or output_b.rtl_final is None:
-            raise ValueError("merge_outputs requires rtl_final in both outputs")
-        if output_a.rtl_graph_emb is None or output_b.rtl_graph_emb is None:
-            raise ValueError("merge_outputs requires rtl_graph_emb in both outputs")
-        if output_a.rtl_final.shape != output_b.rtl_final.shape:
-            raise ValueError(
-                "merge_outputs requires aligned node features: "
-                f"{tuple(output_a.rtl_final.shape)} != {tuple(output_b.rtl_final.shape)}"
-            )
-        if output_a.rtl_graph_emb.shape != output_b.rtl_graph_emb.shape:
-            raise ValueError(
-                "merge_outputs requires aligned graph features: "
-                f"{tuple(output_a.rtl_graph_emb.shape)} != "
-                f"{tuple(output_b.rtl_graph_emb.shape)}"
-            )
-
-        rtl_union = self.union_node_fusion(output_a.rtl_final, output_b.rtl_final)
-        graph_union = self.union_graph_fusion(
-            output_a.rtl_graph_emb, output_b.rtl_graph_emb
-        )
-
-        edge_logits = self.edge_classifier(
-            rtl_union,
-            reference.edge_index,
-            reference.edge_type,
-            getattr(reference, "edge_width", None),
-            getattr(reference, "edge_source_port_idx", None),
-            getattr(reference, "edge_target_port_idx", None),
-        )
-        graph_pred = self.graph_regressor(graph_union)
-
-        hyper_min, hyper_max = None, None
-        if self.config.use_hyperrectangle and hasattr(self, "hyperrectangle_head"):
-            hyper_min, hyper_max = self.hyperrectangle_head(graph_union)
-
-        return ModelOutput(
-            edge_logits=edge_logits,
-            graph_pred=graph_pred,
-            rtl_final=rtl_union,
-            asm_final=None,
-            hyper_min=hyper_min,
-            hyper_max=hyper_max,
-            rtl_graph_emb=graph_union,
-        )
-
     def compute_loss(
         self,
         output: ModelOutput,
         data: DualGraphData,
-        edge_loss_weight: float = 1.0,
         graph_loss_weight: float = 1.0,
-        label_smoothing: float = 0.0,
-        edge_loss_type: str = "focal",
-        focal_gamma: float = 2.0,
-        edge_class_weight: tuple[float, float] = (8.0, 1.0),
     ) -> Dict[str, torch.Tensor]:
         """计算模型基础监督损失。"""
         from .losses import compute_supervised_losses
@@ -213,12 +132,7 @@ class DualGraphFusionModel(nn.Module):
             output,
             data,
             coverage_target_keys=self.config.coverage_target_keys,
-            edge_loss_weight=edge_loss_weight,
             graph_loss_weight=graph_loss_weight,
-            label_smoothing=label_smoothing,
-            edge_loss_type=edge_loss_type,
-            focal_gamma=focal_gamma,
-            edge_class_weight=edge_class_weight,
         )
 
 

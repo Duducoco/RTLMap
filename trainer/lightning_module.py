@@ -6,12 +6,11 @@ from typing import Dict, List, Tuple, Any
 import lightning as L
 
 from datasets import DualGraphData
-from datasets.data_types import ContrastiveTripleBatch
+from datasets.data_types import ContrastivePairBatch
 from models.data_types import ModelConfig, ModelOutput
 from models.model import create_model
 from models.hyperrectangle import hyperrectangle_intersection
 from metrics import (
-    EdgeClassificationMetrics,
     CoverageRegressionMetrics,
     ContrastiveMetrics,
 )
@@ -25,13 +24,7 @@ class DualGraphLightningModule(L.LightningModule):
         model_config: ModelConfig,
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-5,
-        edge_loss_weight: float = 1.0,
         graph_loss_weight: float = 1.0,
-        label_smoothing: float = 0.0,
-        edge_loss_type: str = "focal",
-        focal_gamma: float = 2.0,
-        edge_class_weight_neg: float = 8.0,
-        edge_class_weight_pos: float = 1.0,
         warmup_steps: int = 100,
         scheduler_type: str = "cosine",
         contrastive_loss_weight: float = 0.0,
@@ -41,7 +34,6 @@ class DualGraphLightningModule(L.LightningModule):
         joint_contrastive: bool = False,
         lambda_ce: float = 1.0,
         lambda_cl: float = 0.5,
-        or_consistency_weight: float = 0.0,
     ):
         super().__init__()
         # 保存超参数（包括 ModelConfig 的所有字段）
@@ -52,7 +44,6 @@ class DualGraphLightningModule(L.LightningModule):
                 "hidden_dim": model_config.hidden_dim,
                 "num_gnn_layers": model_config.num_gnn_layers,
                 "dropout": model_config.dropout,
-                "num_edge_classes": model_config.num_edge_classes,
                 "num_graph_targets": model_config.num_graph_targets,
                 "num_cell_types": model_config.num_cell_types,
                 "num_edge_types": model_config.num_edge_types,
@@ -69,13 +60,7 @@ class DualGraphLightningModule(L.LightningModule):
         # 超参数
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
-        self.edge_loss_weight = edge_loss_weight
         self.graph_loss_weight = graph_loss_weight
-        self.label_smoothing = label_smoothing
-        self.edge_loss_type = edge_loss_type
-        self.focal_gamma = focal_gamma
-        self.edge_class_weight_neg = edge_class_weight_neg
-        self.edge_class_weight_pos = edge_class_weight_pos
         self.warmup_steps = warmup_steps
         self.scheduler_type = scheduler_type
         self.contrastive_loss_weight = contrastive_loss_weight
@@ -89,16 +74,10 @@ class DualGraphLightningModule(L.LightningModule):
         self.joint_contrastive = joint_contrastive
         self.lambda_ce = lambda_ce
         self.lambda_cl = lambda_cl
-        self.or_consistency_weight = or_consistency_weight
 
         # 指标计算器
-        self.edge_metrics = EdgeClassificationMetrics()
         self.regression_metrics = CoverageRegressionMetrics()
         self.contrastive_metrics = ContrastiveMetrics()
-
-        # epoch 级指标收集器（用于 AUC-ROC/AUPRC/Spearman R）
-        self._val_edge_metrics = EdgeClassificationMetrics()
-        self._test_edge_metrics = EdgeClassificationMetrics()
 
         # 验证/测试指标累积
         self._val_outputs: List[Dict] = []
@@ -116,29 +95,15 @@ class DualGraphLightningModule(L.LightningModule):
         losses = self.model.compute_loss(
             output,
             batch,
-            edge_loss_weight=self.edge_loss_weight,
             graph_loss_weight=self.graph_loss_weight,
-            label_smoothing=self.label_smoothing,
-            edge_loss_type=self.edge_loss_type,
-            focal_gamma=self.focal_gamma,
-            edge_class_weight=(self.edge_class_weight_neg, self.edge_class_weight_pos),
         )
+        supervised_loss = losses["graph_loss"]
 
         # 损失指标
         metrics = {
-            f"{stage}/total_loss": losses["total_loss"].detach(),
-            f"{stage}/edge_loss": losses["edge_loss"].detach(),
+            f"{stage}/total_loss": supervised_loss.detach(),
             f"{stage}/graph_loss": losses["graph_loss"].detach(),
         }
-
-        # 边分类指标
-        edge_labels = getattr(batch, "edge_labels", None)
-        valid_mask = edge_labels != -1 if edge_labels is not None else None
-        edge_m = self.edge_metrics.compute(
-            output.edge_logits, edge_labels, valid_mask, lite=lite
-        )
-        for k, v in edge_m.items():
-            metrics[f"{stage}/{k}"] = v
 
         # 图回归指标（选列，指标内部按覆盖率列独立过滤 NaN）
         col_idx = [self._coverage_key_index(k) for k in self.coverage_target_keys]
@@ -152,14 +117,7 @@ class DualGraphLightningModule(L.LightningModule):
         for k, v in graph_m.items():
             metrics[f"{stage}/{k}"] = v
 
-        # epoch 级指标收集（验证/测试）
-        if not lite and valid_mask is not None and valid_mask.any():
-            collector = (
-                self._val_edge_metrics if stage == "val" else self._test_edge_metrics
-            )
-            collector.collect_step(output.edge_logits, edge_labels)
-
-        return losses["total_loss"], metrics
+        return supervised_loss, metrics
 
     def _compute_contrastive_step_metrics(
         self, output_a: ModelOutput, output_b: ModelOutput, similarity: torch.Tensor
@@ -179,8 +137,7 @@ class DualGraphLightningModule(L.LightningModule):
         if self.logger is not None:
             metrics_to_track = {
                 "hp/val_loss": 0.0,
-                "hp/val_accuracy": 0.0,
-                "hp/val_f1": 0.0,
+                "hp/val_graph_mse": 0.0,
             }
             try:
                 self.logger.log_hyperparams(self.hparams, metrics_to_track)
@@ -190,34 +147,22 @@ class DualGraphLightningModule(L.LightningModule):
     def on_validation_epoch_end(self):
         """验证 epoch 结束：计算 epoch 级 AUC/Spearman 等指标"""
         val_loss = self.trainer.callback_metrics.get("val/total_loss")
-        val_acc = self.trainer.callback_metrics.get("val/edge_accuracy")
-        val_f1 = self.trainer.callback_metrics.get("val/f1")
+        val_graph_mse = self.trainer.callback_metrics.get("val/graph_mse")
 
         if val_loss is not None:
             self.log("hp/val_loss", val_loss, sync_dist=True)
-        if val_acc is not None:
-            self.log("hp/val_accuracy", val_acc, sync_dist=True)
-        if val_f1 is not None:
-            self.log("hp/val_f1", val_f1, sync_dist=True)
-
-        # epoch 级 AUC-ROC / AUPRC
-        auc_metrics = self._val_edge_metrics.compute_epoch()
-        self.log("val/auc_roc", auc_metrics["auc_roc"], sync_dist=False)
-        self.log("val/auprc", auc_metrics["auprc"], sync_dist=False)
+        if val_graph_mse is not None:
+            self.log("hp/val_graph_mse", val_graph_mse, sync_dist=True)
 
         self._val_outputs.clear()
 
     def on_test_epoch_end(self):
         """测试 epoch 结束：计算 epoch 级指标"""
-        auc_metrics = self._test_edge_metrics.compute_epoch()
-        self.log("test/auc_roc", auc_metrics["auc_roc"], sync_dist=False)
-        self.log("test/auprc", auc_metrics["auprc"], sync_dist=False)
-
         self._test_outputs.clear()
 
     def training_step(self, batch, batch_idx: int) -> torch.Tensor:
-        if self.joint_contrastive and isinstance(batch, ContrastiveTripleBatch):
-            return self._joint_training_step(batch, batch_idx)
+        if self.joint_contrastive and isinstance(batch, ContrastivePairBatch):
+            return self._pair_training_step(batch, batch_idx)
         loss, metrics = self._shared_step(batch, "train", lite=True)
         self.log_dict(metrics, on_step=True, on_epoch=True, prog_bar=True, batch_size=1)
         return loss
@@ -243,13 +188,13 @@ class DualGraphLightningModule(L.LightningModule):
             metrics, on_step=False, on_epoch=True, batch_size=1, sync_dist=True
         )
 
-    def _joint_training_step(
-        self, batch: ContrastiveTripleBatch, batch_idx: int
+    def _pair_training_step(
+        self, batch: ContrastivePairBatch, batch_idx: int
     ) -> torch.Tensor:
-        """联合三元组训练步骤。"""
-        from .joint_steps import run_joint_training_step
+        """覆盖向量 pair 对比训练步骤。"""
+        from .joint_steps import run_pair_training_step
 
-        return run_joint_training_step(self, batch)
+        return run_pair_training_step(self, batch)
 
     def configure_optimizers(self):
         """配置优化器和学习率调度器"""

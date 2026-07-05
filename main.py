@@ -94,33 +94,7 @@ def parse_args() -> argparse.Namespace:
         choices=["cosine", "linear", "none"],
         default="cosine",
     )
-    train_g.add_argument("--edge-loss-weight", type=float, default=1.0)
     train_g.add_argument("--graph-loss-weight", type=float, default=1.0)
-    train_g.add_argument("--label-smoothing", type=float, default=0.0)
-    train_g.add_argument(
-        "--edge-loss-type",
-        choices=["ce", "focal"],
-        default="focal",
-        help="边分类损失类型",
-    )
-    train_g.add_argument(
-        "--focal-gamma",
-        type=float,
-        default=2.0,
-        help="focal loss gamma 参数",
-    )
-    train_g.add_argument(
-        "--edge-class-weight-neg",
-        type=float,
-        default=8.0,
-        help="边分类中未覆盖类(label=0)的权重",
-    )
-    train_g.add_argument(
-        "--edge-class-weight-pos",
-        type=float,
-        default=1.0,
-        help="边分类中已覆盖类(label=1)的权重",
-    )
     train_g.add_argument(
         "--coverage-targets",
         nargs="+",
@@ -192,6 +166,12 @@ def parse_args() -> argparse.Namespace:
         help="对比 DataLoader batch 大小",
     )
     hyper.add_argument(
+        "--contrastive-pairs-per-sample",
+        type=int,
+        default=4,
+        help="每个样本最多构造的同模块对比 pair 数",
+    )
+    hyper.add_argument(
         "--contrastive-margin",
         type=float,
         default=0.2,
@@ -204,32 +184,19 @@ def parse_args() -> argparse.Namespace:
         help="对比损失类型",
     )
 
-    # ── 联合三元组对比学习 (joint mode) ───────────────────
+    # ── coverage-vector pair 联合对比学习 (joint mode) ─────
     joint = p.add_argument_group("联合训练 (Joint Contrastive)")
     joint.add_argument(
         "--joint-contrastive",
         action="store_true",
-        help="启用单次 forward 三元组联合训练（覆盖率预测 + 对比学习）",
+        help="启用 coverage-vector pair 对比训练（覆盖率预测 + 对比学习）",
     )
     joint.add_argument(
-        "--contrastive-triple-index",
-        type=str,
-        default="",
-        help="contrastive_samples.jsonlines 路径（空串时读取 dataset-dir/manifest.json）",
-    )
-    joint.add_argument(
-        "--lambda-ce", type=float, default=1.0, help="三路 CE 损失的合并权重"
+        "--lambda-ce", type=float, default=1.0, help="a/b 两路监督损失的合并权重"
     )
     joint.add_argument(
         "--lambda-cl", type=float, default=0.5, help="joint 模式下对比损失权重"
     )
-    joint.add_argument(
-        "--or-consistency-weight",
-        type=float,
-        default=0.0,
-        help="merged 逻辑 OR 一致性约束权重（0=关闭）",
-    )
-
     # ── 运行模式 ──────────────────────────────────────────
     mode = p.add_argument_group("运行模式")
     mode.add_argument("--ckpt-path", default=None, help="检查点路径（恢复训练或测试）")
@@ -255,21 +222,12 @@ def build_model_config(args: argparse.Namespace) -> ModelConfig:
 
 
 def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
-    # joint 模式下自动推断 triple index 路径
-    triple_index = args.contrastive_triple_index
-
     return TrainerConfig(
         learning_rate=args.lr,
         weight_decay=args.weight_decay,
         warmup_steps=args.warmup_steps,
         scheduler_type=args.scheduler,
-        edge_loss_weight=args.edge_loss_weight,
         graph_loss_weight=args.graph_loss_weight,
-        label_smoothing=args.label_smoothing,
-        edge_loss_type=args.edge_loss_type,
-        focal_gamma=args.focal_gamma,
-        edge_class_weight_neg=args.edge_class_weight_neg,
-        edge_class_weight_pos=args.edge_class_weight_pos,
         max_epochs=args.max_epochs,
         batch_size=args.batch_size,
         gradient_clip_val=args.gradient_clip_val,
@@ -288,14 +246,13 @@ def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
         use_hyperrectangle=args.use_hyperrectangle,
         contrastive_loss_weight=args.contrastive_loss_weight,
         contrastive_batch_size=args.contrastive_batch_size,
+        contrastive_pairs_per_sample=args.contrastive_pairs_per_sample,
         contrastive_margin=args.contrastive_margin,
         contrastive_loss_type=args.contrastive_loss_type,
         coverage_target_keys=tuple(args.coverage_targets),
         joint_contrastive=args.joint_contrastive,
-        contrastive_triple_index=triple_index,
         lambda_ce=args.lambda_ce,
         lambda_cl=args.lambda_cl,
-        or_consistency_weight=args.or_consistency_weight,
     )
 
 
@@ -385,13 +342,7 @@ def main() -> None:
             model_config=model_config,
             learning_rate=args.lr,
             weight_decay=args.weight_decay,
-            edge_loss_weight=args.edge_loss_weight,
             graph_loss_weight=args.graph_loss_weight,
-            label_smoothing=args.label_smoothing,
-            edge_loss_type=args.edge_loss_type,
-            focal_gamma=args.focal_gamma,
-            edge_class_weight_neg=args.edge_class_weight_neg,
-            edge_class_weight_pos=args.edge_class_weight_pos,
             warmup_steps=args.warmup_steps,
             scheduler_type=args.scheduler,
             contrastive_loss_weight=args.contrastive_loss_weight,
@@ -401,7 +352,6 @@ def main() -> None:
             joint_contrastive=args.joint_contrastive,
             lambda_ce=args.lambda_ce,
             lambda_cl=args.lambda_cl,
-            or_consistency_weight=args.or_consistency_weight,
         )
         lightning_trainer = LightningTrainer(
             trainer_config,

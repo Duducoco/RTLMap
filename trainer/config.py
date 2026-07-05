@@ -16,13 +16,7 @@ class TrainerConfig:
     scheduler_type: str = "cosine"  # cosine / linear / none
 
     # 损失权重
-    edge_loss_weight: float = 1.0
     graph_loss_weight: float = 1.0
-    label_smoothing: float = 0.0
-    edge_loss_type: str = "focal"  # ce / focal
-    focal_gamma: float = 2.0
-    edge_class_weight_neg: float = 8.0
-    edge_class_weight_pos: float = 1.0
 
     # 训练参数
     max_epochs: int = 100
@@ -75,17 +69,14 @@ class TrainerConfig:
     use_hyperrectangle: bool = False  # 启用超矩形对比学习
     contrastive_loss_weight: float = 0.5  # 对比损失权重
     contrastive_batch_size: int = 16  # 对比 DataLoader batch 大小
+    contrastive_pairs_per_sample: int = 4  # 每个样本最多构造的同模块 pair 数
     contrastive_margin: float = 0.2  # margin 模式下不相似对的交集上限
     contrastive_loss_type: str = "mse"  # mse / bce / margin
 
-    # 联合三元组对比学习配置（joint mode）
-    joint_contrastive: bool = False  # 启用单次 forward 三元组联合训练
-    contrastive_triple_index: str = (
-        ""  # contrastive_samples.jsonlines 路径（空串=用 manifest）
-    )
-    lambda_ce: float = 1.0  # 三路 CE 损失的合并权重
+    # coverage-vector pair 对比学习配置（joint mode）
+    joint_contrastive: bool = False  # 启用 pair 对比训练
+    lambda_ce: float = 1.0  # a/b 两路监督损失的合并权重
     lambda_cl: float = 0.5  # 对比损失权重（joint 模式下替代 contrastive_loss_weight）
-    or_consistency_weight: float = 0.0  # merged 逻辑 OR 一致性约束权重（0=关闭）
 
     # 图回归目标选择
     coverage_target_keys: tuple = ("branch",)  # 实际用于 loss 的覆盖率列子集

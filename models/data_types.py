@@ -19,7 +19,6 @@ class ModelConfig:
     dropout: float = 0.1
 
     # 任务配置
-    num_edge_classes: int = 2  # {0: 未覆盖, 1: 已覆盖}，-1 被 mask 掉
     num_graph_targets: int = field(init=False, default=1)
     coverage_target_keys: tuple = ("branch",)  # 实际用于 loss 的覆盖率列子集
 
@@ -54,7 +53,6 @@ class ModelConfig:
 class ModelOutput:
     """模型输出"""
 
-    edge_logits: Optional[torch.Tensor] = None
     graph_pred: Optional[torch.Tensor] = None
     rtl_final: Optional[torch.Tensor] = None
     asm_final: Optional[torch.Tensor] = None

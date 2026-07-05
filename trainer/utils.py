@@ -33,13 +33,7 @@ def train_model(
         model_config=model_config,
         learning_rate=trainer_config.learning_rate,
         weight_decay=trainer_config.weight_decay,
-        edge_loss_weight=trainer_config.edge_loss_weight,
         graph_loss_weight=trainer_config.graph_loss_weight,
-        label_smoothing=trainer_config.label_smoothing,
-        edge_loss_type=trainer_config.edge_loss_type,
-        focal_gamma=trainer_config.focal_gamma,
-        edge_class_weight_neg=trainer_config.edge_class_weight_neg,
-        edge_class_weight_pos=trainer_config.edge_class_weight_pos,
         warmup_steps=trainer_config.warmup_steps,
         scheduler_type=trainer_config.scheduler_type,
         contrastive_loss_weight=trainer_config.contrastive_loss_weight
@@ -51,7 +45,6 @@ def train_model(
         joint_contrastive=trainer_config.joint_contrastive,
         lambda_ce=trainer_config.lambda_ce,
         lambda_cl=trainer_config.lambda_cl,
-        or_consistency_weight=trainer_config.or_consistency_weight,
     )
 
     effective_datamodule, inferred_has_validation = _build_training_datamodule(
