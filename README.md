@@ -2,18 +2,18 @@
 
 RTLMap 是一个面向硬件验证覆盖率预测的双图 GNN 训练项目。项目从 coverage-report-extractor 产出的 manifest 数据集中读取 RTL CDFG 与 ASM CDFG，将它们编码为 PyTorch Geometric 数据，并使用 PyTorch Lightning 训练覆盖率预测模型。
 
-当前仓库的主要能力集中在训练链路，而不是直接生成覆盖率标注数据。输入数据应已按 `manifest.json`、`samples.jsonlines` 或 `contrastive_samples.jsonlines` 组织好。
+当前仓库的主要能力集中在训练链路，而不是直接生成覆盖率标注数据。输入数据应已按 `manifest.json` 和 `samples.jsonlines` 组织好。
 
 ## 功能特性
 
-- **Manifest 数据集加载**：支持 `dataset.v1` 普通样本与 `contrastive_dataset.v1` 三元组样本。
+- **Manifest 数据集加载**：支持 coverage-report-extractor 产出的 `dataset.v1` 普通样本。
 - **RTL/ASM 双图建模**：RTL 图提供节点、边、位宽、端口位置等结构特征，ASM 图提供基本块类型与指令编码。
 - **双图融合模型**：使用 Perceiver 风格跨图融合，对 RTL 与 ASM 上下文进行交互式编码。
-- **多任务训练**：同时支持 RTL 边覆盖分类和图级覆盖率回归。
+- **图级覆盖率回归**：训练目标为 `branch`、`line`、`fsm`、`toggle`、`condition` 等图级覆盖率。
 - **多覆盖率目标**：图级回归可选择 `branch`、`line`、`fsm`、`toggle`、`condition` 子集。
 - **CodeBERT 指令编码**：可选启用 HuggingFace CodeBERT 为 ASM 指令生成文本编码；未启用时回退为零向量。
 - **缓存与去重**：预处理阶段缓存 RTL/ASM 图结构与 ASM 编码，减少重复构建成本。
-- **Joint Contrastive 训练**：支持 `(test_a, test_b, merged)` 三元组联合训练和超矩形对比损失。
+- **Joint Contrastive 训练**：使用 `targets.coverage_vectors` 构造 `(a, b)` pair，并用覆盖向量 agreement 监督超矩形对比损失。
 - **Lightning 训练封装**：提供 checkpoint、early stopping、TensorBoard/CSV 日志和测试入口。
 
 ## 项目结构
@@ -27,8 +27,8 @@ RTLMap/
 ├── datasets/
 │   ├── data_types.py               # DualGraphData、覆盖率目标定义
 │   ├── datamodule.py               # 普通 manifest 数据集与 Lightning DataModule
-│   ├── triple_datamodule.py        # 三元组对比学习数据管线
-│   └── coverage_similarity.py      # 覆盖率相似度计算
+│   ├── pair_datamodule.py          # coverage-vector pair 对比学习数据管线
+│   └── coverage_vector_similarity.py # 覆盖向量相似度计算
 ├── cdfg_rtl/                       # RTL 图枚举和数据类型
 ├── cdfg_asm/                       # ASM 图枚举和数据类型
 ├── models/
@@ -239,58 +239,54 @@ uv run python main.py \
 
 ## Joint Contrastive 训练
 
-Joint contrastive 模式使用 `contrastive_dataset.v1` 数据集。`manifest.json` 默认指向 `contrastive_samples.jsonlines`。
+Joint contrastive 模式直接使用新版 `dataset.v1` 普通数据集，不再需要额外构造合并覆盖报告。
+数据集中的每条样本需要包含 `targets.coverage_vectors`。
 
 ```json
 {
-  "schema_version": "contrastive_dataset.v1",
-  "dataset_name": "contrastive_example",
-  "samples": "contrastive_samples.jsonlines",
+  "schema_version": "dataset.v1",
+  "dataset_name": "vector_example",
+  "samples": "samples.jsonlines",
   "rtl_graphs": "rtl_graphs",
   "asm_graphs": "asm_graphs",
-  "total": 1,
+  "total": 2,
   "errors": 0
 }
 ```
 
-每行样本使用 `contrastive_sample.v1`，包含 `a`、`b` 和 `merged` 三路 targets：
+训练时会在同一 `module_name` 内构造 `(a, b)` pair。joint contrastive
+模式下监督损失只计算 `a` 和 `b` 各自的图级覆盖率回归。
+对比损失将两个覆盖报告的 `coverage_vectors` 拼接为一个长二值向量后计算
+agreement 相似度：
 
-```json
-{
-  "schema_version": "contrastive_sample.v1",
-  "sample_id": "test_a::test_b::ALU",
-  "module_name": "ALU",
-  "rtl_graph": "rtl_graphs/ALU.json",
-  "asm_a": "asm_graphs/test_a.json",
-  "asm_b": null,
-  "targets": {
-    "a": {},
-    "b": {},
-    "merged": {}
-  }
-}
+```text
+Covered(sample) = {offset[type] + item.id | item.label == 1}
+similarity(a, b) = 1 - |Covered(a) △ Covered(b)| / N
 ```
+
+其中 `N` 是按 `line, condition, toggle, fsm, branch` 顺序拼接后的总
+`element_count`，`△` 是 symmetric difference。未出现在 `items` 中的位置
+视为明确的 `0`，因此 0/0 和 1/1 都会提高相似度。
 
 训练命令：
 
 ```bash
 uv run python main.py \
-    --dataset-dir /path/to/contrastive_dataset \
+    --dataset-dir /path/to/dataset \
     --data-root ./data \
     --joint-contrastive \
     --use-hyperrectangle \
     --contrastive-batch-size 16 \
+    --contrastive-pairs-per-sample 4 \
     --lambda-ce 1.0 \
     --lambda-cl 0.5
 ```
 
 可选项：
 
-- `--contrastive-triple-index`：指定三元组 jsonlines 文件；为空时读取 manifest 中的 `samples`。
+- `--contrastive-pairs-per-sample`：每个样本最多构造的同模块 pair 数。
 - `--contrastive-loss-type`：`mse`、`bce` 或 `margin`。
 - `--contrastive-margin`：`margin` loss 的不相似对交集上限。
-- `--or-consistency-weight`：启用 merged 逻辑 OR 一致性约束，默认关闭。
-
 ## 常用 CLI 参数
 
 | 参数 | 默认值 | 说明 |
@@ -311,7 +307,7 @@ uv run python main.py \
 | `--use-text-encoder` | `false` | 启用 CodeBERT ASM 编码 |
 | `--coverage-targets` | `branch` | 图级覆盖率目标 |
 | `--use-hyperrectangle` | `false` | 启用超矩形表示 |
-| `--joint-contrastive` | `false` | 启用三元组联合训练 |
+| `--joint-contrastive` | `false` | 启用 coverage-vector pair 对比训练 |
 | `--fast-dev-run` | `false` | Lightning 快速调试模式 |
 | `--seed` | `None` | 全局随机种子 |
 
@@ -361,17 +357,16 @@ uv run python -m pytest -q
 ```bash
 uv run python -m pytest -q tests/test_manifest_dataset.py
 uv run python -m pytest -q tests/test_multi_coverage_heads.py
-uv run python -m pytest -q tests/test_union_fusion.py
+uv run python -m pytest -q tests/test_pair_contrastive_training.py
 ```
 
 当前测试重点覆盖：
 
 - manifest 数据集加载与稀疏标签处理
 - 多 dataset 目录合并
-- contrastive 三元组数据加载
-- joint train DataModule 构建
+- coverage-vector pair 相似度与 joint train DataModule 构建
 - 多覆盖率 graph heads
-- union fusion 的对称性与 merged 路径
+- pair 对比训练步骤
 
 ## 缓存与输出
 
