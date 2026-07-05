@@ -69,12 +69,3 @@ def read_manifest(dataset_dir: Path) -> dict:
         raise FileNotFoundError(f"manifest.json 不存在: {manifest_file}")
     with open(manifest_file, encoding="utf-8") as f:
         return json.load(f)
-
-
-def is_contrastive_dataset_dir(dataset_dir: Path) -> bool:
-    manifest_file = dataset_dir / "manifest.json"
-    if not manifest_file.exists():
-        return False
-    with open(manifest_file, encoding="utf-8") as f:
-        manifest = json.load(f)
-    return manifest.get("schema_version") == "contrastive_dataset.v1"

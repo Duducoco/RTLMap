@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""对比损失 — 对齐超矩形交集度与覆盖率 Jaccard"""
+"""对比损失 - 对齐超矩形交集度与覆盖向量相似度。"""
 
 import torch
 import torch.nn.functional as F
@@ -14,12 +14,12 @@ def compute_contrastive_loss(
     loss_type: str = "mse",
     margin: float = 0.2,
 ) -> torch.Tensor:
-    """对齐超矩形交集度与覆盖率 Jaccard 相似度
+    """对齐超矩形交集度与覆盖向量 agreement 相似度。
 
     Args:
         output_a: ModelOutput（含 hyper_min, hyper_max）
         output_b: ModelOutput（含 hyper_min, hyper_max）
-        similarity: [B] 两侧样本的覆盖率 Jaccard ∈ [0, 1]
+        similarity: [B] 两侧样本的覆盖向量相似度，范围 [0, 1]
         loss_type: "mse" | "bce" | "margin"
         margin: margin 模式下不相似对的交集度上限
 

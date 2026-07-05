@@ -14,7 +14,8 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from datasets import DualGraphDataset
-from datasets.triple_datamodule import ContrastiveTripleDataset
+from datasets.coverage_vector_similarity import compute_coverage_vector_agreement
+from datasets.pair_datamodule import ContrastivePairDataset
 from trainer.config import TrainerConfig
 from trainer.utils import _build_training_datamodule
 
@@ -123,6 +124,112 @@ def _sample_entry(sample_id: str, asm_graph: str | None) -> dict:
     }
 
 
+def _coverage_vectors(
+    *,
+    line_count: int = 2,
+    condition_count: int = 0,
+    toggle_count: int = 0,
+    fsm_count: int = 0,
+    branch_count: int = 3,
+    line_ids: list[int] | None = None,
+    condition_ids: list[int] | None = None,
+    toggle_ids: list[int] | None = None,
+    fsm_ids: list[int] | None = None,
+    branch_ids: list[int] | None = None,
+) -> dict:
+    def vector(name: str, count: int, ids: list[int] | None) -> dict:
+        return {
+            "schema": "coverage_schemas/ALU.json",
+            "element_count": count,
+            "items": [{"id": item_id, "label": 1} for item_id in (ids or [])],
+        }
+
+    return {
+        "line": vector("line", line_count, line_ids),
+        "condition": vector("condition", condition_count, condition_ids),
+        "toggle": vector("toggle", toggle_count, toggle_ids),
+        "fsm": vector("fsm", fsm_count, fsm_ids),
+        "branch": vector("branch", branch_count, branch_ids),
+    }
+
+
+def _sample_entry_with_vectors(
+    sample_id: str,
+    asm_graph: str | None,
+    coverage_vectors: dict,
+) -> dict:
+    sample = _sample_entry(sample_id, asm_graph)
+    sample["targets"]["coverage_vectors"] = coverage_vectors
+    return sample
+
+
+def test_coverage_vector_agreement_counts_matching_zeros() -> None:
+    vec_a = _coverage_vectors(line_ids=[0], branch_ids=[0])
+    vec_b = _coverage_vectors(line_ids=[0], branch_ids=[1])
+
+    similarity = compute_coverage_vector_agreement(vec_a, vec_b)
+
+    # Long vector length is 5. Covered(A)={0,2}, Covered(B)={0,3}.
+    # Same bits are global ids {0,1,4}; mismatches are {2,3}.
+    assert math.isclose(similarity, 3 / 5)
+
+
+def test_coverage_vector_agreement_rejects_out_of_range_item_id() -> None:
+    vec_a = _coverage_vectors(line_count=2, line_ids=[2])
+    vec_b = _coverage_vectors(line_count=2, line_ids=[])
+
+    try:
+        compute_coverage_vector_agreement(vec_a, vec_b)
+    except ValueError as exc:
+        assert "out of range" in str(exc)
+    else:
+        raise AssertionError("expected out-of-range coverage vector id to fail")
+
+
+def test_pair_contrastive_dataset_uses_dataset_v1_coverage_vectors() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        dataset_dir = base / "dataset"
+        _write_json(dataset_dir / "rtl_graphs" / "ALU.json", _minimal_rtl_graph())
+        _write_json(dataset_dir / "asm_graphs" / "test_a.json", _minimal_asm_graph())
+        _write_json(
+            dataset_dir / "manifest.json",
+            {
+                "schema_version": "dataset.v1",
+                "dataset_name": "unit",
+                "samples": "samples.jsonlines",
+                "rtl_graphs": "rtl_graphs",
+                "asm_graphs": "asm_graphs",
+                "total": 2,
+                "errors": 0,
+            },
+        )
+        samples = [
+            _sample_entry_with_vectors(
+                "test_a::ALU",
+                "asm_graphs/test_a.json",
+                _coverage_vectors(line_ids=[0], branch_ids=[0]),
+            ),
+            _sample_entry_with_vectors(
+                "test_b::ALU",
+                None,
+                _coverage_vectors(line_ids=[0], branch_ids=[1]),
+            ),
+        ]
+        (dataset_dir / "samples.jsonlines").write_text(
+            "".join(json.dumps(s) + "\n" for s in samples),
+            encoding="utf-8",
+        )
+
+        dataset = ContrastivePairDataset(dataset_dir=dataset_dir, pairs_per_sample=1)
+
+        assert len(dataset) == 1
+        data_a, data_b, similarity = dataset[0]
+        assert data_a.edge_labels.tolist() == [0]
+        assert data_b.edge_labels.tolist() == [0]
+        assert math.isclose(similarity, 3 / 5)
+
+
 def test_manifest_dataset_loads_sparse_targets_without_legacy_index() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
@@ -214,141 +321,38 @@ def test_manifest_dataset_merges_multiple_dataset_dirs() -> None:
         assert torch.isclose(dataset[1].y[0, 0], torch.tensor(0.51))
 
 
-def _contrastive_entry() -> dict:
-    target = _sample_entry("test_a::ALU", "asm_graphs/test_a.json")["targets"]
-    target_b = json.loads(json.dumps(target))
-    target_b["edge_coverage"]["labels"] = [{"edge_id": 1, "label": 1}]
-    target_b["graph_coverage"]["values"]["branch"] = 25.0
-    target_merged = json.loads(json.dumps(target))
-    target_merged["edge_coverage"]["labels"] = [{"edge_id": 1, "label": 1}]
-    target_merged["graph_coverage"]["values"]["branch"] = 75.0
-    return {
-        "schema_version": "contrastive_sample.v1",
-        "sample_id": "test_a::test_b::ALU",
-        "module_name": "ALU",
-        "rtl_graph": "rtl_graphs/ALU.json",
-        "rtl_graph_hash": "sha256:test",
-        "test_a_id": "test_a",
-        "test_b_id": "test_b",
-        "asm_a": "asm_graphs/test_a.json",
-        "asm_b": None,
-        "asm_a_hash": None,
-        "asm_b_hash": None,
-        "targets": {
-            "a": target,
-            "b": target_b,
-            "merged": target_merged,
-        },
-    }
-
-
-def test_contrastive_manifest_dataset_uses_shared_graph_and_targets() -> None:
+def test_vector_contrastive_manifest_builds_pair_train_datamodule() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
-        dataset_dir = base / "contrastive"
+        dataset_dir = base / "dataset"
         _write_json(dataset_dir / "rtl_graphs" / "ALU.json", _minimal_rtl_graph())
         _write_json(dataset_dir / "asm_graphs" / "test_a.json", _minimal_asm_graph())
         _write_json(
             dataset_dir / "manifest.json",
             {
-                "schema_version": "contrastive_dataset.v1",
+                "schema_version": "dataset.v1",
                 "dataset_name": "unit",
-                "samples": "contrastive_samples.jsonlines",
+                "samples": "samples.jsonlines",
                 "rtl_graphs": "rtl_graphs",
                 "asm_graphs": "asm_graphs",
-                "total": 1,
+                "total": 2,
                 "errors": 0,
             },
         )
-        (dataset_dir / "contrastive_samples.jsonlines").write_text(
-            json.dumps(_contrastive_entry()) + "\n",
-            encoding="utf-8",
-        )
-
-        dataset = ContrastiveTripleDataset(dataset_dir=dataset_dir)
-
-        assert len(dataset) == 1
-        data_a, data_b, data_merged, similarity = dataset[0]
-        assert data_a.edge_labels.tolist() == [0]
-        assert data_b.edge_labels.tolist() == [1]
-        assert data_merged.edge_labels.tolist() == [1]
-        assert data_b.asm_instruction_encoding.shape == (1, 256)
-        assert 0.0 <= similarity <= 1.0
-
-
-def test_contrastive_similarity_averages_all_coverage_targets() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        base = Path(tmp)
-        dataset_dir = base / "contrastive"
-        _write_json(dataset_dir / "rtl_graphs" / "ALU.json", _minimal_rtl_graph())
-        _write_json(dataset_dir / "asm_graphs" / "test_a.json", _minimal_asm_graph())
-        _write_json(
-            dataset_dir / "manifest.json",
-            {
-                "schema_version": "contrastive_dataset.v1",
-                "dataset_name": "unit",
-                "samples": "contrastive_samples.jsonlines",
-                "rtl_graphs": "rtl_graphs",
-                "asm_graphs": "asm_graphs",
-                "total": 1,
-                "errors": 0,
-            },
-        )
-
-        entry = _contrastive_entry()
-        entry["targets"]["a"]["graph_coverage"]["values"] = {
-            "branch": 50.0,
-            "line": 40.0,
-            "fsm": 20.0,
-            "toggle": 80.0,
-            "condition": 30.0,
-        }
-        entry["targets"]["b"]["graph_coverage"]["values"] = {
-            "branch": 25.0,
-            "line": 20.0,
-            "fsm": 10.0,
-            "toggle": 60.0,
-            "condition": 15.0,
-        }
-        entry["targets"]["merged"]["graph_coverage"]["values"] = {
-            "branch": 75.0,
-            "line": 50.0,
-            "fsm": 25.0,
-            "toggle": 100.0,
-            "condition": 40.0,
-        }
-        (dataset_dir / "contrastive_samples.jsonlines").write_text(
-            json.dumps(entry) + "\n",
-            encoding="utf-8",
-        )
-
-        dataset = ContrastiveTripleDataset(dataset_dir=dataset_dir)
-
-        _, _, _, similarity = dataset[0]
-        expected = (0.0 + 0.2 + 0.2 + 0.4 + 0.125) / 5.0
-        assert math.isclose(similarity, expected, rel_tol=1e-6)
-
-
-def test_contrastive_manifest_builds_joint_train_datamodule_without_index() -> None:
-    with tempfile.TemporaryDirectory() as tmp:
-        base = Path(tmp)
-        dataset_dir = base / "contrastive"
-        _write_json(dataset_dir / "rtl_graphs" / "ALU.json", _minimal_rtl_graph())
-        _write_json(dataset_dir / "asm_graphs" / "test_a.json", _minimal_asm_graph())
-        _write_json(
-            dataset_dir / "manifest.json",
-            {
-                "schema_version": "contrastive_dataset.v1",
-                "dataset_name": "unit",
-                "samples": "contrastive_samples.jsonlines",
-                "rtl_graphs": "rtl_graphs",
-                "asm_graphs": "asm_graphs",
-                "total": 1,
-                "errors": 0,
-            },
-        )
-        (dataset_dir / "contrastive_samples.jsonlines").write_text(
-            json.dumps(_contrastive_entry()) + "\n",
+        samples = [
+            _sample_entry_with_vectors(
+                "test_a::ALU",
+                "asm_graphs/test_a.json",
+                _coverage_vectors(line_ids=[0], branch_ids=[0]),
+            ),
+            _sample_entry_with_vectors(
+                "test_b::ALU",
+                None,
+                _coverage_vectors(line_ids=[0], branch_ids=[1]),
+            ),
+        ]
+        (dataset_dir / "samples.jsonlines").write_text(
+            "".join(json.dumps(s) + "\n" for s in samples),
             encoding="utf-8",
         )
 
@@ -358,26 +362,22 @@ def test_contrastive_manifest_builds_joint_train_datamodule_without_index() -> N
             text_encoder_config=None,
             trainer_config=TrainerConfig(
                 joint_contrastive=True,
-                contrastive_triple_index="",
                 batch_size=2,
                 contrastive_batch_size=2,
+                contrastive_pairs_per_sample=1,
                 num_workers=0,
             ),
         )
         dm.setup("fit")
         batch = next(iter(dm.train_dataloader()))
 
-        assert has_validation is False
-        assert dm.val_dataloader() == []
-        assert dm.test_dataloader() == []
+        assert has_validation is True
         assert batch.batch_a.edge_labels.numel() == 1
         assert batch.batch_b.edge_labels.numel() == 1
-        assert batch.batch_merged.edge_labels.numel() == 1
+        assert torch.allclose(batch.similarity, torch.tensor([3 / 5]))
 
 
 if __name__ == "__main__":
     test_manifest_dataset_loads_sparse_targets_without_legacy_index()
     test_manifest_dataset_merges_multiple_dataset_dirs()
-    test_contrastive_manifest_dataset_uses_shared_graph_and_targets()
-    test_contrastive_similarity_averages_all_coverage_targets()
-    test_contrastive_manifest_builds_joint_train_datamodule_without_index()
+    test_vector_contrastive_manifest_builds_pair_train_datamodule()
