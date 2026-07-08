@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# RTLMap 联合三元组对比学习训练脚本（边分类 + 图回归 + 超矩形对比损失）
+# RTLMap joint contrastive 训练脚本（图回归 + 覆盖向量相似度对比损失）
 #
 # 用法:
 #   bash run_contrastive.sh [DATASET_DIR] [DATA_ROOT]
@@ -7,13 +7,18 @@
 # 示例:
 #   bash run_contrastive.sh /path/to/dataset /path/to/data_root
 #
+# joint loss:
+#   L_total = lambda_ce * (L_graph(a) + L_graph(b)) + lambda_cl * L_contrastive(a, b)
+#
 # 对比学习参数说明:
-#   --use-hyperrectangle           启用超矩形对比学习
-#   --contrastive-loss-weight     对比损失权重 (默认 0.5)
+#   --joint-contrastive            启用 coverage-vector pair 对比训练
 #   --contrastive-loss-type        损失类型: mse / bce / margin (默认 mse)
-#   --contrastive-batch-size      对比 DataLoader batch 大小 (默认 16)
-#   --contrastive-margin          margin 模式下不相似对交集上限 (默认 0.2)
-#   --hyper-min-margin           超矩形每维度最小宽度 (默认 0.01)
+#   --contrastive-batch-size       对比 DataLoader batch 大小 (默认 16)
+#   --contrastive-pairs-per-sample 每个样本最多构造的同模块 pair 数 (默认 4)
+#   --contrastive-margin           margin 模式下不相似对交集上限 (默认 0.2)
+#   --lambda-ce                    a/b 两路图回归监督损失权重 (默认 1.0)
+#   --lambda-cl                    joint 模式下对比损失权重 (默认 0.5)
+#   --hyper-min-margin             超矩形每维度最小宽度 (默认 0.01)
 
 set -euo pipefail
 
@@ -34,14 +39,12 @@ uv run python main.py \
     --gradient-clip-val 1.0 \
     --warmup-steps 100 \
     --scheduler cosine \
-    --edge-loss-weight 1.0 \
     --graph-loss-weight 1.0 \
-    --label-smoothing 0.1 \
     --precision bf16-mixed \
     --joint-contrastive \
-    --contrastive-loss-weight 0.5 \
     --contrastive-loss-type mse \
     --contrastive-batch-size 16 \
+    --contrastive-pairs-per-sample 4 \
     --contrastive-margin 0.2 \
     --lambda-ce 1.0 \
     --lambda-cl 0.5 \
