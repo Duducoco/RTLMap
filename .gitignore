@@ -15,7 +15,7 @@ wheels/
 
 #yosys
 oss-cad-suite/
-
+docs/
 *.json
 *.svg
 CLAUDE.md
