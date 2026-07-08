@@ -230,6 +230,44 @@ def test_pair_contrastive_dataset_uses_dataset_v1_coverage_vectors() -> None:
         assert math.isclose(similarity, 3 / 5)
 
 
+def test_pair_contrastive_dataset_does_not_pair_same_module_across_dirs() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        dataset_dirs = []
+        for idx, covered_branch in enumerate([0, 1]):
+            dataset_dir = base / f"dataset_{idx}"
+            dataset_dirs.append(dataset_dir)
+            _write_json(dataset_dir / "rtl_graphs" / "ALU.json", _minimal_rtl_graph())
+            _write_json(
+                dataset_dir / "manifest.json",
+                {
+                    "schema_version": "dataset.v1",
+                    "dataset_name": f"unit_{idx}",
+                    "samples": "samples.jsonlines",
+                    "rtl_graphs": "rtl_graphs",
+                    "asm_graphs": "asm_graphs",
+                    "total": 1,
+                    "errors": 0,
+                },
+            )
+            sample = _sample_entry_with_vectors(
+                f"test_{idx}::ALU",
+                None,
+                _coverage_vectors(line_ids=[0], branch_ids=[covered_branch]),
+            )
+            (dataset_dir / "samples.jsonlines").write_text(
+                json.dumps(sample) + "\n",
+                encoding="utf-8",
+            )
+
+        dataset = ContrastivePairDataset(
+            dataset_dir=dataset_dirs,
+            pairs_per_sample=1,
+        )
+
+        assert len(dataset) == 0
+
+
 def test_manifest_dataset_loads_sparse_targets_without_legacy_index() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)

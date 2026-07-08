@@ -35,6 +35,7 @@ def read_manifest_samples(dataset_dir: Path) -> list[dict]:
         raise FileNotFoundError(f"samples.jsonlines 不存在: {samples_file}")
 
     results: list[dict] = []
+    source_dir = str(dataset_dir.resolve())
     with open(samples_file, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -46,6 +47,7 @@ def read_manifest_samples(dataset_dir: Path) -> list[dict]:
                     f"不支持的样本 schema: {entry.get('schema_version')!r}"
                 )
             sample = dict(entry)
+            sample["_dataset_dir"] = source_dir
             sample["_rtl_path"] = str(dataset_dir / entry["rtl_graph"])
             sample["_asm_path"] = (
                 str(dataset_dir / entry["asm_graph"])

@@ -46,7 +46,7 @@ class ContrastivePairDataset(Dataset):
         self._build_pairs()
 
     def _build_pairs(self) -> None:
-        by_module: dict[str, list[int]] = {}
+        by_source_module: dict[tuple[str, str], list[int]] = {}
         for idx, sample in enumerate(self._samples):
             vectors = sample.get("targets", {}).get("coverage_vectors")
             if vectors is None:
@@ -56,9 +56,10 @@ class ContrastivePairDataset(Dataset):
                 )
             if total_coverage_vector_length(vectors) <= 0:
                 continue
-            by_module.setdefault(sample["module_name"], []).append(idx)
+            group_key = (sample["_dataset_dir"], sample["module_name"])
+            by_source_module.setdefault(group_key, []).append(idx)
 
-        for indices in by_module.values():
+        for indices in by_source_module.values():
             if len(indices) < 2:
                 continue
             for pos, idx_a in enumerate(indices):
