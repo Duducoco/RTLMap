@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,11 +27,18 @@ def compute_asm_cache_key(asm_path: str, config_fingerprint: str) -> str:
     return h.hexdigest()[:32]
 
 
+def _save_tensor_atomic(tensor: torch.Tensor, path: Path) -> None:
+    tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    torch.save(tensor, tmp_path)
+    os.replace(tmp_path, path)
+
+
 def load_asm_encodings(
     asm_paths: list[str],
     *,
     cache_root: str | Path,
     text_encoder_config: "TextEncoderConfig | None",
+    asm_chunk_files: int = 64,
 ) -> dict[str, torch.Tensor]:
     """Load or compute projected ASM instruction encodings."""
     if text_encoder_config is None or not asm_paths:
@@ -84,9 +92,12 @@ def load_asm_encodings(
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         new_count = 0
-        for path, pooled_tensor in encoder.encode_asm_jsons_pooled_iter(uncached_paths):
+        for path, pooled_tensor in encoder.encode_asm_jsons_pooled_iter(
+            uncached_paths,
+            chunk_files=asm_chunk_files,
+        ):
             cache_key = compute_asm_cache_key(path, config_fp)
-            torch.save(pooled_tensor, cache_dir / f"{cache_key}.pt")
+            _save_tensor_atomic(pooled_tensor, cache_dir / f"{cache_key}.pt")
             asm_encodings[path] = encoder.project(pooled_tensor)
             del pooled_tensor
             new_count += 1

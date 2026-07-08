@@ -2,6 +2,7 @@
 """训练 DataModule 组合工厂。"""
 
 import lightning as L
+from pathlib import Path
 
 from datasets import DualGraphDataModule
 from datasets.pair_datamodule import ContrastivePairDataModule
@@ -51,7 +52,8 @@ def build_training_datamodule(
             num_workers=min(trainer_config.num_workers, 4),
             pairs_per_sample=trainer_config.contrastive_pairs_per_sample,
             text_encoder_config=text_encoder_config,
-            encoding_cache_root=data_root,
+            encoding_cache_root=str(Path(data_root) / "train"),
+            asm_chunk_files=64,
         )
         base_dm = DualGraphDataModule(
             root=data_root,
@@ -59,6 +61,7 @@ def build_training_datamodule(
             text_encoder_config=text_encoder_config,
             batch_size=trainer_config.batch_size,
             num_workers=trainer_config.num_workers,
+            asm_chunk_files=64,
             use_bucketing=trainer_config.use_bucketing,
             token_budget=trainer_config.token_budget,
         )
@@ -71,6 +74,7 @@ def build_training_datamodule(
             text_encoder_config=text_encoder_config,
             batch_size=trainer_config.batch_size,
             num_workers=trainer_config.num_workers,
+            asm_chunk_files=64,
             use_bucketing=trainer_config.use_bucketing,
             token_budget=trainer_config.token_budget,
         ),

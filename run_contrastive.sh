@@ -8,6 +8,9 @@
 #   bash run_contrastive.sh /path/to/data_root
 #   DATASET_ROOT=/path/to/coverage-report-extractor/out bash run_contrastive.sh ./data
 #
+# 首次训练前建议先预热数据和 CodeBERT 缓存:
+#   uv run python prepare_contrastive_data.py --data-root ./data_contrastive --encoder-devices 0,1 --text-batch-size 1024 --asm-chunk-files 64
+#
 # joint loss:
 #   L_total = lambda_ce * (L_graph(a) + L_graph(b)) + lambda_cl * L_contrastive(a, b)
 #
@@ -24,13 +27,15 @@
 set -euo pipefail
 
 DATASET_ROOT="${DATASET_ROOT:-/home/u1/projects/coverage-report-extractor/out}"
+ACCELERATOR="${ACCELERATOR:-gpu}"
+DEVICES="${DEVICES:-1}"
 DATASET_DIRS=(
     "$DATASET_ROOT/archgen_single"
     "$DATASET_ROOT/ibex"
     "$DATASET_ROOT/picorv32"
     "$DATASET_ROOT/riscv_simple_multicycle"
 )
-DATA_ROOT="${1:-./data}"
+DATA_ROOT="${1:-./data_contrastive}"
 
 uv run python main.py \
     --dataset-dir "${DATASET_DIRS[@]}" \
@@ -47,11 +52,14 @@ uv run python main.py \
     --warmup-steps 100 \
     --scheduler cosine \
     --graph-loss-weight 1.0 \
+    --accelerator "$ACCELERATOR" \
+    --devices "$DEVICES" \
     --precision bf16-mixed \
     --use-text-encoder \
     --text-model-name microsoft/codebert-base \
     --text-output-dim 256 \
     --text-max-length 512 \
+    --text-batch-size 1024 \
     --text-pooling mean \
     --joint-contrastive \
     --contrastive-loss-type mse \

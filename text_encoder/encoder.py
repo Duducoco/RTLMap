@@ -5,7 +5,7 @@ import logging
 import math
 import os
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from copy import copy
 import re
 import orjson
@@ -379,7 +379,10 @@ class MultiGPUInstructionEncoder:
 
             # 仅加载当前批次的文本（避免一次性预加载所有文件）
             chunk_data: list[tuple[str, list[str]]] = []
-            with ProcessPoolExecutor(max_workers=_IO_WORKERS) as pool:
+            # Use threads instead of processes here. This method is called after
+            # CUDA models are initialized; forking at that point can inherit CUDA
+            # state and trigger NCCL/CUDA failures.
+            with ThreadPoolExecutor(max_workers=_IO_WORKERS) as pool:
                 results = pool.map(_load_and_format_asm, chunk_paths)
                 for path, texts in results:
                     if texts:

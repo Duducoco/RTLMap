@@ -92,6 +92,7 @@ class DualGraphDataset(Dataset):
         dataset_dir: Optional[DatasetDirInput] = None,
         text_encoder_config: Optional["TextEncoderConfig"] = None,
         num_workers: int = 0,
+        asm_chunk_files: int = 64,
         transform: Optional[Callable] = None,
         pre_transform: Optional[Callable] = None,
         pre_filter: Optional[Callable] = None,
@@ -102,6 +103,7 @@ class DualGraphDataset(Dataset):
         self._idx_to_file: list[str] = []
         self._text_encoder_config = text_encoder_config
         self._num_workers = num_workers or min(os.cpu_count() or 1, 32)
+        self._asm_chunk_files = max(1, int(asm_chunk_files))
         super().__init__(root, transform, pre_transform, pre_filter)
 
     @property
@@ -178,6 +180,7 @@ class DualGraphDataset(Dataset):
             unique_asm_paths,
             cache_root=self.root,
             text_encoder_config=self._text_encoder_config,
+            asm_chunk_files=self._asm_chunk_files,
         )
 
         # ── 阶段 1.5: 构建并保存去重 RTL 图 + ASM 图 ──
@@ -313,6 +316,7 @@ class DualGraphDataModule(L.LightningDataModule):
         text_encoder_config: Optional["TextEncoderConfig"] = None,
         batch_size: int = 32,
         num_workers: int = 4,
+        asm_chunk_files: int = 64,
         transform: Optional[Callable] = None,
         use_bucketing: bool = False,
         token_budget: int = 8192,
@@ -324,6 +328,7 @@ class DualGraphDataModule(L.LightningDataModule):
             text_encoder_config: 文本编码器配置，None 时回退到零向量
             batch_size: 固定 batch 大小（use_bucketing=False 时生效）
             num_workers: 数据加载线程数
+            asm_chunk_files: CodeBERT 编码时每批读取的 ASM 文件数
             transform: 数据变换
             use_bucketing: 是否启用按 RTL 图大小分桶的动态 batch（默认 False）
             token_budget: bucketing 模式下每 batch 最大节点总数
@@ -334,6 +339,7 @@ class DualGraphDataModule(L.LightningDataModule):
         self.text_encoder_config = text_encoder_config
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.asm_chunk_files = max(1, int(asm_chunk_files))
         self.transform = transform
         self.use_bucketing = use_bucketing
         self.token_budget = token_budget
@@ -348,6 +354,7 @@ class DualGraphDataModule(L.LightningDataModule):
             dataset_dir=self.dataset_dir,
             text_encoder_config=self.text_encoder_config,
             num_workers=self.num_workers,
+            asm_chunk_files=self.asm_chunk_files,
             transform=self.transform,
         )
 

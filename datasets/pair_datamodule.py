@@ -46,6 +46,7 @@ class ContrastivePairDataset(Dataset):
         pairs_per_sample: int = 4,
         text_encoder_config: Optional["TextEncoderConfig"] = None,
         encoding_cache_root: str | Path = "dataset_root",
+        asm_chunk_files: int = 64,
     ):
         self.dataset_dirs = _normalize_dataset_dirs(dataset_dir)
         self.pairs_per_sample = max(1, int(pairs_per_sample))
@@ -53,6 +54,7 @@ class ContrastivePairDataset(Dataset):
         self._asm_encodings = self._load_asm_encodings(
             text_encoder_config,
             encoding_cache_root,
+            asm_chunk_files,
         )
         self._pairs: list[tuple[int, int, float]] = []
         self._build_pairs()
@@ -61,6 +63,7 @@ class ContrastivePairDataset(Dataset):
         self,
         text_encoder_config: Optional["TextEncoderConfig"],
         encoding_cache_root: str | Path,
+        asm_chunk_files: int,
     ) -> dict[str, torch.Tensor]:
         asm_paths = [
             sample["_asm_path"]
@@ -71,6 +74,7 @@ class ContrastivePairDataset(Dataset):
             asm_paths,
             cache_root=encoding_cache_root,
             text_encoder_config=text_encoder_config,
+            asm_chunk_files=asm_chunk_files,
         )
 
     def _build_pairs(self) -> None:
@@ -161,6 +165,7 @@ class ContrastivePairDataModule:
         pairs_per_sample: int = 4,
         text_encoder_config: Optional["TextEncoderConfig"] = None,
         encoding_cache_root: str | Path = "dataset_root",
+        asm_chunk_files: int = 64,
     ):
         self.dataset_dir = dataset_dir
         self.batch_size = batch_size
@@ -169,6 +174,7 @@ class ContrastivePairDataModule:
         self.pairs_per_sample = pairs_per_sample
         self.text_encoder_config = text_encoder_config
         self.encoding_cache_root = encoding_cache_root
+        self.asm_chunk_files = max(1, int(asm_chunk_files))
         self._dataset: Optional[ContrastivePairDataset] = None
 
     def setup(self, stage: Optional[str] = None):
@@ -178,6 +184,7 @@ class ContrastivePairDataModule:
                 pairs_per_sample=self.pairs_per_sample,
                 text_encoder_config=self.text_encoder_config,
                 encoding_cache_root=self.encoding_cache_root,
+                asm_chunk_files=self.asm_chunk_files,
             )
 
     def train_dataloader(self) -> DataLoader:
