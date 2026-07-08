@@ -221,7 +221,32 @@ def test_pair_contrastive_dataset_uses_dataset_v1_coverage_vectors() -> None:
             encoding="utf-8",
         )
 
-        dataset = ContrastivePairDataset(dataset_dir=dataset_dir, pairs_per_sample=1)
+        cache_root = base / "cache" / "train"
+        prepared = DualGraphDataset(
+            root=str(cache_root),
+            dataset_dir=dataset_dir,
+            num_workers=1,
+        )
+        assert len(prepared) == 2
+
+        import datasets.datamodule as datamodule_module
+
+        original_load_asm_encodings = datamodule_module._load_asm_encodings
+
+        def fail_if_asm_cache_loads(*args, **kwargs):
+            del args, kwargs
+            raise AssertionError("pair training should read processed graph cache")
+
+        datamodule_module._load_asm_encodings = fail_if_asm_cache_loads
+        try:
+            dataset = ContrastivePairDataset(
+                dataset_dir=dataset_dir,
+                pairs_per_sample=1,
+                text_encoder_config=object(),
+                processed_root=cache_root,
+            )
+        finally:
+            datamodule_module._load_asm_encodings = original_load_asm_encodings
 
         assert len(dataset) == 1
         data_a, data_b, similarity = dataset[0]
@@ -263,6 +288,7 @@ def test_pair_contrastive_dataset_does_not_pair_same_module_across_dirs() -> Non
         dataset = ContrastivePairDataset(
             dataset_dir=dataset_dirs,
             pairs_per_sample=1,
+            processed_root=base / "cache" / "train",
         )
 
         assert len(dataset) == 0

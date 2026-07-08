@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,23 +12,17 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from torch_geometric.data import Batch
 
-from .asm_encoding import load_asm_encodings as _load_asm_encodings
 from .coverage_vector_similarity import (
     compute_coverage_vector_agreement,
     total_coverage_vector_length,
 )
 from .data_types import ContrastivePairBatch, DualGraphData
-from .graph_builders import (
-    build_asm_graph as _build_asm_graph,
-    build_rtl_structure as _build_rtl_structure,
-    empty_asm_graph as _empty_asm_graph,
-)
+from .datamodule import DualGraphDataset
 from .manifest import (
     DatasetDirInput,
     normalize_dataset_dirs as _normalize_dataset_dirs,
     read_manifest_samples_from_dirs as _read_manifest_samples_from_dirs,
 )
-from .targets import extract_targets_from_sample as _extract_targets_from_sample
 
 if TYPE_CHECKING:
     from text_encoder import TextEncoderConfig
@@ -38,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 
 class ContrastivePairDataset(Dataset):
-    """Pair dataset using ordinary dataset.v1 samples and coverage_vectors."""
+    """Pair dataset using coverage vectors and processed graph cache."""
 
     def __init__(
         self,
@@ -46,36 +39,26 @@ class ContrastivePairDataset(Dataset):
         pairs_per_sample: int = 4,
         text_encoder_config: Optional["TextEncoderConfig"] = None,
         encoding_cache_root: str | Path = "dataset_root",
+        processed_root: str | Path | None = None,
         asm_chunk_files: int = 64,
     ):
         self.dataset_dirs = _normalize_dataset_dirs(dataset_dir)
         self.pairs_per_sample = max(1, int(pairs_per_sample))
         self._samples = _read_manifest_samples_from_dirs(self.dataset_dirs)
-        self._asm_encodings = self._load_asm_encodings(
-            text_encoder_config,
-            encoding_cache_root,
-            asm_chunk_files,
-        )
-        self._pairs: list[tuple[int, int, float]] = []
-        self._build_pairs()
-
-    def _load_asm_encodings(
-        self,
-        text_encoder_config: Optional["TextEncoderConfig"],
-        encoding_cache_root: str | Path,
-        asm_chunk_files: int,
-    ) -> dict[str, torch.Tensor]:
-        asm_paths = [
-            sample["_asm_path"]
-            for sample in self._samples
-            if sample.get("_asm_path") is not None
-        ]
-        return _load_asm_encodings(
-            asm_paths,
-            cache_root=encoding_cache_root,
+        self._graph_dataset = DualGraphDataset(
+            root=str(processed_root or encoding_cache_root),
+            dataset_dir=self.dataset_dirs,
             text_encoder_config=text_encoder_config,
+            num_workers=1,
             asm_chunk_files=asm_chunk_files,
         )
+        if len(self._graph_dataset) < len(self._samples):
+            raise RuntimeError(
+                "processed graph cache has fewer samples than the manifest; "
+                "run prepare_contrastive_data.py before joint contrastive training"
+            )
+        self._pairs: list[tuple[int, int, float]] = []
+        self._build_pairs()
 
     def _build_pairs(self) -> None:
         by_source_module: dict[tuple[str, str], list[int]] = {}
@@ -113,32 +96,13 @@ class ContrastivePairDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[DualGraphData, DualGraphData, float]:
         idx_a, idx_b, similarity = self._pairs[idx]
         return (
-            self._build_data(self._samples[idx_a]),
-            self._build_data(self._samples[idx_b]),
+            self._build_data(idx_a),
+            self._build_data(idx_b),
             similarity,
         )
 
-    def _build_data(self, sample: dict) -> DualGraphData:
-        with open(sample["_rtl_path"], encoding="utf-8") as f:
-            rtl_json = json.load(f)
-        rtl_struct = _build_rtl_structure(rtl_json)
-        valid_edge_mask = rtl_struct["_valid_edge_mask"]
-        rtl_struct.pop("_valid_edge_mask", None)
-
-        edge_labels, y = _extract_targets_from_sample(sample, valid_edge_mask)
-        asm_path = sample.get("_asm_path")
-        asm = (
-            _load_asm_graph(asm_path, self._asm_encodings.get(asm_path))
-            if asm_path
-            else _empty_asm()
-        )
-
-        return DualGraphData(
-            **rtl_struct,
-            **asm,
-            edge_labels=edge_labels,
-            y=y,
-        )
+    def _build_data(self, sample_idx: int) -> DualGraphData:
+        return self._graph_dataset[sample_idx]
 
 
 def contrastive_pair_collate(
@@ -165,6 +129,7 @@ class ContrastivePairDataModule:
         pairs_per_sample: int = 4,
         text_encoder_config: Optional["TextEncoderConfig"] = None,
         encoding_cache_root: str | Path = "dataset_root",
+        processed_root: str | Path | None = None,
         asm_chunk_files: int = 64,
     ):
         self.dataset_dir = dataset_dir
@@ -174,6 +139,7 @@ class ContrastivePairDataModule:
         self.pairs_per_sample = pairs_per_sample
         self.text_encoder_config = text_encoder_config
         self.encoding_cache_root = encoding_cache_root
+        self.processed_root = processed_root
         self.asm_chunk_files = max(1, int(asm_chunk_files))
         self._dataset: Optional[ContrastivePairDataset] = None
 
@@ -184,6 +150,7 @@ class ContrastivePairDataModule:
                 pairs_per_sample=self.pairs_per_sample,
                 text_encoder_config=self.text_encoder_config,
                 encoding_cache_root=self.encoding_cache_root,
+                processed_root=self.processed_root,
                 asm_chunk_files=self.asm_chunk_files,
             )
 
@@ -203,14 +170,3 @@ class ContrastivePairDataModule:
         if self._dataset is None:
             self.setup()
         return len(self._dataset)
-
-
-def _load_asm_graph(
-    asm_json_path: str,
-    asm_encoding: Optional[torch.Tensor],
-) -> dict:
-    return _build_asm_graph(asm_json_path, asm_encoding=asm_encoding)
-
-
-def _empty_asm() -> dict:
-    return _empty_asm_graph()

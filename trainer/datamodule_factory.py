@@ -52,7 +52,7 @@ def build_training_datamodule(
             num_workers=min(trainer_config.num_workers, 4),
             pairs_per_sample=trainer_config.contrastive_pairs_per_sample,
             text_encoder_config=text_encoder_config,
-            encoding_cache_root=str(Path(data_root) / "train"),
+            processed_root=str(Path(data_root) / "train"),
             asm_chunk_files=64,
         )
         base_dm = DualGraphDataModule(

@@ -140,14 +140,14 @@ def main() -> None:
     val_len = len(base_dm.val_dataset) if base_dm.val_dataset is not None else 0
     logging.info("DualGraphDataModule ready: train=%d, val=%d", train_len, val_len)
 
-    logging.info("Step 2/2: preparing contrastive pair dataset with CodeBERT")
+    logging.info("Step 2/2: validating contrastive pairs from processed graph cache")
     pair_dm = ContrastivePairDataModule(
         dataset_dir=dataset_dirs,
         batch_size=args.contrastive_batch_size,
         num_workers=0,
         pairs_per_sample=args.contrastive_pairs_per_sample,
         text_encoder_config=text_config,
-        encoding_cache_root=str(Path(args.data_root) / "train"),
+        processed_root=str(Path(args.data_root) / "train"),
         asm_chunk_files=args.asm_chunk_files,
     )
     pair_dm.setup("fit")

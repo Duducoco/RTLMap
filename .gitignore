@@ -36,6 +36,7 @@ temp/
 dataset_root/
 data/
 data
+data_contrastive
 # 测试和设计文档
 trainer/test_trainer.py
 models/test_model.py
