@@ -4,7 +4,6 @@
 import hashlib
 import json
 import warnings
-from tqdm import tqdm
 import logging
 import os
 from multiprocessing import Pool
@@ -19,6 +18,7 @@ import lightning as L
 from torch_geometric.data import Dataset
 from torch_geometric.loader import DataLoader as PyGDataLoader
 
+from .asm_encoding import load_asm_encodings as _load_asm_encodings
 from .data_types import DualGraphData
 from .graph_builders import (
     build_asm_graph as _build_asm_graph,
@@ -34,8 +34,6 @@ from .samplers import RtlSizeBucketSampler
 from .targets import extract_targets_from_sample as _extract_targets_from_sample
 
 logger = logging.getLogger(__name__)
-
-_EMPTY_ASM_KEY = "__empty_asm__"
 
 
 def _build_and_save_labels(
@@ -70,17 +68,6 @@ def _build_and_save_labels(
     except Exception as e:
         logger.error("构建/保存标签失败 [%s]: %s", sample.get("_rtl_path"), e)
         return False
-
-
-def _compute_asm_cache_key(asm_path: str, config_fingerprint: str) -> str:
-    if asm_path == _EMPTY_ASM_KEY:
-        return _EMPTY_ASM_KEY
-    h = hashlib.sha256()
-    with open(asm_path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    h.update(config_fingerprint.encode("utf-8"))
-    return h.hexdigest()[:32]
 
 
 class DualGraphDataset(Dataset):
@@ -180,7 +167,6 @@ class DualGraphDataset(Dataset):
         )
 
         # ── 阶段 1: 批量 GPU 编码（CodeBERT）+ 磁盘缓存 ──
-        asm_encodings: dict[str, "torch.Tensor"] = {}
         unique_asm_paths = sorted(
             {
                 sample["_asm_path"]
@@ -188,70 +174,11 @@ class DualGraphDataset(Dataset):
                 if sample.get("_asm_path") is not None
             }
         )
-
-        if self._text_encoder_config is not None and unique_asm_paths:
-            cache_dir = Path(self.root) / "asm_encoding_cache"
-            config_fp = self._text_encoder_config.cache_fingerprint
-
-            text_encoder = None
-
-            def _get_encoder(*, projection_only: bool = False):
-                nonlocal text_encoder
-                if text_encoder is None:
-                    from text_encoder import MultiGPUInstructionEncoder
-
-                    text_encoder = MultiGPUInstructionEncoder(
-                        self._text_encoder_config,
-                        projection_only=projection_only,
-                    )
-                return text_encoder
-
-            uncached_paths: list[str] = []
-
-            for asm_path in tqdm(unique_asm_paths, desc="加载 ASM 编码缓存"):
-                cache_key = _compute_asm_cache_key(asm_path, config_fp)
-                cache_file = cache_dir / f"{cache_key}.pt"
-                if cache_file.exists():
-                    try:
-                        pooled = torch.load(cache_file, weights_only=True)
-                        asm_encodings[asm_path] = _get_encoder(
-                            projection_only=True
-                        ).project(pooled)
-                        del pooled
-                        continue
-                    except Exception as e:
-                        logger.warning(
-                            "缓存文件损坏，将重新编码: %s (%s)", cache_file, e
-                        )
-                uncached_paths.append(asm_path)
-
-            logger.info(
-                "阶段 1/2: ASM 编码 — %d 缓存命中, %d 待编码",
-                len(asm_encodings),
-                len(uncached_paths),
-            )
-
-            if uncached_paths:
-                if text_encoder is not None and text_encoder._projection_only:
-                    text_encoder = None
-                encoder = _get_encoder(projection_only=False)
-                cache_dir.mkdir(parents=True, exist_ok=True)
-
-                new_count = 0
-                for path, pooled_tensor in encoder.encode_asm_jsons_pooled_iter(
-                    uncached_paths
-                ):
-                    cache_key = _compute_asm_cache_key(path, config_fp)
-                    torch.save(pooled_tensor, cache_dir / f"{cache_key}.pt")
-                    asm_encodings[path] = encoder.project(pooled_tensor)
-                    del pooled_tensor
-                    new_count += 1
-
-                logger.info("编码完成，已缓存 %d 个新文件", new_count)
-
-            logger.info("阶段 1 完成: %d 个编码结果", len(asm_encodings))
-        else:
-            logger.info("阶段 1/2: 跳过 GPU 编码（无编码器配置或无 ASM 文件）")
+        asm_encodings = _load_asm_encodings(
+            unique_asm_paths,
+            cache_root=self.root,
+            text_encoder_config=self._text_encoder_config,
+        )
 
         # ── 阶段 1.5: 构建并保存去重 RTL 图 + ASM 图 ──
         processed_dir = self.processed_dir

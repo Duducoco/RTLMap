@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
+from typing import TYPE_CHECKING
 from typing import Optional
 
 import torch
 from torch.utils.data import DataLoader, Dataset
 from torch_geometric.data import Batch
 
+from .asm_encoding import load_asm_encodings as _load_asm_encodings
 from .coverage_vector_similarity import (
     compute_coverage_vector_agreement,
     total_coverage_vector_length,
@@ -28,6 +31,9 @@ from .manifest import (
 )
 from .targets import extract_targets_from_sample as _extract_targets_from_sample
 
+if TYPE_CHECKING:
+    from text_encoder import TextEncoderConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,12 +44,34 @@ class ContrastivePairDataset(Dataset):
         self,
         dataset_dir: DatasetDirInput,
         pairs_per_sample: int = 4,
+        text_encoder_config: Optional["TextEncoderConfig"] = None,
+        encoding_cache_root: str | Path = "dataset_root",
     ):
         self.dataset_dirs = _normalize_dataset_dirs(dataset_dir)
         self.pairs_per_sample = max(1, int(pairs_per_sample))
         self._samples = _read_manifest_samples_from_dirs(self.dataset_dirs)
+        self._asm_encodings = self._load_asm_encodings(
+            text_encoder_config,
+            encoding_cache_root,
+        )
         self._pairs: list[tuple[int, int, float]] = []
         self._build_pairs()
+
+    def _load_asm_encodings(
+        self,
+        text_encoder_config: Optional["TextEncoderConfig"],
+        encoding_cache_root: str | Path,
+    ) -> dict[str, torch.Tensor]:
+        asm_paths = [
+            sample["_asm_path"]
+            for sample in self._samples
+            if sample.get("_asm_path") is not None
+        ]
+        return _load_asm_encodings(
+            asm_paths,
+            cache_root=encoding_cache_root,
+            text_encoder_config=text_encoder_config,
+        )
 
     def _build_pairs(self) -> None:
         by_source_module: dict[tuple[str, str], list[int]] = {}
@@ -95,7 +123,11 @@ class ContrastivePairDataset(Dataset):
 
         edge_labels, y = _extract_targets_from_sample(sample, valid_edge_mask)
         asm_path = sample.get("_asm_path")
-        asm = _load_asm_graph(asm_path) if asm_path else _empty_asm()
+        asm = (
+            _load_asm_graph(asm_path, self._asm_encodings.get(asm_path))
+            if asm_path
+            else _empty_asm()
+        )
 
         return DualGraphData(
             **rtl_struct,
@@ -127,12 +159,16 @@ class ContrastivePairDataModule:
         num_workers: int = 0,
         shuffle: bool = True,
         pairs_per_sample: int = 4,
+        text_encoder_config: Optional["TextEncoderConfig"] = None,
+        encoding_cache_root: str | Path = "dataset_root",
     ):
         self.dataset_dir = dataset_dir
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.shuffle = shuffle
         self.pairs_per_sample = pairs_per_sample
+        self.text_encoder_config = text_encoder_config
+        self.encoding_cache_root = encoding_cache_root
         self._dataset: Optional[ContrastivePairDataset] = None
 
     def setup(self, stage: Optional[str] = None):
@@ -140,6 +176,8 @@ class ContrastivePairDataModule:
             self._dataset = ContrastivePairDataset(
                 dataset_dir=self.dataset_dir,
                 pairs_per_sample=self.pairs_per_sample,
+                text_encoder_config=self.text_encoder_config,
+                encoding_cache_root=self.encoding_cache_root,
             )
 
     def train_dataloader(self) -> DataLoader:
@@ -160,8 +198,11 @@ class ContrastivePairDataModule:
         return len(self._dataset)
 
 
-def _load_asm_graph(asm_json_path: str) -> dict:
-    return _build_asm_graph(asm_json_path, asm_encoding=None)
+def _load_asm_graph(
+    asm_json_path: str,
+    asm_encoding: Optional[torch.Tensor],
+) -> dict:
+    return _build_asm_graph(asm_json_path, asm_encoding=asm_encoding)
 
 
 def _empty_asm() -> dict:

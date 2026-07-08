@@ -50,6 +50,8 @@ def build_training_datamodule(
             batch_size=trainer_config.contrastive_batch_size,
             num_workers=min(trainer_config.num_workers, 4),
             pairs_per_sample=trainer_config.contrastive_pairs_per_sample,
+            text_encoder_config=text_encoder_config,
+            encoding_cache_root=data_root,
         )
         base_dm = DualGraphDataModule(
             root=data_root,

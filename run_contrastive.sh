@@ -2,10 +2,11 @@
 # RTLMap joint contrastive 训练脚本（图回归 + 覆盖向量相似度对比损失）
 #
 # 用法:
-#   bash run_contrastive.sh [DATASET_DIR] [DATA_ROOT]
+#   bash run_contrastive.sh [DATA_ROOT]
 #
 # 示例:
-#   bash run_contrastive.sh /path/to/dataset /path/to/data_root
+#   bash run_contrastive.sh /path/to/data_root
+#   DATASET_ROOT=/path/to/coverage-report-extractor/out bash run_contrastive.sh ./data
 #
 # joint loss:
 #   L_total = lambda_ce * (L_graph(a) + L_graph(b)) + lambda_cl * L_contrastive(a, b)
@@ -22,11 +23,17 @@
 
 set -euo pipefail
 
-DATASET_DIR="${1:-/home/bwq/projects/coverage-report-extractor/out/archgen_ai_single_contrastive}"
-DATA_ROOT="${2:-./data}"
+DATASET_ROOT="${DATASET_ROOT:-/home/u1/projects/coverage-report-extractor/out}"
+DATASET_DIRS=(
+    "$DATASET_ROOT/archgen_single"
+    "$DATASET_ROOT/ibex"
+    "$DATASET_ROOT/picorv32"
+    "$DATASET_ROOT/riscv_simple_multicycle"
+)
+DATA_ROOT="${1:-./data}"
 
 uv run python main.py \
-    --dataset-dir "$DATASET_DIR" \
+    --dataset-dir "${DATASET_DIRS[@]}" \
     --data-root "$DATA_ROOT" \
     --hidden-dim 256 \
     --num-gnn-layers 4 \
@@ -41,6 +48,11 @@ uv run python main.py \
     --scheduler cosine \
     --graph-loss-weight 1.0 \
     --precision bf16-mixed \
+    --use-text-encoder \
+    --text-model-name microsoft/codebert-base \
+    --text-output-dim 256 \
+    --text-max-length 512 \
+    --text-pooling mean \
     --joint-contrastive \
     --contrastive-loss-type mse \
     --contrastive-batch-size 16 \
