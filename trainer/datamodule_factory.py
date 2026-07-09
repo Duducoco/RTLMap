@@ -25,6 +25,8 @@ class JointTrainDataModule(L.LightningDataModule):
 
     def setup(self, stage=None):
         self._base.setup(stage)
+        if stage == "fit" or stage is None:
+            self._pair_dm.set_sample_indices(self._base.train_indices)
         self._pair_dm.setup(stage)
 
     def train_dataloader(self):

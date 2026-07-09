@@ -347,6 +347,8 @@ class DualGraphDataModule(L.LightningDataModule):
         self.train_dataset = None
         self.val_dataset = None
         self.test_dataset = None
+        self.train_indices: Optional[list[int]] = None
+        self.val_indices: Optional[list[int]] = None
 
     def _make_dataset(self, split: str) -> DualGraphDataset:
         return DualGraphDataset(
@@ -369,21 +371,26 @@ class DualGraphDataModule(L.LightningDataModule):
         """
         root_path = Path(self.root)
         if stage == "fit" or stage is None:
-            self.train_dataset = self._make_dataset("train")
+            full_train_dataset = self._make_dataset("train")
             if (root_path / "val" / "processed").exists():
+                self.train_dataset = full_train_dataset
                 self.val_dataset = self._make_dataset("val")
+                self.train_indices = list(range(len(full_train_dataset)))
+                self.val_indices = None
             else:
                 from torch.utils.data import random_split
 
-                full_len = len(self.train_dataset)
+                full_len = len(full_train_dataset)
                 val_len = max(1, int(full_len * 0.1))
                 train_len = full_len - val_len
                 split_gen = torch.Generator().manual_seed(42)
                 self.train_dataset, self.val_dataset = random_split(
-                    self.train_dataset,
+                    full_train_dataset,
                     [train_len, val_len],
                     generator=split_gen,
                 )
+                self.train_indices = list(self.train_dataset.indices)
+                self.val_indices = list(self.val_dataset.indices)
                 logger.info(
                     "val 集缺失，自动划分: train=%d, val=%d", train_len, val_len
                 )

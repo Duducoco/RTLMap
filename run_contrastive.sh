@@ -28,7 +28,7 @@ set -euo pipefail
 
 DATASET_ROOT="${DATASET_ROOT:-/home/u1/projects/coverage-report-extractor/out}"
 ACCELERATOR="${ACCELERATOR:-gpu}"
-DEVICES="${DEVICES:-1}"
+DEVICES="${DEVICES:-2}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"

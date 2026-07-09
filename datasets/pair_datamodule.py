@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 from typing import Optional
@@ -40,11 +41,17 @@ class ContrastivePairDataset(Dataset):
         text_encoder_config: Optional["TextEncoderConfig"] = None,
         encoding_cache_root: str | Path = "dataset_root",
         processed_root: str | Path | None = None,
+        sample_indices: Optional[Sequence[int]] = None,
         asm_chunk_files: int = 64,
     ):
         self.dataset_dirs = _normalize_dataset_dirs(dataset_dir)
         self.pairs_per_sample = max(1, int(pairs_per_sample))
         self._samples = _read_manifest_samples_from_dirs(self.dataset_dirs)
+        self._sample_indices = (
+            set(int(idx) for idx in sample_indices)
+            if sample_indices is not None
+            else None
+        )
         self._graph_dataset = DualGraphDataset(
             root=str(processed_root or encoding_cache_root),
             dataset_dir=self.dataset_dirs,
@@ -63,6 +70,8 @@ class ContrastivePairDataset(Dataset):
     def _build_pairs(self) -> None:
         by_source_module: dict[tuple[str, str], list[int]] = {}
         for idx, sample in enumerate(self._samples):
+            if self._sample_indices is not None and idx not in self._sample_indices:
+                continue
             vectors = sample.get("targets", {}).get("coverage_vectors")
             if vectors is None:
                 raise ValueError(
@@ -130,6 +139,7 @@ class ContrastivePairDataModule:
         text_encoder_config: Optional["TextEncoderConfig"] = None,
         encoding_cache_root: str | Path = "dataset_root",
         processed_root: str | Path | None = None,
+        sample_indices: Optional[Sequence[int]] = None,
         asm_chunk_files: int = 64,
     ):
         self.dataset_dir = dataset_dir
@@ -140,8 +150,17 @@ class ContrastivePairDataModule:
         self.text_encoder_config = text_encoder_config
         self.encoding_cache_root = encoding_cache_root
         self.processed_root = processed_root
+        self.sample_indices = (
+            list(sample_indices) if sample_indices is not None else None
+        )
         self.asm_chunk_files = max(1, int(asm_chunk_files))
         self._dataset: Optional[ContrastivePairDataset] = None
+
+    def set_sample_indices(self, sample_indices: Optional[Sequence[int]]) -> None:
+        self.sample_indices = (
+            list(sample_indices) if sample_indices is not None else None
+        )
+        self._dataset = None
 
     def setup(self, stage: Optional[str] = None):
         if self._dataset is None:
@@ -151,6 +170,7 @@ class ContrastivePairDataModule:
                 text_encoder_config=self.text_encoder_config,
                 encoding_cache_root=self.encoding_cache_root,
                 processed_root=self.processed_root,
+                sample_indices=self.sample_indices,
                 asm_chunk_files=self.asm_chunk_files,
             )
 

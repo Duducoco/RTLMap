@@ -215,6 +215,11 @@ def test_pair_contrastive_dataset_uses_dataset_v1_coverage_vectors() -> None:
                 None,
                 _coverage_vectors(line_ids=[0], branch_ids=[1]),
             ),
+            _sample_entry_with_vectors(
+                "test_c::ALU",
+                None,
+                _coverage_vectors(line_ids=[0], branch_ids=[1]),
+            ),
         ]
         (dataset_dir / "samples.jsonlines").write_text(
             "".join(json.dumps(s) + "\n" for s in samples),
@@ -414,6 +419,11 @@ def test_vector_contrastive_manifest_builds_pair_train_datamodule() -> None:
                 None,
                 _coverage_vectors(line_ids=[0], branch_ids=[1]),
             ),
+            _sample_entry_with_vectors(
+                "test_c::ALU",
+                None,
+                _coverage_vectors(line_ids=[0], branch_ids=[1]),
+            ),
         ]
         (dataset_dir / "samples.jsonlines").write_text(
             "".join(json.dumps(s) + "\n" for s in samples),
@@ -441,7 +451,67 @@ def test_vector_contrastive_manifest_builds_pair_train_datamodule() -> None:
         assert torch.allclose(batch.similarity, torch.tensor([3 / 5]))
 
 
+def test_joint_contrastive_pair_training_excludes_auto_val_indices() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        dataset_dir = base / "dataset"
+        _write_json(dataset_dir / "rtl_graphs" / "ALU.json", _minimal_rtl_graph())
+        _write_json(
+            dataset_dir / "manifest.json",
+            {
+                "schema_version": "dataset.v1",
+                "dataset_name": "unit",
+                "samples": "samples.jsonlines",
+                "rtl_graphs": "rtl_graphs",
+                "asm_graphs": "asm_graphs",
+                "total": 12,
+                "errors": 0,
+            },
+        )
+        samples = [
+            _sample_entry_with_vectors(
+                f"test_{idx}::ALU",
+                None,
+                _coverage_vectors(line_ids=[idx % 2], branch_ids=[idx % 2]),
+            )
+            for idx in range(12)
+        ]
+        (dataset_dir / "samples.jsonlines").write_text(
+            "".join(json.dumps(s) + "\n" for s in samples),
+            encoding="utf-8",
+        )
+
+        dm, _ = _build_training_datamodule(
+            data_root=str(base / "cache"),
+            dataset_dir=str(dataset_dir),
+            text_encoder_config=None,
+            trainer_config=TrainerConfig(
+                joint_contrastive=True,
+                batch_size=2,
+                contrastive_batch_size=2,
+                contrastive_pairs_per_sample=2,
+                num_workers=0,
+            ),
+        )
+        dm.setup("fit")
+
+        train_indices = set(dm._base.train_indices)
+        val_indices = set(dm._base.val_indices)
+        pair_indices = {
+            sample_idx
+            for pair in dm._pair_dm._dataset._pairs
+            for sample_idx in pair[:2]
+        }
+
+        assert train_indices
+        assert val_indices
+        assert pair_indices
+        assert pair_indices <= train_indices
+        assert pair_indices.isdisjoint(val_indices)
+
+
 if __name__ == "__main__":
     test_manifest_dataset_loads_sparse_targets_without_legacy_index()
     test_manifest_dataset_merges_multiple_dataset_dirs()
     test_vector_contrastive_manifest_builds_pair_train_datamodule()
+    test_joint_contrastive_pair_training_excludes_auto_val_indices()
