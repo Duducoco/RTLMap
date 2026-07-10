@@ -49,9 +49,17 @@ def run_pair_training_step(module, batch: ContrastivePairBatch) -> torch.Tensor:
         on_epoch=True,
         prog_bar=True,
         batch_size=1,
+        sync_dist=True,
     )
 
     c_step = module._compute_contrastive_step_metrics(out_a, out_b, batch.similarity)
-    module.log_dict(c_step, on_step=True, on_epoch=True, prog_bar=False, batch_size=1)
+    module.log_dict(
+        c_step,
+        on_step=True,
+        on_epoch=True,
+        prog_bar=False,
+        batch_size=1,
+        sync_dist=True,
+    )
 
     return total
