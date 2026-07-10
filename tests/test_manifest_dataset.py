@@ -345,6 +345,44 @@ def test_manifest_dataset_loads_sparse_targets_without_legacy_index() -> None:
         assert second.asm_instruction_encoding.shape == (1, 256)
 
 
+def test_candidate_manifest_without_targets_loads_as_unlabeled() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        dataset_dir = base / "candidate_dataset"
+        _write_json(dataset_dir / "rtl_graphs" / "ALU.json", _minimal_rtl_graph())
+        _write_json(dataset_dir / "asm_graphs" / "candidate.json", _minimal_asm_graph())
+        _write_json(
+            dataset_dir / "manifest.json",
+            {
+                "schema_version": "dataset.v1",
+                "mode": "candidate/inference",
+                "dataset_name": "candidate-unit",
+                "samples": "samples.jsonlines",
+                "rtl_graphs": "rtl_graphs",
+                "asm_graphs": "asm_graphs",
+                "total": 1,
+                "errors": 0,
+            },
+        )
+        sample = _sample_entry("candidate::ALU", "asm_graphs/candidate.json")
+        sample.pop("targets")
+        (dataset_dir / "samples.jsonlines").write_text(
+            json.dumps(sample) + "\n",
+            encoding="utf-8",
+        )
+
+        dataset = DualGraphDataset(
+            root=str(base / "cache"),
+            dataset_dir=dataset_dir,
+            num_workers=1,
+        )
+
+        assert len(dataset) == 1
+        candidate = dataset[0]
+        assert candidate.edge_labels.tolist() == [-1]
+        assert torch.isnan(candidate.y).all()
+
+
 def test_manifest_dataset_merges_multiple_dataset_dirs() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         base = Path(tmp)
