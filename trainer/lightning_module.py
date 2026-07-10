@@ -8,6 +8,7 @@ import lightning as L
 from datasets import DualGraphData
 from datasets.data_types import ContrastivePairBatch
 from models.data_types import ModelConfig, ModelOutput
+from models.config_artifact import build_model_config_artifact
 from models.model import create_model
 from models.hyperrectangle import hyperrectangle_intersection
 from metrics import (
@@ -34,10 +35,14 @@ class DualGraphLightningModule(L.LightningModule):
         joint_contrastive: bool = False,
         lambda_ce: float = 1.0,
         lambda_cl: float = 0.5,
+        model_config_artifact: dict | None = None,
     ):
         super().__init__()
+        model_config_artifact = model_config_artifact or build_model_config_artifact(
+            model_config, None
+        )
         # 保存超参数（包括 ModelConfig 的所有字段）
-        self.save_hyperparameters(ignore=["model_config"])
+        self.save_hyperparameters(ignore=["model_config", "model_config_artifact"])
         # 手动保存 ModelConfig 的字段到 hparams
         self.hparams.update(
             {
@@ -51,6 +56,7 @@ class DualGraphLightningModule(L.LightningModule):
                 "num_asm_edge_types": model_config.num_asm_edge_types,
                 "asm_instruction_dim": model_config.asm_instruction_dim,
                 "coverage_target_keys": coverage_target_keys,
+                "model_config_artifact": model_config_artifact,
             }
         )
 

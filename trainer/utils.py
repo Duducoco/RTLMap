@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """便捷训练函数"""
 
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import lightning as L
@@ -10,6 +11,25 @@ from .app_config import AppConfig
 from .datamodule_factory import build_training_datamodule as _build_training_datamodule
 from .lightning_module import DualGraphLightningModule
 from .lightning_trainer import LightningTrainer
+from models.config_artifact import (
+    build_model_config_artifact,
+    save_model_config_artifact,
+)
+
+
+def persist_model_config_artifact(app_config: AppConfig) -> Path:
+    """Write the resolved inference contract beside experiment checkpoints."""
+
+    output = (
+        Path(app_config.trainer.checkpoint_dir)
+        / app_config.runtime.experiment_name
+        / "model_config.yaml"
+    )
+    artifact = build_model_config_artifact(
+        app_config.model,
+        app_config.text_encoder,
+    )
+    return save_model_config_artifact(output, artifact)
 
 
 def train_model(
@@ -28,6 +48,11 @@ def train_model(
     model_config = app_config.model
     trainer_config = app_config.trainer
     dataset_dir = app_config.data.dataset_dir
+    model_config_artifact = build_model_config_artifact(
+        model_config,
+        app_config.text_encoder,
+    )
+    persist_model_config_artifact(app_config)
 
     module = DualGraphLightningModule(
         model_config=model_config,
@@ -45,6 +70,7 @@ def train_model(
         joint_contrastive=trainer_config.joint_contrastive,
         lambda_ce=trainer_config.lambda_ce,
         lambda_cl=trainer_config.lambda_cl,
+        model_config_artifact=model_config_artifact,
     )
 
     effective_datamodule, inferred_has_validation = _build_training_datamodule(
