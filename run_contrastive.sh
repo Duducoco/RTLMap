@@ -57,6 +57,7 @@ uv run python main.py \
     --warmup-steps 100 \
     --scheduler cosine \
     --graph-loss-weight 1.0 \
+    --coverage-targets branch line toggle condition \
     --accelerator "$ACCELERATOR" \
     --devices "$DEVICES" \
     --precision bf16-mixed \
@@ -74,7 +75,7 @@ uv run python main.py \
     --lambda-ce 1.0 \
     --lambda-cl 0.5 \
     --hyper-min-margin 0.01 \
-    --experiment-name archgen_ai_single_contrastive \
+    --experiment-name all-4coverage \
     --logger-type tensorboard \
     --checkpoint-dir checkpoints/contrastive \
     --save-top-k 3 \

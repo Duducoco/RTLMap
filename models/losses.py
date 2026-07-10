@@ -31,7 +31,15 @@ def compute_supervised_losses(
         target = data.y[:, col_idx]
         valid = ~torch.isnan(target)
         if valid.any():
-            graph_loss = F.smooth_l1_loss(output.graph_pred[valid], target[valid])
+            per_target_losses = [
+                F.smooth_l1_loss(
+                    output.graph_pred[column_valid, column],
+                    target[column_valid, column],
+                )
+                for column in range(target.size(1))
+                if (column_valid := valid[:, column]).any()
+            ]
+            graph_loss = torch.stack(per_target_losses).mean()
             losses["num_valid_graph_targets"] = int(valid.sum().item())
         else:
             graph_loss = output.graph_pred.sum() * 0.0

@@ -11,7 +11,8 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from datasets import DualGraphData
-from models import DualGraphFusionModel, ModelConfig
+from models import DualGraphFusionModel, ModelConfig, ModelOutput
+from models.losses import compute_supervised_losses
 
 
 def _batch_with_missing_targets() -> DualGraphData:
@@ -69,5 +70,42 @@ def test_graph_regressor_uses_one_head_per_coverage_target() -> None:
     assert losses["num_valid_graph_targets"] == 5
 
 
+def test_graph_loss_weights_each_available_coverage_target_equally() -> None:
+    output = ModelOutput(
+        graph_pred=torch.tensor(
+            [
+                [0.0, 0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+            ],
+            requires_grad=True,
+        )
+    )
+    data = DualGraphData(
+        y=torch.tensor(
+            [
+                [0.0, 0.0, float("nan"), 0.0, 1.0],
+                [0.0, 0.0, float("nan"), 0.0, float("nan")],
+                [0.0, 0.0, float("nan"), 0.0, float("nan")],
+                [0.0, 0.0, float("nan"), 0.0, float("nan")],
+            ]
+        )
+    )
+
+    losses = compute_supervised_losses(
+        output,
+        data,
+        coverage_target_keys=("branch", "line", "toggle", "condition"),
+    )
+
+    expected_per_target_losses = torch.tensor([0.0, 0.0, 0.375, 0.5])
+    assert torch.allclose(
+        losses["graph_loss"], expected_per_target_losses.mean()
+    )
+    assert losses["num_valid_graph_targets"] == 13
+
+
 if __name__ == "__main__":
     test_graph_regressor_uses_one_head_per_coverage_target()
+    test_graph_loss_weights_each_available_coverage_target_equally()
