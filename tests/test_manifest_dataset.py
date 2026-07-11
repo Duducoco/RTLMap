@@ -215,11 +215,6 @@ def test_pair_contrastive_dataset_uses_dataset_v1_coverage_vectors() -> None:
                 None,
                 _coverage_vectors(line_ids=[0], branch_ids=[1]),
             ),
-            _sample_entry_with_vectors(
-                "test_c::ALU",
-                None,
-                _coverage_vectors(line_ids=[0], branch_ids=[1]),
-            ),
         ]
         (dataset_dir / "samples.jsonlines").write_text(
             "".join(json.dumps(s) + "\n" for s in samples),
@@ -442,7 +437,7 @@ def test_vector_contrastive_manifest_builds_pair_train_datamodule() -> None:
                 "samples": "samples.jsonlines",
                 "rtl_graphs": "rtl_graphs",
                 "asm_graphs": "asm_graphs",
-                "total": 2,
+                "total": 3,
                 "errors": 0,
             },
         )

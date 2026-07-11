@@ -55,6 +55,18 @@ def read_manifest_samples(dataset_dir: Path) -> list[dict]:
                 else None
             )
             results.append(sample)
+    declared_total = manifest.get("total")
+    if (
+        isinstance(declared_total, bool)
+        or not isinstance(declared_total, int)
+        or declared_total < 0
+    ):
+        raise ValueError("manifest total must be a non-negative integer")
+    if declared_total != len(results):
+        raise ValueError(
+            f"manifest total ({declared_total}) does not match "
+            f"sample records ({len(results)})"
+        )
     return results
 
 
