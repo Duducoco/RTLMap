@@ -172,7 +172,7 @@ class InstructionEncoder:
         )
 
     def _tokenize_batch(self, batch_texts: list[str]) -> dict[str, torch.Tensor]:
-        """CPU tokenize + pin_memory，为非阻塞 GPU 传输做准备"""
+        """Tokenize on CPU and pin only when transferring to CUDA."""
         tokens = self.tokenizer(
             batch_texts,
             padding=True,
@@ -180,8 +180,13 @@ class InstructionEncoder:
             max_length=self.config.max_length,
             return_tensors="pt",
         )
-        # pin_memory 允许 .to(device, non_blocking=True) 异步传输
-        return {k: v.pin_memory() for k, v in tokens.items()}
+        if (
+            torch.device(self.config.device).type == "cuda"
+            and torch.cuda.is_available()
+        ):
+            # Pinned CPU memory enables non-blocking CUDA transfers.
+            return {key: value.pin_memory() for key, value in tokens.items()}
+        return tokens
 
     def _pool_batch(self, batch_texts: list[str]) -> torch.Tensor:
         """单 batch tokenize + CodeBERT forward + pooling → [B, hidden_size]
