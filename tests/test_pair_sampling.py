@@ -20,7 +20,7 @@ from datasets.datamodule import DualGraphDataModule
 from datasets.data_types import DualGraphData
 from datasets.manifest import read_manifest_samples
 from datasets.pair_datamodule import ContrastivePairDataModule, ContrastivePairDataset
-from trainer.datamodule_factory import JointTrainDataModule
+from trainer.datamodule_factory import JointTrainDataModule, build_training_datamodule
 from trainer.config import TrainerConfig
 from trainer.lightning_trainer import LightningTrainer
 
@@ -363,6 +363,42 @@ def test_joint_trainer_reloads_dataloaders_each_epoch(tmp_path: Path) -> None:
     )
 
     assert wrapper.trainer.reload_dataloaders_every_n_epochs == 1
+
+
+def test_joint_training_disables_persistent_workers_for_reloaded_loaders(
+    tmp_path: Path,
+) -> None:
+    datamodule, _ = build_training_datamodule(
+        data_root=str(tmp_path / "data"),
+        dataset_dir=tmp_path / "dataset",
+        text_encoder_config=None,
+        trainer_config=TrainerConfig(
+            joint_contrastive=True,
+            batch_size=4,
+            num_workers=2,
+        ),
+    )
+    datamodule._base.val_dataset = list(range(32))
+
+    loader = datamodule._base.val_dataloader()
+
+    assert loader is not None
+    assert loader.num_workers == 2
+    assert loader.pin_memory is True
+    assert loader.persistent_workers is False
+
+
+def test_standard_training_keeps_persistent_workers(tmp_path: Path) -> None:
+    datamodule = DualGraphDataModule(
+        root=str(tmp_path / "data"),
+        batch_size=4,
+        num_workers=2,
+    )
+    datamodule.train_dataset = list(range(32))
+
+    loader = datamodule.train_dataloader()
+
+    assert loader.persistent_workers is True
 
 
 def test_two_epoch_lightning_run_refreshes_pairs_and_sampler_lengths(

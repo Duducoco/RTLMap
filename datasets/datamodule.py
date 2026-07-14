@@ -379,6 +379,7 @@ class DualGraphDataModule(L.LightningDataModule):
         transform: Optional[Callable] = None,
         use_bucketing: bool = False,
         token_budget: int = 8192,
+        persistent_workers: bool = True,
     ):
         """
         Args:
@@ -391,6 +392,7 @@ class DualGraphDataModule(L.LightningDataModule):
             transform: 数据变换
             use_bucketing: 是否启用按 RTL 图大小分桶的动态 batch（默认 False）
             token_budget: bucketing 模式下每 batch 最大节点总数
+            persistent_workers: 是否跨 epoch 保留 DataLoader worker
         """
         super().__init__()
         self.root = root
@@ -402,6 +404,7 @@ class DualGraphDataModule(L.LightningDataModule):
         self.transform = transform
         self.use_bucketing = use_bucketing
         self.token_budget = token_budget
+        self.persistent_workers = persistent_workers
 
         self.train_dataset = None
         self.val_dataset = None
@@ -521,7 +524,11 @@ class DualGraphDataModule(L.LightningDataModule):
             )
         else:
             effective_workers = min(self.num_workers, per_gpu)
-        persistent = effective_workers > 0 and n_samples > effective_workers
+        persistent = (
+            self.persistent_workers
+            and effective_workers > 0
+            and n_samples > effective_workers
+        )
 
         if self.use_bucketing:
             batch_sampler = RtlSizeBucketSampler(

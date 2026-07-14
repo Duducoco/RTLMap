@@ -94,6 +94,7 @@ def build_training_datamodule(
             asm_chunk_files=64,
             use_bucketing=trainer_config.use_bucketing,
             token_budget=trainer_config.token_budget,
+            persistent_workers=False,
         )
         return JointTrainDataModule(base_dm, pair_dm, pair_val_dm), True
 
