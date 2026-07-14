@@ -168,12 +168,11 @@ def parse_args() -> argparse.Namespace:
         default=16,
         help="对比 DataLoader batch 大小",
     )
-    hyper.add_argument(
-        "--contrastive-pairs-per-sample",
-        type=int,
-        default=4,
-        help="每个样本最多构造的同模块对比 pair 数",
-    )
+    hyper.add_argument("--pair-candidate-pool-size", type=int, default=128)
+    hyper.add_argument("--pair-relative-low-quota", type=int, default=2)
+    hyper.add_argument("--pair-relative-mid-quota", type=int, default=1)
+    hyper.add_argument("--pair-relative-high-quota", type=int, default=1)
+    hyper.add_argument("--pair-sampling-seed", type=int, default=42)
 
     # ── coverage-vector pair 联合对比学习 (joint mode) ─────
     joint = p.add_argument_group("联合训练 (Joint Contrastive)")
@@ -251,7 +250,11 @@ def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
         fast_dev_run=args.fast_dev_run,
         log_every_n_steps=args.log_every_n_steps,
         contrastive_batch_size=args.contrastive_batch_size,
-        contrastive_pairs_per_sample=args.contrastive_pairs_per_sample,
+        pair_candidate_pool_size=args.pair_candidate_pool_size,
+        pair_relative_low_quota=args.pair_relative_low_quota,
+        pair_relative_mid_quota=args.pair_relative_mid_quota,
+        pair_relative_high_quota=args.pair_relative_high_quota,
+        pair_sampling_seed=args.pair_sampling_seed,
         coverage_target_keys=tuple(args.coverage_targets),
         joint_contrastive=args.joint_contrastive,
         lambda_ce=args.lambda_ce,

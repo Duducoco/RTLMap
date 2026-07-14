@@ -68,6 +68,10 @@ def make_contrastive_pair_batch(
         size_mask=torch.ones(batch_size, 5, dtype=torch.bool),
         jaccard=torch.rand(batch_size, 5),
         iou_mask=torch.ones(batch_size, 5, dtype=torch.bool),
+        endpoint_weight_a=torch.arange(1, batch_size + 1, dtype=torch.float32),
+        endpoint_weight_b=torch.arange(
+            batch_size + 1, 2 * batch_size + 1, dtype=torch.float32
+        ),
     )
 
 
@@ -102,7 +106,7 @@ def test_pair_training_step_uses_only_a_and_b() -> None:
     assert seen_ids == [id(batch.batch_a), id(batch.batch_b)]
 
 
-def test_pair_training_step_uses_graph_loss_only(monkeypatch) -> None:
+def test_pair_training_step_uses_one_weighted_endpoint_graph_loss(monkeypatch) -> None:
     torch.manual_seed(0)
     batch = make_contrastive_pair_batch(batch_size=2, asm_instruction_dim=32)
     config = ModelConfig(
@@ -119,20 +123,26 @@ def test_pair_training_step_uses_graph_loss_only(monkeypatch) -> None:
     )
     module.train()
 
-    def fake_compute_loss(output, data, *args, **kwargs):
-        del output, args, kwargs
-        graph_loss = torch.tensor(
-            2.0 if data is batch.batch_a else 3.0,
-            device=module.device,
-        )
-        unrelated_loss = torch.tensor(100.0, device=module.device)
-        return {
-            "graph_loss": graph_loss,
-            "total_loss": unrelated_loss + graph_loss,
-            "num_valid_graph_targets": 1,
-        }
+    monkeypatch.setattr(
+        module.model,
+        "compute_loss",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("pair training must use the weighted endpoint reduction")
+        ),
+    )
+    seen_weights: list[torch.Tensor] = []
 
-    monkeypatch.setattr(module.model, "compute_loss", fake_compute_loss)
+    def fake_weighted_graph_loss(graph_pred, target, endpoint_weight, **kwargs):
+        del graph_pred, target, kwargs
+        seen_weights.append(endpoint_weight.detach().cpu())
+        return torch.tensor(5.0, device=module.device)
+
+    monkeypatch.setattr(
+        joint_steps,
+        "compute_weighted_graph_loss",
+        fake_weighted_graph_loss,
+        raising=False,
+    )
     monkeypatch.setattr(
         joint_steps,
         "compute_coverage_geometry_losses",
@@ -145,8 +155,10 @@ def test_pair_training_step_uses_graph_loss_only(monkeypatch) -> None:
     loss = module.training_step(batch, 0)
 
     assert torch.equal(loss, torch.tensor(5.0, device=module.device))
+    assert len(seen_weights) == 1
+    assert torch.equal(seen_weights[0], torch.tensor([1.0, 2.0, 3.0, 4.0]))
 
 
 if __name__ == "__main__":
     test_pair_training_step_uses_only_a_and_b()
-    test_pair_training_step_uses_graph_loss_only()
+    test_pair_training_step_uses_one_weighted_endpoint_graph_loss()

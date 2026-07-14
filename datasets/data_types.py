@@ -122,6 +122,8 @@ class ContrastivePairBatch:
     size_mask: torch.Tensor
     jaccard: torch.Tensor
     iou_mask: torch.Tensor
+    endpoint_weight_a: torch.Tensor
+    endpoint_weight_b: torch.Tensor
 
     @property
     def similarity(self) -> torch.Tensor:

@@ -19,7 +19,7 @@
 #   --lambda-iou                   逐类型真实体积 IoU 对齐权重
 #   --lambda-volume                单样本真实体积校准权重
 #   --contrastive-batch-size       对比 DataLoader batch 大小 (默认 16)
-#   --contrastive-pairs-per-sample 每个样本最多构造的同模块 pair 数 (默认 4)
+#   --pair-candidate-pool-size     每个 anchor 的同模块候选池大小 (默认 128)
 #   --lambda-ce                    a/b 两路图回归监督损失权重 (默认 1.0)
 #   --volume-warmup-epochs         真实体积权重 warmup epoch 数 (默认 5)
 #   --smooth-intersection-temperature 训练阶段平滑交集温度 (默认 0.01)
@@ -70,7 +70,11 @@ uv run python main.py \
     --text-pooling mean \
     --joint-contrastive \
     --contrastive-batch-size 16 \
-    --contrastive-pairs-per-sample 4 \
+    --pair-candidate-pool-size 128 \
+    --pair-relative-low-quota 2 \
+    --pair-relative-mid-quota 1 \
+    --pair-relative-high-quota 1 \
+    --pair-sampling-seed 42 \
     --lambda-ce 1.0 \
     --lambda-iou 1.0 \
     --lambda-volume 0.25 \

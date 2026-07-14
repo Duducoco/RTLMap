@@ -261,7 +261,6 @@ def test_pair_contrastive_dataset_uses_dataset_v1_coverage_vectors() -> None:
         try:
             dataset = ContrastivePairDataset(
                 dataset_dir=dataset_dir,
-                pairs_per_sample=1,
                 text_encoder_config=object(),
                 processed_root=cache_root,
             )
@@ -269,7 +268,7 @@ def test_pair_contrastive_dataset_uses_dataset_v1_coverage_vectors() -> None:
             datamodule_module._load_asm_encodings = original_load_asm_encodings
 
         assert len(dataset) == 1
-        data_a, data_b, targets = dataset[0]
+        data_a, data_b, targets, weight_a, weight_b = dataset[0]
         assert data_a.edge_labels.tolist() == [0]
         assert data_b.edge_labels.tolist() == [0]
         assert targets.density_a == (0.5, 0.0, 0.0, 0.0, 1 / 3)
@@ -277,6 +276,8 @@ def test_pair_contrastive_dataset_uses_dataset_v1_coverage_vectors() -> None:
         assert targets.size_mask == (True, False, False, False, True)
         assert targets.jaccard == (1.0, 0.0, 0.0, 0.0, 0.0)
         assert targets.iou_mask == (True, False, False, False, True)
+        assert weight_a == 1.0
+        assert weight_b == 1.0
 
 
 def test_pair_contrastive_dataset_does_not_pair_same_module_across_dirs() -> None:
@@ -311,7 +312,6 @@ def test_pair_contrastive_dataset_does_not_pair_same_module_across_dirs() -> Non
 
         dataset = ContrastivePairDataset(
             dataset_dir=dataset_dirs,
-            pairs_per_sample=1,
             processed_root=base / "cache" / "train",
         )
 
@@ -495,7 +495,6 @@ def test_vector_contrastive_manifest_builds_pair_train_datamodule() -> None:
                 joint_contrastive=True,
                 batch_size=2,
                 contrastive_batch_size=2,
-                contrastive_pairs_per_sample=1,
                 num_workers=0,
             ),
         )
@@ -546,7 +545,6 @@ def test_joint_contrastive_pair_training_excludes_auto_val_indices() -> None:
                 joint_contrastive=True,
                 batch_size=2,
                 contrastive_batch_size=2,
-                contrastive_pairs_per_sample=2,
                 num_workers=0,
             ),
         )

@@ -6,6 +6,7 @@ import torch
 from datasets.data_types import ContrastivePairBatch
 from models.contrastive_loss import compute_coverage_geometry_losses
 from models.hyperrectangle import hyperrectangle_geometry
+from models.losses import compute_weighted_graph_loss
 
 
 def _move_geometry_targets(batch: ContrastivePairBatch, device) -> None:
@@ -14,6 +15,8 @@ def _move_geometry_targets(batch: ContrastivePairBatch, device) -> None:
     batch.size_mask = batch.size_mask.to(device)
     batch.jaccard = batch.jaccard.to(device)
     batch.iou_mask = batch.iou_mask.to(device)
+    batch.endpoint_weight_a = batch.endpoint_weight_a.to(device)
+    batch.endpoint_weight_b = batch.endpoint_weight_b.to(device)
 
 
 def _geometry_losses(module, out_a, out_b, batch, *, training: bool):
@@ -25,6 +28,8 @@ def _geometry_losses(module, out_a, out_b, batch, *, training: bool):
         size_mask=batch.size_mask,
         jaccard=batch.jaccard,
         iou_mask=batch.iou_mask,
+        endpoint_weight_a=batch.endpoint_weight_a,
+        endpoint_weight_b=batch.endpoint_weight_b,
         min_width=module.model.config.hyper_min_margin,
         smooth_temperature=(
             module.smooth_intersection_temperature if training else None
@@ -63,18 +68,12 @@ def run_pair_training_step(module, batch: ContrastivePairBatch) -> torch.Tensor:
     out_a = module(batch.batch_a)
     out_b = module(batch.batch_b)
 
-    losses_a = module.model.compute_loss(
-        out_a,
-        batch.batch_a,
-        graph_loss_weight=module.graph_loss_weight,
+    l_sup = module.graph_loss_weight * compute_weighted_graph_loss(
+        torch.cat((out_a.graph_pred, out_b.graph_pred), dim=0),
+        torch.cat((batch.batch_a.y, batch.batch_b.y), dim=0),
+        torch.cat((batch.endpoint_weight_a, batch.endpoint_weight_b), dim=0),
+        coverage_target_keys=module.coverage_target_keys,
     )
-    losses_b = module.model.compute_loss(
-        out_b,
-        batch.batch_b,
-        graph_loss_weight=module.graph_loss_weight,
-    )
-
-    l_sup = losses_a["graph_loss"] + losses_b["graph_loss"]
     geometry_losses = _geometry_losses(module, out_a, out_b, batch, training=True)
     warmup = (
         1.0
@@ -90,8 +89,6 @@ def run_pair_training_step(module, batch: ContrastivePairBatch) -> torch.Tensor:
 
     module.log_dict(
         {
-            "train/graph_loss_a": losses_a["graph_loss"].detach(),
-            "train/graph_loss_b": losses_b["graph_loss"].detach(),
             "train/supervised_loss": l_sup.detach(),
             "train/iou_loss": geometry_losses.iou_loss.detach(),
             "train/volume_loss": geometry_losses.volume_loss.detach(),
@@ -136,7 +133,9 @@ def run_pair_validation_step(module, batch: ContrastivePairBatch) -> torch.Tenso
         jaccard=batch.jaccard,
         iou_mask=batch.iou_mask,
     )
-    total = module.lambda_iou * losses.iou_loss + module.lambda_volume * losses.volume_loss
+    total = (
+        module.lambda_iou * losses.iou_loss + module.lambda_volume * losses.volume_loss
+    )
     values = {
         "val/pair_total_loss": total.detach(),
         "val/pair_iou_loss": losses.iou_loss.detach(),

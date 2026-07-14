@@ -67,7 +67,11 @@ class TrainerConfig:
 
     # 对比学习超矩形配置
     contrastive_batch_size: int = 16  # 对比 DataLoader batch 大小
-    contrastive_pairs_per_sample: int = 4  # 每个样本最多构造的同模块 pair 数
+    pair_candidate_pool_size: int = 128
+    pair_relative_low_quota: int = 2
+    pair_relative_mid_quota: int = 1
+    pair_relative_high_quota: int = 1
+    pair_sampling_seed: int = 42
 
     # coverage-vector pair 对比学习配置（joint mode）
     joint_contrastive: bool = False  # 启用 pair 对比训练
@@ -79,3 +83,16 @@ class TrainerConfig:
 
     # 图回归目标选择
     coverage_target_keys: tuple = ("branch",)  # 实际用于 loss 的覆盖率列子集
+
+    def __post_init__(self) -> None:
+        if self.pair_candidate_pool_size <= 0:
+            raise ValueError("pair_candidate_pool_size must be positive")
+        quotas = (
+            self.pair_relative_low_quota,
+            self.pair_relative_mid_quota,
+            self.pair_relative_high_quota,
+        )
+        if any(quota < 0 for quota in quotas):
+            raise ValueError("relative pair quotas must be non-negative")
+        if sum(quotas) > self.pair_candidate_pool_size:
+            raise ValueError("relative pair quotas exceed pair_candidate_pool_size")

@@ -11,6 +11,10 @@ One of line, condition, toggle, FSM, or branch coverage. Each type has its own e
 The covered elements of one coverage type for a single sample.
 _Avoid_: Coverage vector, when referring only to the covered elements rather than their serialized representation
 
+**Test Stimulus**:
+A dataset-local test input identified by `test_id`. Samples in the same dataset that share a Test Stimulus may describe different RTL modules exercised by the same input.
+_Avoid_: Sample, when referring to the input shared across module-specific records
+
 **Coverage Density**:
 The cardinality of a Coverage Set divided by the number of elements in that Coverage Type's universe.
 _Avoid_: Coverage volume
@@ -28,3 +32,11 @@ The equal-weighted mean of defined per-type Jaccard similarities. A type whose u
 **Geometric Similarity**:
 The equal-weighted mean of defined per-type true-volume intersection-over-union values between Coverage Subrectangles.
 _Avoid_: Mean axis IoU
+
+**Geometry Pair**:
+Two samples for the same RTL module whose typed Coverage Sets provide density and Jaccard supervision for Coverage Subrectangles.
+_Avoid_: Cross-module pair
+
+**Relative Similarity Stratum**:
+The relative-low, relative-mid, or relative-high rank region of an anchor sample's same-module Geometry Pair candidates. A relative-low candidate is not necessarily low in absolute Coverage Similarity.
+_Avoid_: Dissimilar pair, negative pair

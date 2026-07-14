@@ -254,8 +254,14 @@ Joint contrastive 模式直接使用新版 `dataset.v1` 普通数据集，不再
 }
 ```
 
-训练时会在同一 `module_name` 内构造 `(a, b)` pair。joint contrastive
-模式下监督损失只计算 `a` 和 `b` 各自的图级覆盖率回归。
+训练时，每个有效样本作为 anchor，从同一数据源、同一 `module_name` 的候选中
+按 anchor 局部 Coverage Similarity 排名采样 relative-low/mid/high pair。
+训练 pair 使用 `seed + epoch` 确定性重采样，同一无序 pair 每个 epoch 最多出现
+一次；验证 pair 固定。graph 和 volume 这两个 endpoint-local loss 使用
+inverse-degree 权重保持样本等权，IoU loss 对唯一 pair 等权。
+
+自动验证集按 `(dataset_dir, test_id)` 整组划分，保证同一个 Test Stimulus 不会
+同时出现在训练和验证中，并保证验证 module 在训练集中仍有样本。
 每种 coverage type 对应一个十维子矩形。子矩形真实体积监督为该类型的
 `covered_count / element_count`，pair 的真实体积 IoU 监督为 covered-set
 Jaccard。共同未覆盖的位置不参与相似度：
@@ -280,7 +286,11 @@ uv run python main.py \
     --joint-contrastive \
     --use-hyperrectangle \
     --contrastive-batch-size 16 \
-    --contrastive-pairs-per-sample 4 \
+    --pair-candidate-pool-size 128 \
+    --pair-relative-low-quota 2 \
+    --pair-relative-mid-quota 1 \
+    --pair-relative-high-quota 1 \
+    --pair-sampling-seed 42 \
     --lambda-ce 1.0 \
     --lambda-iou 1.0 \
     --lambda-volume 0.25 \
@@ -291,7 +301,11 @@ uv run python main.py \
 
 可选项：
 
-- `--contrastive-pairs-per-sample`：每个样本最多构造的同模块 pair 数。
+- `--pair-candidate-pool-size`：每个 anchor 最多检查的同模块候选数。
+- `--pair-relative-low-quota`：anchor 局部最低四分位采样数。
+- `--pair-relative-mid-quota`：anchor 局部中间区间采样数。
+- `--pair-relative-high-quota`：anchor 局部最高四分位采样数。
+- `--pair-sampling-seed`：训练 pair 使用 `seed + epoch` 重采样的基础 seed。
 - `--lambda-iou`：逐类型真实体积 IoU 对齐权重。
 - `--lambda-volume`：单样本真实体积校准权重。
 - `--volume-warmup-epochs`：体积权重线性 warmup epoch 数。

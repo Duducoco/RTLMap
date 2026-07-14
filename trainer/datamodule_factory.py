@@ -34,6 +34,9 @@ class JointTrainDataModule(L.LightningDataModule):
             self._pair_val_dm.setup(stage)
 
     def train_dataloader(self):
+        trainer = getattr(self, "_trainer", None)
+        epoch = int(trainer.current_epoch) if trainer is not None else 0
+        self._pair_dm.set_epoch(epoch)
         return self._pair_dm.train_dataloader()
 
     def val_dataloader(self):
@@ -59,7 +62,11 @@ def build_training_datamodule(
             dataset_dir=dataset_dir,
             batch_size=trainer_config.contrastive_batch_size,
             num_workers=min(trainer_config.num_workers, 4),
-            pairs_per_sample=trainer_config.contrastive_pairs_per_sample,
+            candidate_pool_size=trainer_config.pair_candidate_pool_size,
+            relative_low_quota=trainer_config.pair_relative_low_quota,
+            relative_mid_quota=trainer_config.pair_relative_mid_quota,
+            relative_high_quota=trainer_config.pair_relative_high_quota,
+            sampling_seed=trainer_config.pair_sampling_seed,
             text_encoder_config=text_encoder_config,
             processed_root=str(Path(data_root) / "train"),
             asm_chunk_files=64,
@@ -69,7 +76,11 @@ def build_training_datamodule(
             batch_size=trainer_config.contrastive_batch_size,
             num_workers=min(trainer_config.num_workers, 4),
             shuffle=False,
-            pairs_per_sample=trainer_config.contrastive_pairs_per_sample,
+            candidate_pool_size=trainer_config.pair_candidate_pool_size,
+            relative_low_quota=trainer_config.pair_relative_low_quota,
+            relative_mid_quota=trainer_config.pair_relative_mid_quota,
+            relative_high_quota=trainer_config.pair_relative_high_quota,
+            sampling_seed=trainer_config.pair_sampling_seed,
             text_encoder_config=text_encoder_config,
             processed_root=str(Path(data_root) / "train"),
             asm_chunk_files=64,

@@ -89,6 +89,7 @@ class LightningTrainer:
             log_every_n_steps=config.log_every_n_steps,
             # sanity check
             num_sanity_val_steps=config.num_sanity_val_steps,
+            reload_dataloaders_every_n_epochs=(1 if config.joint_contrastive else 0),
         )
 
     def _create_logger(self, logger_type: str):

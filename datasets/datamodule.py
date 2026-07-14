@@ -6,6 +6,8 @@ import json
 import warnings
 import logging
 import os
+import random
+from collections import defaultdict
 from multiprocessing import Pool
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Callable
@@ -17,6 +19,7 @@ import torch
 import lightning as L
 from torch_geometric.data import Dataset
 from torch_geometric.loader import DataLoader as PyGDataLoader
+from torch.utils.data import Subset
 
 from .asm_encoding import load_asm_encodings as _load_asm_encodings
 from .data_types import DualGraphData
@@ -34,6 +37,62 @@ from .samplers import RtlSizeBucketSampler
 from .targets import extract_targets_from_sample as _extract_targets_from_sample
 
 logger = logging.getLogger(__name__)
+
+
+def grouped_stimulus_split_indices(
+    samples: list[dict], *, val_fraction: float = 0.1, seed: int = 42
+) -> tuple[list[int], list[int]]:
+    """Split whole Test Stimuli while keeping every validation module in train."""
+    if not samples:
+        raise ValueError("cannot split an empty dataset")
+    if not 0.0 < val_fraction < 1.0:
+        raise ValueError("val_fraction must be between zero and one")
+
+    stimulus_groups: dict[tuple[str, str], list[int]] = defaultdict(list)
+    module_counts: dict[tuple[str, str], int] = defaultdict(int)
+    for index, sample in enumerate(samples):
+        source = str(sample["_dataset_dir"])
+        test_id = sample.get("test_id")
+        if not test_id:
+            raise ValueError(f"sample {sample.get('sample_id')} is missing test_id")
+        stimulus_groups[(source, str(test_id))].append(index)
+        module_counts[(source, str(sample["module_name"]))] += 1
+
+    group_keys = sorted(stimulus_groups)
+    random.Random(seed).shuffle(group_keys)
+    target_val_size = max(1, int(len(samples) * val_fraction))
+    remaining_by_module = dict(module_counts)
+    val_indices: list[int] = []
+
+    for group_key in group_keys:
+        if len(val_indices) >= target_val_size:
+            break
+        group_indices = stimulus_groups[group_key]
+        removed_by_module: dict[tuple[str, str], int] = defaultdict(int)
+        for index in group_indices:
+            sample = samples[index]
+            module_key = (
+                str(sample["_dataset_dir"]),
+                str(sample["module_name"]),
+            )
+            removed_by_module[module_key] += 1
+        if any(
+            remaining_by_module[module_key] - removed_count <= 0
+            for module_key, removed_count in removed_by_module.items()
+        ):
+            continue
+        val_indices.extend(group_indices)
+        for module_key, removed_count in removed_by_module.items():
+            remaining_by_module[module_key] -= removed_count
+
+    if not val_indices:
+        raise RuntimeError(
+            "cannot form a Test Stimulus validation split while retaining "
+            "every validation module in training"
+        )
+    val_set = set(val_indices)
+    train_indices = [index for index in range(len(samples)) if index not in val_set]
+    return train_indices, sorted(val_indices)
 
 
 def _build_and_save_labels(
@@ -378,21 +437,24 @@ class DualGraphDataModule(L.LightningDataModule):
                 self.train_indices = list(range(len(full_train_dataset)))
                 self.val_indices = None
             else:
-                from torch.utils.data import random_split
-
                 full_len = len(full_train_dataset)
-                val_len = max(1, int(full_len * 0.1))
-                train_len = full_len - val_len
-                split_gen = torch.Generator().manual_seed(42)
-                self.train_dataset, self.val_dataset = random_split(
-                    full_train_dataset,
-                    [train_len, val_len],
-                    generator=split_gen,
+                samples = _read_manifest_samples_from_dirs(
+                    _normalize_dataset_dirs(self.dataset_dir)
                 )
-                self.train_indices = list(self.train_dataset.indices)
-                self.val_indices = list(self.val_dataset.indices)
+                if len(samples) != full_len:
+                    raise RuntimeError(
+                        "processed dataset size does not match manifest samples: "
+                        f"{full_len} != {len(samples)}"
+                    )
+                self.train_indices, self.val_indices = grouped_stimulus_split_indices(
+                    samples, val_fraction=0.1, seed=42
+                )
+                self.train_dataset = Subset(full_train_dataset, self.train_indices)
+                self.val_dataset = Subset(full_train_dataset, self.val_indices)
                 logger.info(
-                    "val 集缺失，自动划分: train=%d, val=%d", train_len, val_len
+                    "val 集缺失，按 Test Stimulus 自动划分: train=%d, val=%d",
+                    len(self.train_indices),
+                    len(self.val_indices),
                 )
 
         if stage == "test" or stage is None:

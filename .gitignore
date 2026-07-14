@@ -51,3 +51,4 @@ stats.json
 docs/*
 !docs/adr/
 !docs/adr/*.md
+!docs/relative-stratified-pair-sampling-plan.md

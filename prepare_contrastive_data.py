@@ -72,7 +72,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--contrastive-batch-size", type=int, default=16)
-    parser.add_argument("--contrastive-pairs-per-sample", type=int, default=4)
+    parser.add_argument("--pair-candidate-pool-size", type=int, default=128)
+    parser.add_argument("--pair-relative-low-quota", type=int, default=2)
+    parser.add_argument("--pair-relative-mid-quota", type=int, default=1)
+    parser.add_argument("--pair-relative-high-quota", type=int, default=1)
+    parser.add_argument("--pair-sampling-seed", type=int, default=42)
     parser.add_argument("--text-model-name", default="microsoft/codebert-base")
     parser.add_argument("--text-output-dim", type=int, default=256)
     parser.add_argument("--text-max-length", type=int, default=512)
@@ -145,7 +149,11 @@ def main() -> None:
         dataset_dir=dataset_dirs,
         batch_size=args.contrastive_batch_size,
         num_workers=0,
-        pairs_per_sample=args.contrastive_pairs_per_sample,
+        candidate_pool_size=args.pair_candidate_pool_size,
+        relative_low_quota=args.pair_relative_low_quota,
+        relative_mid_quota=args.pair_relative_mid_quota,
+        relative_high_quota=args.pair_relative_high_quota,
+        sampling_seed=args.pair_sampling_seed,
         text_encoder_config=text_config,
         processed_root=str(Path(args.data_root) / "train"),
         asm_chunk_files=args.asm_chunk_files,
