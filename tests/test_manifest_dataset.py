@@ -14,7 +14,9 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from datasets import DualGraphDataset
-from datasets.coverage_vector_similarity import compute_coverage_vector_agreement
+from datasets.coverage_vector_similarity import (
+    compute_coverage_vector_positive_similarity,
+)
 from datasets.pair_datamodule import ContrastivePairDataset
 from trainer.config import TrainerConfig
 from trainer.utils import _build_training_datamodule
@@ -163,23 +165,38 @@ def _sample_entry_with_vectors(
     return sample
 
 
-def test_coverage_vector_agreement_counts_matching_zeros() -> None:
+def test_coverage_vector_positive_similarity_uses_jaccard() -> None:
     vec_a = _coverage_vectors(line_ids=[0], branch_ids=[0])
     vec_b = _coverage_vectors(line_ids=[0], branch_ids=[1])
 
-    similarity = compute_coverage_vector_agreement(vec_a, vec_b)
+    similarity = compute_coverage_vector_positive_similarity(vec_a, vec_b)
 
-    # Long vector length is 5. Covered(A)={0,2}, Covered(B)={0,3}.
-    # Same bits are global ids {0,1,4}; mismatches are {2,3}.
-    assert math.isclose(similarity, 3 / 5)
+    # line has Jaccard 1.0; branch has Jaccard 0.0. Other empty types are omitted.
+    assert math.isclose(similarity, 0.5)
 
 
-def test_coverage_vector_agreement_rejects_out_of_range_item_id() -> None:
+def test_coverage_vector_positive_similarity_does_not_count_matching_zeros() -> None:
+    vec_a = _coverage_vectors(line_ids=[0], branch_ids=[0])
+    vec_b = _coverage_vectors(line_ids=[1], branch_ids=[1])
+
+    assert compute_coverage_vector_positive_similarity(vec_a, vec_b) == 0.0
+
+
+def test_coverage_vector_positive_similarity_returns_zero_for_two_empty_reports() -> (
+    None
+):
+    vec_a = _coverage_vectors()
+    vec_b = _coverage_vectors()
+
+    assert compute_coverage_vector_positive_similarity(vec_a, vec_b) == 0.0
+
+
+def test_coverage_vector_positive_similarity_rejects_out_of_range_item_id() -> None:
     vec_a = _coverage_vectors(line_count=2, line_ids=[2])
     vec_b = _coverage_vectors(line_count=2, line_ids=[])
 
     try:
-        compute_coverage_vector_agreement(vec_a, vec_b)
+        compute_coverage_vector_positive_similarity(vec_a, vec_b)
     except ValueError as exc:
         assert "out of range" in str(exc)
     else:
@@ -252,7 +269,7 @@ def test_pair_contrastive_dataset_uses_dataset_v1_coverage_vectors() -> None:
         data_a, data_b, similarity = dataset[0]
         assert data_a.edge_labels.tolist() == [0]
         assert data_b.edge_labels.tolist() == [0]
-        assert math.isclose(similarity, 3 / 5)
+        assert math.isclose(similarity, 0.5)
 
 
 def test_pair_contrastive_dataset_does_not_pair_same_module_across_dirs() -> None:
@@ -481,7 +498,7 @@ def test_vector_contrastive_manifest_builds_pair_train_datamodule() -> None:
         assert has_validation is True
         assert batch.batch_a.edge_labels.numel() == 1
         assert batch.batch_b.edge_labels.numel() == 1
-        assert torch.allclose(batch.similarity, torch.tensor([3 / 5]))
+        assert torch.allclose(batch.similarity, torch.tensor([0.5]))
 
 
 def test_joint_contrastive_pair_training_excludes_auto_val_indices() -> None:

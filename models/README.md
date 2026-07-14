@@ -63,7 +63,8 @@ L_total = lambda_ce * (L_graph(a) + L_graph(b))
         + lambda_cl * L_contrastive(intersection(a, b), similarity(a, b))
 ```
 
-`similarity(a, b)` 来自 `targets.coverage_vectors` 的完整二值向量 agreement，不使用 merged report，也不使用边分类标签。
+`similarity(a, b)` 来自 `targets.coverage_vectors` 的 covered-set positive
+Jaccard（按 coverage type 等权平均），不使用 merged report，也不使用边分类标签。
 
 ## 测试
 

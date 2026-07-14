@@ -14,7 +14,8 @@ from torch.utils.data import DataLoader, Dataset
 from torch_geometric.data import Batch
 
 from .coverage_vector_similarity import (
-    compute_coverage_vector_agreement,
+    compute_coverage_vector_positive_similarity,
+    covered_global_ids,
     total_coverage_vector_length,
 )
 from .data_types import ContrastivePairBatch, DualGraphData
@@ -91,7 +92,15 @@ class ContrastivePairDataset(Dataset):
                 for idx_b in indices[pos + 1 : upper]:
                     sample_a = self._samples[idx_a]
                     sample_b = self._samples[idx_b]
-                    similarity = compute_coverage_vector_agreement(
+                    covered_a = covered_global_ids(
+                        sample_a["targets"]["coverage_vectors"]
+                    )
+                    covered_b = covered_global_ids(
+                        sample_b["targets"]["coverage_vectors"]
+                    )
+                    if not covered_a and not covered_b:
+                        continue
+                    similarity = compute_coverage_vector_positive_similarity(
                         sample_a["targets"]["coverage_vectors"],
                         sample_b["targets"]["coverage_vectors"],
                     )

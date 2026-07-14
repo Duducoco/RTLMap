@@ -13,7 +13,7 @@ RTLMap 是一个面向硬件验证覆盖率预测的双图 GNN 训练项目。�
 - **多覆盖率目标**：图级回归可选择 `branch`、`line`、`fsm`、`toggle`、`condition` 子集。
 - **CodeBERT 指令编码**：可选启用 HuggingFace CodeBERT 为 ASM 指令生成文本编码；未启用时回退为零向量。
 - **缓存与去重**：预处理阶段缓存 RTL/ASM 图结构与 ASM 编码，减少重复构建成本。
-- **Joint Contrastive 训练**：使用 `targets.coverage_vectors` 构造 `(a, b)` pair，并用覆盖向量 agreement 监督超矩形对比损失。
+- **Joint Contrastive 训练**：使用 `targets.coverage_vectors` 构造 `(a, b)` pair，并用 covered-set positive similarity 监督超矩形对比损失。
 - **Lightning 训练封装**：提供 checkpoint、early stopping、TensorBoard/CSV 日志和测试入口。
 
 ## 项目结构
@@ -256,17 +256,19 @@ Joint contrastive 模式直接使用新版 `dataset.v1` 普通数据集，不再
 
 训练时会在同一 `module_name` 内构造 `(a, b)` pair。joint contrastive
 模式下监督损失只计算 `a` 和 `b` 各自的图级覆盖率回归。
-对比损失将两个覆盖报告的 `coverage_vectors` 拼接为一个长二值向量后计算
-agreement 相似度：
+对比损失按 coverage type 计算 covered-set Jaccard，再对有正例的 coverage type
+做等权平均。共同未覆盖的位置不参与相似度：
 
 ```text
-Covered(sample) = {offset[type] + item.id | item.label == 1}
-similarity(a, b) = 1 - |Covered(a) △ Covered(b)| / N
+Covered_type(sample) = {item.id | item.label == 1}
+similarity_type(a, b) = |Covered_type(a) ∩ Covered_type(b)|
+                        / |Covered_type(a) ∪ Covered_type(b)|
+similarity(a, b) = mean(similarity_type(a, b))
 ```
 
-其中 `N` 是按 `line, condition, toggle, fsm, branch` 顺序拼接后的总
-`element_count`，`△` 是 symmetric difference。未出现在 `items` 中的位置
-视为明确的 `0`，因此 0/0 和 1/1 都会提高相似度。
+没有任何正例的 coverage type 不参与平均；两个报告都没有正例时，相似度为
+`0.0`，且该 pair 会在训练数据构造阶段跳过。这样可以避免稀疏向量中的共同
+`0/0` 主导监督。
 
 训练命令：
 

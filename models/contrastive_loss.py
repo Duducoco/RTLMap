@@ -14,7 +14,7 @@ def compute_contrastive_loss(
     loss_type: str = "mse",
     margin: float = 0.2,
 ) -> torch.Tensor:
-    """对齐超矩形交集度与覆盖向量 agreement 相似度。
+    """对齐超矩形交集度与 covered-set positive similarity。
 
     Args:
         output_a: ModelOutput（含 hyper_min, hyper_max）

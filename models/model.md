@@ -98,7 +98,7 @@ intersection(a, b)
 
 ## 8. 覆盖向量相似度
 
-joint contrastive 模式使用 `targets.coverage_vectors`，按固定顺序拼接：
+joint contrastive 模式使用 `targets.coverage_vectors`，按 coverage type 分开计算：
 
 ```text
 line, condition, toggle, fsm, branch
@@ -107,11 +107,14 @@ line, condition, toggle, fsm, branch
 相似度定义：
 
 ```text
-Covered(sample) = {offset[type] + item.id | item.label == 1}
-similarity(a, b) = 1 - |Covered(a) △ Covered(b)| / N
+Covered_type(sample) = {item.id | item.label == 1}
+similarity_type(a, b) = |Covered_type(a) ∩ Covered_type(b)|
+                        / |Covered_type(a) ∪ Covered_type(b)|
+similarity(a, b) = mean(similarity_type(a, b))
 ```
 
-这里 `N` 是拼接后总长度。未出现在 `items` 中的位置视为明确的 0，因此大量 0 不会被丢弃，0/0 匹配也会提升相似度。
+没有正例的 coverage type 不参与平均。两个报告都没有正例时，相似度为 `0.0`，
+该 pair 在数据集构造阶段被过滤；共同未覆盖的位置不会主导监督。
 
 ## 9. Joint Loss
 
