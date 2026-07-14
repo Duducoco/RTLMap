@@ -17,8 +17,8 @@
    - `CoverageHead`：单个覆盖率目标的 MLP 预测头。
 
 4. **hyperrectangle.py**
-   - `HyperrectangleHead`：joint contrastive 模式下生成超矩形表示。
-   - `hyperrectangle_intersection`：计算两个样本超矩形的交集度。
+   - `HyperrectangleHead`：为五种 coverage type 分别生成十维 center-radius 子矩形。
+   - `hyperrectangle_geometry`：计算逐类型硬或平滑交集、真实体积和真实体积 IoU。
 
 5. **losses.py**
    - `compute_supervised_losses`：只计算图级覆盖率回归损失。
@@ -29,8 +29,8 @@
 output = model(batch)
 
 output.graph_pred      # [B, num_coverage_targets]
-output.hyper_min       # [B, hidden_dim]，仅 use_hyperrectangle=True
-output.hyper_max       # [B, hidden_dim]，仅 use_hyperrectangle=True
+output.hyper_min       # [B, 5, 10]，仅 use_hyperrectangle=True
+output.hyper_max       # [B, 5, 10]，仅 use_hyperrectangle=True
 output.rtl_graph_emb   # [B, hidden_dim]，供对比学习使用
 ```
 
@@ -56,15 +56,16 @@ L_total = L_graph
 
 ## Joint Contrastive
 
-joint contrastive 模式额外使用覆盖向量相似度监督超矩形交集度：
+joint contrastive 模式额外使用 coverage density 和 Jaccard 监督真实体积几何：
 
 ```text
 L_total = lambda_ce * (L_graph(a) + L_graph(b))
-        + lambda_cl * L_contrastive(intersection(a, b), similarity(a, b))
+        + lambda_iou * L_iou(true_volume_iou(a, b), jaccard(a, b))
+        + lambda_volume * L_volume(box_volume, coverage_density)
 ```
 
-`similarity(a, b)` 来自 `targets.coverage_vectors` 的 covered-set positive
-Jaccard（按 coverage type 等权平均），不使用 merged report，也不使用边分类标签。
+五种 coverage type 分开计算，再对有效类型等权平均。训练使用平滑交集和
+log-IoU，验证与推理使用硬交集；不使用 merged report，也不使用边分类标签。
 
 ## 测试
 

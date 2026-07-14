@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 import torch
+import lightning as L
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -18,7 +19,9 @@ from datasets.coverage_vector_similarity import (
     compute_coverage_vector_positive_similarity,
 )
 from datasets.pair_datamodule import ContrastivePairDataset
+from models import ModelConfig
 from trainer.config import TrainerConfig
+from trainer.lightning_module import DualGraphLightningModule
 from trainer.utils import _build_training_datamodule
 
 
@@ -266,10 +269,14 @@ def test_pair_contrastive_dataset_uses_dataset_v1_coverage_vectors() -> None:
             datamodule_module._load_asm_encodings = original_load_asm_encodings
 
         assert len(dataset) == 1
-        data_a, data_b, similarity = dataset[0]
+        data_a, data_b, targets = dataset[0]
         assert data_a.edge_labels.tolist() == [0]
         assert data_b.edge_labels.tolist() == [0]
-        assert math.isclose(similarity, 0.5)
+        assert targets.density_a == (0.5, 0.0, 0.0, 0.0, 1 / 3)
+        assert targets.density_b == (0.5, 0.0, 0.0, 0.0, 1 / 3)
+        assert targets.size_mask == (True, False, False, False, True)
+        assert targets.jaccard == (1.0, 0.0, 0.0, 0.0, 0.0)
+        assert targets.iou_mask == (True, False, False, False, True)
 
 
 def test_pair_contrastive_dataset_does_not_pair_same_module_across_dirs() -> None:
@@ -514,7 +521,7 @@ def test_joint_contrastive_pair_training_excludes_auto_val_indices() -> None:
                 "samples": "samples.jsonlines",
                 "rtl_graphs": "rtl_graphs",
                 "asm_graphs": "asm_graphs",
-                "total": 12,
+                "total": 20,
                 "errors": 0,
             },
         )
@@ -524,7 +531,7 @@ def test_joint_contrastive_pair_training_excludes_auto_val_indices() -> None:
                 None,
                 _coverage_vectors(line_ids=[idx % 2], branch_ids=[idx % 2]),
             )
-            for idx in range(12)
+            for idx in range(20)
         ]
         (dataset_dir / "samples.jsonlines").write_text(
             "".join(json.dumps(s) + "\n" for s in samples),
@@ -552,12 +559,49 @@ def test_joint_contrastive_pair_training_excludes_auto_val_indices() -> None:
             for pair in dm._pair_dm._dataset._pairs
             for sample_idx in pair[:2]
         }
+        val_pair_indices = {
+            sample_idx
+            for pair in dm._pair_val_dm._dataset._pairs
+            for sample_idx in pair[:2]
+        }
 
         assert train_indices
         assert val_indices
         assert pair_indices
         assert pair_indices <= train_indices
         assert pair_indices.isdisjoint(val_indices)
+        assert val_pair_indices
+        assert val_pair_indices <= val_indices
+        assert val_pair_indices.isdisjoint(train_indices)
+
+        val_loaders = dm.val_dataloader()
+        assert isinstance(val_loaders, list)
+        assert len(val_loaders) == 2
+        pair_batch = next(iter(val_loaders[1]))
+        assert pair_batch.jaccard.shape[1] == 5
+        assert pair_batch.density_a.shape == pair_batch.jaccard.shape
+
+        module = DualGraphLightningModule(
+            model_config=ModelConfig(
+                hidden_dim=16,
+                num_gnn_layers=1,
+                use_hyperrectangle=True,
+            ),
+            joint_contrastive=True,
+        )
+        trainer = L.Trainer(
+            accelerator="cpu",
+            devices=1,
+            logger=False,
+            enable_checkpointing=False,
+            enable_progress_bar=False,
+            limit_val_batches=1,
+        )
+        results = trainer.validate(module, datamodule=dm, verbose=False)
+
+        assert len(results) == 2
+        assert "val/total_loss" in results[0]
+        assert "val/pair_iou_loss" in results[1]
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 
 COVERAGE_VECTOR_TYPES: tuple[str, ...] = (
     "line",
@@ -12,6 +13,17 @@ COVERAGE_VECTOR_TYPES: tuple[str, ...] = (
     "fsm",
     "branch",
 )
+
+
+@dataclass(frozen=True)
+class CoverageGeometryTargets:
+    """Per-type set measures used to supervise coverage-space geometry."""
+
+    density_a: tuple[float, ...]
+    density_b: tuple[float, ...]
+    size_mask: tuple[bool, ...]
+    jaccard: tuple[float, ...]
+    iou_mask: tuple[bool, ...]
 
 
 def _element_count(vectors: Mapping, vector_type: str) -> int:
@@ -76,8 +88,27 @@ def compute_coverage_vector_positive_similarity(
 
     Coverage types with no positive element in either report are omitted from the
     mean, so matching zeroes cannot dominate the score. If all active types are
-    empty, the function returns ``0.0``; pair construction filters such pairs out.
+    empty, the function returns ``0.0``; pair IoU supervision masks those types.
     """
+    targets = compute_coverage_geometry_targets(vectors_a, vectors_b)
+    scores = [
+        score for score, active in zip(targets.jaccard, targets.iou_mask) if active
+    ]
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def compute_coverage_geometry_targets(
+    vectors_a: Mapping, vectors_b: Mapping
+) -> CoverageGeometryTargets:
+    """Return typed density and Jaccard targets without collapsing type structure."""
+    covered_a = _covered_ids_by_type(vectors_a)
+    covered_b = _covered_ids_by_type(vectors_b)
+    density_a: list[float] = []
+    density_b: list[float] = []
+    size_mask: list[bool] = []
+    jaccard: list[float] = []
+    iou_mask: list[bool] = []
+
     for vector_type in COVERAGE_VECTOR_TYPES:
         count_a = _element_count(vectors_a, vector_type)
         count_b = _element_count(vectors_b, vector_type)
@@ -87,12 +118,22 @@ def compute_coverage_vector_positive_similarity(
                 f"{count_a} != {count_b}"
             )
 
-    covered_a = _covered_ids_by_type(vectors_a)
-    covered_b = _covered_ids_by_type(vectors_b)
-    scores: list[float] = []
-    for vector_type in COVERAGE_VECTOR_TYPES:
+        exists = count_a > 0
         union = covered_a[vector_type] | covered_b[vector_type]
-        if not union:
-            continue
-        scores.append(len(covered_a[vector_type] & covered_b[vector_type]) / len(union))
-    return sum(scores) / len(scores) if scores else 0.0
+        density_a.append(len(covered_a[vector_type]) / count_a if exists else 0.0)
+        density_b.append(len(covered_b[vector_type]) / count_a if exists else 0.0)
+        size_mask.append(exists)
+        jaccard.append(
+            len(covered_a[vector_type] & covered_b[vector_type]) / len(union)
+            if union
+            else 0.0
+        )
+        iou_mask.append(bool(union))
+
+    return CoverageGeometryTargets(
+        density_a=tuple(density_a),
+        density_b=tuple(density_b),
+        size_mask=tuple(size_mask),
+        jaccard=tuple(jaccard),
+        iou_mask=tuple(iou_mask),
+    )

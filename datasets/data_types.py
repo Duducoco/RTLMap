@@ -117,4 +117,14 @@ class ContrastivePairBatch:
 
     batch_a: DualGraphData
     batch_b: DualGraphData
-    similarity: torch.Tensor
+    density_a: torch.Tensor
+    density_b: torch.Tensor
+    size_mask: torch.Tensor
+    jaccard: torch.Tensor
+    iou_mask: torch.Tensor
+
+    @property
+    def similarity(self) -> torch.Tensor:
+        """Equal-weighted per-pair Jaccard, retained as a derived convenience."""
+        weights = self.iou_mask.to(self.jaccard.dtype)
+        return (self.jaccard * weights).sum(dim=-1) / weights.sum(dim=-1).clamp_min(1)

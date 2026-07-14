@@ -67,6 +67,12 @@ def parse_args() -> argparse.Namespace:
     model.add_argument(
         "--hyper-min-margin", type=float, default=0.01, help="超矩形每维度最小宽度"
     )
+    model.add_argument(
+        "--hyperrectangle-dim-per-type",
+        type=int,
+        default=10,
+        help="每种 coverage type 的真实体积子矩形维度",
+    )
 
     # ── 训练超参数 ────────────────────────────────────────
     train_g = p.add_argument_group("训练")
@@ -157,9 +163,6 @@ def parse_args() -> argparse.Namespace:
         "--use-hyperrectangle", action="store_true", help="启用超矩形对比学习"
     )
     hyper.add_argument(
-        "--contrastive-loss-weight", type=float, default=0.5, help="对比损失权重"
-    )
-    hyper.add_argument(
         "--contrastive-batch-size",
         type=int,
         default=16,
@@ -170,18 +173,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=4,
         help="每个样本最多构造的同模块对比 pair 数",
-    )
-    hyper.add_argument(
-        "--contrastive-margin",
-        type=float,
-        default=0.2,
-        help="margin 模式下不相似对交集上限",
-    )
-    hyper.add_argument(
-        "--contrastive-loss-type",
-        choices=["mse", "bce", "margin"],
-        default="mse",
-        help="对比损失类型",
     )
 
     # ── coverage-vector pair 联合对比学习 (joint mode) ─────
@@ -195,7 +186,22 @@ def parse_args() -> argparse.Namespace:
         "--lambda-ce", type=float, default=1.0, help="a/b 两路监督损失的合并权重"
     )
     joint.add_argument(
-        "--lambda-cl", type=float, default=0.5, help="joint 模式下对比损失权重"
+        "--lambda-iou", type=float, default=1.0, help="逐类型真实体积 IoU 损失权重"
+    )
+    joint.add_argument(
+        "--lambda-volume", type=float, default=0.25, help="真实体积校准损失权重"
+    )
+    joint.add_argument(
+        "--volume-warmup-epochs",
+        type=int,
+        default=5,
+        help="真实体积损失权重线性 warmup 的 epoch 数",
+    )
+    joint.add_argument(
+        "--smooth-intersection-temperature",
+        type=float,
+        default=0.01,
+        help="训练阶段平滑交集温度；验证和推理始终使用硬交集",
     )
     # ── 运行模式 ──────────────────────────────────────────
     mode = p.add_argument_group("运行模式")
@@ -217,6 +223,7 @@ def build_model_config(args: argparse.Namespace) -> ModelConfig:
         asm_instruction_dim=args.text_output_dim,
         use_hyperrectangle=args.use_hyperrectangle or args.joint_contrastive,
         hyper_min_margin=args.hyper_min_margin,
+        hyperrectangle_dim_per_type=args.hyperrectangle_dim_per_type,
         coverage_target_keys=tuple(args.coverage_targets),
     )
 
@@ -243,16 +250,15 @@ def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
         precision=args.precision,
         fast_dev_run=args.fast_dev_run,
         log_every_n_steps=args.log_every_n_steps,
-        use_hyperrectangle=args.use_hyperrectangle,
-        contrastive_loss_weight=args.contrastive_loss_weight,
         contrastive_batch_size=args.contrastive_batch_size,
         contrastive_pairs_per_sample=args.contrastive_pairs_per_sample,
-        contrastive_margin=args.contrastive_margin,
-        contrastive_loss_type=args.contrastive_loss_type,
         coverage_target_keys=tuple(args.coverage_targets),
         joint_contrastive=args.joint_contrastive,
         lambda_ce=args.lambda_ce,
-        lambda_cl=args.lambda_cl,
+        lambda_iou=args.lambda_iou,
+        lambda_volume=args.lambda_volume,
+        volume_warmup_epochs=args.volume_warmup_epochs,
+        smooth_intersection_temperature=args.smooth_intersection_temperature,
     )
 
 
@@ -325,13 +331,10 @@ def main() -> None:
             sys.exit(1)
 
         datamodule = DualGraphDataModule(
-            data_root=args.data_root,
+            root=args.data_root,
             dataset_dir=args.dataset_dir,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
-            use_hyperrectangle=args.use_hyperrectangle or args.joint_contrastive,
-            coverage_target_keys=tuple(args.coverage_targets),
-            trainer_config=trainer_config,
             text_encoder_config=text_encoder_config,
         )
         datamodule.prepare_data()
@@ -345,13 +348,13 @@ def main() -> None:
             graph_loss_weight=args.graph_loss_weight,
             warmup_steps=args.warmup_steps,
             scheduler_type=args.scheduler,
-            contrastive_loss_weight=args.contrastive_loss_weight,
-            contrastive_loss_type=args.contrastive_loss_type,
-            contrastive_margin=args.contrastive_margin,
             coverage_target_keys=tuple(args.coverage_targets),
             joint_contrastive=args.joint_contrastive,
             lambda_ce=args.lambda_ce,
-            lambda_cl=args.lambda_cl,
+            lambda_iou=args.lambda_iou,
+            lambda_volume=args.lambda_volume,
+            volume_warmup_epochs=args.volume_warmup_epochs,
+            smooth_intersection_temperature=args.smooth_intersection_temperature,
         )
         lightning_trainer = LightningTrainer(
             trainer_config,

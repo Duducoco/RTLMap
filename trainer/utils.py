@@ -61,15 +61,13 @@ def train_model(
         graph_loss_weight=trainer_config.graph_loss_weight,
         warmup_steps=trainer_config.warmup_steps,
         scheduler_type=trainer_config.scheduler_type,
-        contrastive_loss_weight=trainer_config.contrastive_loss_weight
-        if trainer_config.use_hyperrectangle
-        else 0.0,
-        contrastive_loss_type=trainer_config.contrastive_loss_type,
-        contrastive_margin=trainer_config.contrastive_margin,
         coverage_target_keys=trainer_config.coverage_target_keys,
         joint_contrastive=trainer_config.joint_contrastive,
         lambda_ce=trainer_config.lambda_ce,
-        lambda_cl=trainer_config.lambda_cl,
+        lambda_iou=trainer_config.lambda_iou,
+        lambda_volume=trainer_config.lambda_volume,
+        volume_warmup_epochs=trainer_config.volume_warmup_epochs,
+        smooth_intersection_temperature=trainer_config.smooth_intersection_temperature,
         model_config_artifact=model_config_artifact,
     )
 

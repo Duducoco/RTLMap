@@ -59,7 +59,7 @@ def test_model_config_yaml_round_trip_preserves_inference_fields(tmp_path: Path)
     assert loaded == artifact
     assert model_config == _model_config()
     assert text_config == _text_config()
-    assert yaml.safe_load(path.read_text())["schema_version"] == "rtlmap_model_config.v1"
+    assert yaml.safe_load(path.read_text())["schema_version"] == "rtlmap_model_config.v2"
     assert loaded["model"]["coverage_target_keys"] == [
         "branch",
         "fsm",
@@ -67,6 +67,14 @@ def test_model_config_yaml_round_trip_preserves_inference_fields(tmp_path: Path)
         "condition",
         "toggle",
     ]
+    assert loaded["model"]["hyperrectangle_type_names"] == [
+        "line",
+        "condition",
+        "toggle",
+        "fsm",
+        "branch",
+    ]
+    assert loaded["model"]["hyperrectangle_dim_per_type"] == 10
     assert "num_graph_targets" not in loaded["model"]
 
 

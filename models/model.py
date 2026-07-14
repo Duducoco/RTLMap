@@ -66,7 +66,10 @@ class DualGraphFusionModel(nn.Module):
         # 超矩形头（条件创建）
         if config.use_hyperrectangle:
             self.hyperrectangle_head = HyperrectangleHead(
-                hidden_dim=config.hidden_dim, margin=config.hyper_min_margin
+                hidden_dim=config.hidden_dim,
+                num_types=len(config.hyperrectangle_type_names),
+                dim_per_type=config.hyperrectangle_dim_per_type,
+                margin=config.hyper_min_margin,
             )
 
     def forward(self, data: DualGraphData) -> ModelOutput:

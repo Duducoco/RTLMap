@@ -256,8 +256,9 @@ Joint contrastive 模式直接使用新版 `dataset.v1` 普通数据集，不再
 
 训练时会在同一 `module_name` 内构造 `(a, b)` pair。joint contrastive
 模式下监督损失只计算 `a` 和 `b` 各自的图级覆盖率回归。
-对比损失按 coverage type 计算 covered-set Jaccard，再对有正例的 coverage type
-做等权平均。共同未覆盖的位置不参与相似度：
+每种 coverage type 对应一个十维子矩形。子矩形真实体积监督为该类型的
+`covered_count / element_count`，pair 的真实体积 IoU 监督为 covered-set
+Jaccard。共同未覆盖的位置不参与相似度：
 
 ```text
 Covered_type(sample) = {item.id | item.label == 1}
@@ -266,9 +267,9 @@ similarity_type(a, b) = |Covered_type(a) ∩ Covered_type(b)|
 similarity(a, b) = mean(similarity_type(a, b))
 ```
 
-没有任何正例的 coverage type 不参与平均；两个报告都没有正例时，相似度为
-`0.0`，且该 pair 会在训练数据构造阶段跳过。这样可以避免稀疏向量中的共同
-`0/0` 主导监督。
+`element_count == 0` 的 coverage type 不参与体积监督；pair 双方在某类型的
+union 为空时，该类型不参与 IoU 监督。空 coverage set 仍通过体积目标学习最小
+体积。五个类型的有效 IoU 等权平均，避免稀疏向量中的共同 `0/0` 主导监督。
 
 训练命令：
 
@@ -281,14 +282,20 @@ uv run python main.py \
     --contrastive-batch-size 16 \
     --contrastive-pairs-per-sample 4 \
     --lambda-ce 1.0 \
-    --lambda-cl 0.5
+    --lambda-iou 1.0 \
+    --lambda-volume 0.25 \
+    --volume-warmup-epochs 5 \
+    --smooth-intersection-temperature 0.01 \
+    --hyperrectangle-dim-per-type 10
 ```
 
 可选项：
 
 - `--contrastive-pairs-per-sample`：每个样本最多构造的同模块 pair 数。
-- `--contrastive-loss-type`：`mse`、`bce` 或 `margin`。
-- `--contrastive-margin`：`margin` loss 的不相似对交集上限。
+- `--lambda-iou`：逐类型真实体积 IoU 对齐权重。
+- `--lambda-volume`：单样本真实体积校准权重。
+- `--volume-warmup-epochs`：体积权重线性 warmup epoch 数。
+- `--smooth-intersection-temperature`：仅训练阶段使用的平滑交集温度。
 ## 常用 CLI 参数
 
 | 参数 | 默认值 | 说明 |
@@ -310,6 +317,7 @@ uv run python main.py \
 | `--coverage-targets` | `branch` | 图级覆盖率目标 |
 | `--use-hyperrectangle` | `false` | 启用超矩形表示 |
 | `--joint-contrastive` | `false` | 启用 coverage-vector pair 对比训练 |
+| `--hyperrectangle-dim-per-type` | `10` | 每种 coverage type 的子矩形维度 |
 | `--fast-dev-run` | `false` | Lightning 快速调试模式 |
 | `--seed` | `None` | 全局随机种子 |
 

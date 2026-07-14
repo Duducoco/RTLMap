@@ -14,8 +14,8 @@ from torch.utils.data import DataLoader, Dataset
 from torch_geometric.data import Batch
 
 from .coverage_vector_similarity import (
-    compute_coverage_vector_positive_similarity,
-    covered_global_ids,
+    CoverageGeometryTargets,
+    compute_coverage_geometry_targets,
     total_coverage_vector_length,
 )
 from .data_types import ContrastivePairBatch, DualGraphData
@@ -65,7 +65,7 @@ class ContrastivePairDataset(Dataset):
                 "processed graph cache has fewer samples than the manifest; "
                 "run prepare_contrastive_data.py before joint contrastive training"
             )
-        self._pairs: list[tuple[int, int, float]] = []
+        self._pairs: list[tuple[int, int, CoverageGeometryTargets]] = []
         self._build_pairs()
 
     def _build_pairs(self) -> None:
@@ -92,31 +92,25 @@ class ContrastivePairDataset(Dataset):
                 for idx_b in indices[pos + 1 : upper]:
                     sample_a = self._samples[idx_a]
                     sample_b = self._samples[idx_b]
-                    covered_a = covered_global_ids(
-                        sample_a["targets"]["coverage_vectors"]
-                    )
-                    covered_b = covered_global_ids(
-                        sample_b["targets"]["coverage_vectors"]
-                    )
-                    if not covered_a and not covered_b:
-                        continue
-                    similarity = compute_coverage_vector_positive_similarity(
+                    targets = compute_coverage_geometry_targets(
                         sample_a["targets"]["coverage_vectors"],
                         sample_b["targets"]["coverage_vectors"],
                     )
-                    self._pairs.append((idx_a, idx_b, similarity))
+                    self._pairs.append((idx_a, idx_b, targets))
 
         logger.info("ContrastivePairDataset: built %d pairs", len(self._pairs))
 
     def __len__(self) -> int:
         return len(self._pairs)
 
-    def __getitem__(self, idx: int) -> tuple[DualGraphData, DualGraphData, float]:
-        idx_a, idx_b, similarity = self._pairs[idx]
+    def __getitem__(
+        self, idx: int
+    ) -> tuple[DualGraphData, DualGraphData, CoverageGeometryTargets]:
+        idx_a, idx_b, targets = self._pairs[idx]
         return (
             self._build_data(idx_a),
             self._build_data(idx_b),
-            similarity,
+            targets,
         )
 
     def _build_data(self, sample_idx: int) -> DualGraphData:
@@ -124,19 +118,23 @@ class ContrastivePairDataset(Dataset):
 
 
 def contrastive_pair_collate(
-    pair_list: list[tuple[DualGraphData, DualGraphData, float]],
+    pair_list: list[tuple[DualGraphData, DualGraphData, CoverageGeometryTargets]],
 ) -> ContrastivePairBatch:
-    items_a, items_b, sims = zip(*pair_list)
+    items_a, items_b, targets = zip(*pair_list)
     follow = ["asm_node_type"]
     return ContrastivePairBatch(
         batch_a=Batch.from_data_list(list(items_a), follow_batch=follow),
         batch_b=Batch.from_data_list(list(items_b), follow_batch=follow),
-        similarity=torch.tensor(sims, dtype=torch.float32),
+        density_a=torch.tensor([target.density_a for target in targets]),
+        density_b=torch.tensor([target.density_b for target in targets]),
+        size_mask=torch.tensor([target.size_mask for target in targets]),
+        jaccard=torch.tensor([target.jaccard for target in targets]),
+        iou_mask=torch.tensor([target.iou_mask for target in targets]),
     )
 
 
 class ContrastivePairDataModule:
-    """Training-only DataModule for pair contrastive batches."""
+    """DataModule for typed coverage-geometry pair batches."""
 
     def __init__(
         self,
@@ -190,6 +188,18 @@ class ContrastivePairDataModule:
             self._dataset,
             batch_size=self.batch_size,
             shuffle=self.shuffle,
+            num_workers=self.num_workers,
+            collate_fn=contrastive_pair_collate,
+            pin_memory=True,
+        )
+
+    def val_dataloader(self) -> DataLoader:
+        if self._dataset is None:
+            self.setup()
+        return DataLoader(
+            self._dataset,
+            batch_size=self.batch_size,
+            shuffle=False,
             num_workers=self.num_workers,
             collate_fn=contrastive_pair_collate,
             pin_memory=True,

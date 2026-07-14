@@ -13,7 +13,7 @@ from text_encoder import TextEncoderConfig
 from .data_types import ModelConfig
 
 
-SCHEMA_VERSION = "rtlmap_model_config.v1"
+SCHEMA_VERSION = "rtlmap_model_config.v2"
 
 
 class ModelConfigMismatch(ValueError):
@@ -82,6 +82,9 @@ def load_model_config_artifact(
     _require_exact_fields(model_raw, model_fields, "model")
     model_values = dict(model_raw)
     model_values["coverage_target_keys"] = tuple(model_values["coverage_target_keys"])
+    model_values["hyperrectangle_type_names"] = tuple(
+        model_values["hyperrectangle_type_names"]
+    )
     model_config = ModelConfig(**model_values)
 
     text_raw = artifact.get("text_encoder")

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import torch
 from torch_geometric.data import Batch
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -62,7 +63,11 @@ def make_contrastive_pair_batch(
     return ContrastivePairBatch(
         batch_a=Batch.from_data_list(items_a, follow_batch=["asm_node_type"]),
         batch_b=Batch.from_data_list(items_b, follow_batch=["asm_node_type"]),
-        similarity=torch.rand(batch_size),
+        density_a=torch.rand(batch_size, 5),
+        density_b=torch.rand(batch_size, 5),
+        size_mask=torch.ones(batch_size, 5, dtype=torch.bool),
+        jaccard=torch.rand(batch_size, 5),
+        iou_mask=torch.ones(batch_size, 5, dtype=torch.bool),
     )
 
 
@@ -79,7 +84,7 @@ def test_pair_training_step_uses_only_a_and_b() -> None:
         model_config=config,
         joint_contrastive=True,
         lambda_ce=1.0,
-        lambda_cl=0.5,
+        lambda_iou=0.5,
     )
     module.train()
 
@@ -110,7 +115,7 @@ def test_pair_training_step_uses_graph_loss_only(monkeypatch) -> None:
         model_config=config,
         joint_contrastive=True,
         lambda_ce=1.0,
-        lambda_cl=0.5,
+        lambda_iou=0.5,
     )
     module.train()
 
@@ -130,8 +135,11 @@ def test_pair_training_step_uses_graph_loss_only(monkeypatch) -> None:
     monkeypatch.setattr(module.model, "compute_loss", fake_compute_loss)
     monkeypatch.setattr(
         joint_steps,
-        "compute_contrastive_loss",
-        lambda *args, **kwargs: torch.tensor(0.0, device=module.device),
+        "compute_coverage_geometry_losses",
+        lambda *args, **kwargs: SimpleNamespace(
+            iou_loss=torch.tensor(0.0, device=module.device),
+            volume_loss=torch.tensor(0.0, device=module.device),
+        ),
     )
 
     loss = module.training_step(batch, 0)

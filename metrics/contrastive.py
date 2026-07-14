@@ -1,103 +1,116 @@
 #!/usr/bin/env python3
-"""对比学习指标 - 超矩形交集度与覆盖向量相似度对齐质量评估。"""
+"""Metrics for typed true-volume coverage-space geometry."""
+
+from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-from typing import Dict
+
+
+def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    weights = mask.to(values.dtype)
+    return (values * weights).sum() / weights.sum().clamp_min(1.0)
 
 
 class ContrastiveMetrics:
-    """对比学习指标计算器
-
-    评估超矩形交集度与真实覆盖向量相似度的对齐质量。
-
-    Step 级指标（每 batch 计算）: alignment_mse, alignment_mae, intersection_stats, similarity_stats
-    Epoch 级指标（聚合后计算）: alignment_pearson_r, alignment_spearman_r
-
-    Pearson R 和 Spearman R 在 step 级计算不稳定（batch 太小时方差为 0），
-    通过 collect_step → compute_epoch 两步完成。
-    """
+    """Compute and accumulate hard-geometry calibration metrics."""
 
     def __init__(self):
-        self._step_intersections: list[torch.Tensor] = []
-        self._step_similarities: list[torch.Tensor] = []
+        self._volume_predictions: list[torch.Tensor] = []
+        self._volume_targets: list[torch.Tensor] = []
+        self._iou_predictions: list[torch.Tensor] = []
+        self._iou_targets: list[torch.Tensor] = []
 
     def compute(
         self,
-        intersection: torch.Tensor,
-        similarity: torch.Tensor,
-    ) -> Dict[str, torch.Tensor]:
-        """计算对比学习 step 级指标
+        *,
+        geometry,
+        density_a: torch.Tensor,
+        density_b: torch.Tensor,
+        size_mask: torch.Tensor,
+        jaccard: torch.Tensor,
+        iou_mask: torch.Tensor,
+        hyper_min_a: torch.Tensor,
+        hyper_max_a: torch.Tensor,
+        hyper_min_b: torch.Tensor,
+        hyper_max_b: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        volume_predictions = torch.cat((geometry.volume_a, geometry.volume_b), dim=0)
+        volume_targets = torch.cat((density_a.float(), density_b.float()), dim=0)
+        volume_mask = torch.cat((size_mask, size_mask), dim=0)
+        positive_pairs = iou_mask & (jaccard > 0.0)
+        zero_intersection = ~geometry.has_hard_intersection
 
-        Args:
-            intersection: [B] 超矩形交集度
-            similarity: [B] 真实覆盖向量相似度
-        """
-        alignment_mse = F.mse_loss(intersection, similarity)
-        alignment_mae = F.l1_loss(intersection, similarity)
-
-        result = {
-            "alignment_mse": alignment_mse,
-            "alignment_mae": alignment_mae,
-            "intersection_mean": intersection.mean(),
-            "intersection_std": intersection.std()
-            if intersection.numel() > 1
-            else torch.tensor(0.0, device=intersection.device),
-            "intersection_min": intersection.min(),
-            "intersection_max": intersection.max(),
-            "similarity_mean": similarity.mean(),
-            "similarity_std": similarity.std()
-            if similarity.numel() > 1
-            else torch.tensor(0.0, device=similarity.device),
-            "similarity_min": similarity.min(),
-            "similarity_max": similarity.max(),
+        all_min = torch.cat((hyper_min_a, hyper_min_b), dim=0)
+        all_max = torch.cat((hyper_max_a, hyper_max_b), dim=0)
+        return {
+            "volume_mae": _masked_mean(
+                (volume_predictions - volume_targets).abs(), volume_mask
+            ),
+            "iou_mse": _masked_mean(
+                F.mse_loss(geometry.iou, jaccard.float(), reduction="none"), iou_mask
+            ),
+            "iou_mae": _masked_mean(
+                (geometry.iou - jaccard.float()).abs(), iou_mask
+            ),
+            "predicted_volume_mean": _masked_mean(volume_predictions, volume_mask),
+            "target_density_mean": _masked_mean(volume_targets, volume_mask),
+            "predicted_iou_mean": _masked_mean(geometry.iou, iou_mask),
+            "target_jaccard_mean": _masked_mean(jaccard.float(), iou_mask),
+            "positive_pair_zero_intersection_ratio": _masked_mean(
+                zero_intersection.float(), positive_pairs
+            ),
+            "min_boundary_saturation": (all_min < 0.01).float().mean(),
+            "max_boundary_saturation": (all_max > 0.99).float().mean(),
         }
 
-        return result
+    def collect(
+        self,
+        *,
+        geometry,
+        density_a: torch.Tensor,
+        density_b: torch.Tensor,
+        size_mask: torch.Tensor,
+        jaccard: torch.Tensor,
+        iou_mask: torch.Tensor,
+    ) -> None:
+        volume_predictions = torch.cat((geometry.volume_a, geometry.volume_b), dim=0)
+        volume_targets = torch.cat((density_a.float(), density_b.float()), dim=0)
+        volume_mask = torch.cat((size_mask, size_mask), dim=0)
+        self._volume_predictions.append(volume_predictions[volume_mask].detach().cpu())
+        self._volume_targets.append(volume_targets[volume_mask].detach().cpu())
+        self._iou_predictions.append(geometry.iou[iou_mask].detach().cpu())
+        self._iou_targets.append(jaccard[iou_mask].detach().float().cpu())
 
-    def collect_step(self, intersection: torch.Tensor, similarity: torch.Tensor):
-        """收集 step 级数据用于 epoch 级 Pearson/Spearman 计算"""
-        self._step_intersections.append(intersection.detach().cpu())
-        self._step_similarities.append(similarity.detach().cpu())
+    @staticmethod
+    def _spearman(predictions: list[torch.Tensor], targets: list[torch.Tensor]) -> float:
+        if not predictions:
+            return 0.0
+        prediction = torch.cat(predictions)
+        target = torch.cat(targets)
+        if (
+            prediction.numel() < 2
+            or prediction.unique().numel() < 2
+            or target.unique().numel() < 2
+        ):
+            return 0.0
+        from scipy.stats import spearmanr
 
-    def compute_epoch(self) -> Dict[str, float]:
-        """epoch 级聚合计算 Pearson R 和 Spearman R
+        value, _ = spearmanr(prediction.numpy(), target.numpy())
+        return float(value) if value == value else 0.0
 
-        Returns:
-            dict with alignment_pearson_r and alignment_spearman_r (float)
-        """
-        result = {"alignment_pearson_r": 0.0, "alignment_spearman_r": 0.0}
-
-        if not self._step_intersections:
-            return result
-
-        all_inter = torch.cat(self._step_intersections, dim=0)
-        all_sim = torch.cat(self._step_similarities, dim=0)
-
-        if all_inter.numel() < 2:
-            return result
-
-        # Pearson R (tensor 计算)
-        inter_centered = all_inter - all_inter.mean()
-        sim_centered = all_sim - all_sim.mean()
-        cov = (inter_centered * sim_centered).sum()
-        inter_std = inter_centered.pow(2).sum().sqrt()
-        sim_std = sim_centered.pow(2).sum().sqrt()
-        if inter_std > 1e-8 and sim_std > 1e-8:
-            result["alignment_pearson_r"] = (cov / (inter_std * sim_std)).item()
-
-        # Spearman R (需要 scipy)
-        try:
-            from scipy.stats import spearmanr
-
-            sr, _ = spearmanr(all_inter.numpy(), all_sim.numpy())
-            result["alignment_spearman_r"] = float(sr)
-        except (ImportError, ValueError):
-            pass
-
+    def compute_epoch(self) -> dict[str, float]:
+        result = {
+            "volume_spearman": self._spearman(
+                self._volume_predictions, self._volume_targets
+            ),
+            "iou_spearman": self._spearman(self._iou_predictions, self._iou_targets),
+        }
         self.reset()
         return result
 
-    def reset(self):
-        self._step_intersections.clear()
-        self._step_similarities.clear()
+    def reset(self) -> None:
+        self._volume_predictions.clear()
+        self._volume_targets.clear()
+        self._iou_predictions.clear()
+        self._iou_targets.clear()

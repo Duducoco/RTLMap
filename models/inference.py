@@ -19,6 +19,9 @@ from models.config_artifact import (
 from trainer.lightning_module import DualGraphLightningModule
 
 
+PREDICTION_SCHEMA_VERSION = "rtlmap_prediction.v2"
+
+
 def build_prediction_records(
     *,
     sample_ids: Sequence[str],
@@ -26,6 +29,13 @@ def build_prediction_records(
     graph_pred: torch.Tensor,
     hyper_min: torch.Tensor | None,
     hyper_max: torch.Tensor | None,
+    hyperrectangle_type_names: Sequence[str] = (
+        "line",
+        "condition",
+        "toggle",
+        "fsm",
+        "branch",
+    ),
 ) -> list[dict]:
     """Validate a model batch and convert it to JSON-serializable records."""
     batch_size = len(sample_ids)
@@ -40,10 +50,12 @@ def build_prediction_records(
         )
     if hyper_min is None or hyper_max is None:
         raise ValueError("inference requires hyper_min and hyper_max")
-    if hyper_min.ndim != 2 or hyper_min.shape != hyper_max.shape:
-        raise ValueError("hyper_min and hyper_max must have the same 2D shape")
+    if hyper_min.ndim != 3 or hyper_min.shape != hyper_max.shape:
+        raise ValueError("hyper_min and hyper_max must have the same 3D shape")
     if hyper_min.shape[0] != batch_size:
         raise ValueError("hyperrectangle batch dimension mismatch")
+    if hyper_min.shape[1] != len(hyperrectangle_type_names):
+        raise ValueError("hyperrectangle coverage type dimension mismatch")
     if not torch.isfinite(graph_pred).all():
         raise ValueError("graph_pred contains NaN or Inf")
     if not torch.isfinite(hyper_min).all() or not torch.isfinite(hyper_max).all():
@@ -52,18 +64,29 @@ def build_prediction_records(
         raise ValueError("hyper_min exceeds hyper_max")
 
     predictions = graph_pred.detach().cpu().tolist()
-    lower = hyper_min.detach().cpu().tolist()
-    upper = hyper_max.detach().cpu().tolist()
-    return [
-        {
-            "schema_version": "rtlmap_prediction.v1",
-            "sample_id": sample_id,
-            "coverage": dict(zip(coverage_keys, predictions[index], strict=True)),
-            "hyper_min": lower[index],
-            "hyper_max": upper[index],
+    lower_tensor = hyper_min.detach().float().cpu()
+    upper_tensor = hyper_max.detach().float().cpu()
+    volumes = torch.exp(torch.log((upper_tensor - lower_tensor).clamp_min(1e-12)).sum(-1))
+    records: list[dict] = []
+    for index, sample_id in enumerate(sample_ids):
+        typed_rectangles = {
+            type_name: {
+                "min": lower_tensor[index, type_index].tolist(),
+                "max": upper_tensor[index, type_index].tolist(),
+                "volume": volumes[index, type_index].item(),
+            }
+            for type_index, type_name in enumerate(hyperrectangle_type_names)
         }
-        for index, sample_id in enumerate(sample_ids)
-    ]
+        records.append(
+            {
+                "schema_version": PREDICTION_SCHEMA_VERSION,
+                "sample_id": sample_id,
+                "coverage": dict(zip(coverage_keys, predictions[index], strict=True)),
+                "hyperrectangles": typed_rectangles,
+                "coverage_space_size": volumes[index].mean().item(),
+            }
+        )
+    return records
 
 
 def run_candidate_inference(
@@ -133,6 +156,7 @@ def run_candidate_inference(
                     graph_pred=output.graph_pred,
                     hyper_min=output.hyper_min,
                     hyper_max=output.hyper_max,
+                    hyperrectangle_type_names=model_config.hyperrectangle_type_names,
                 )
             )
             cursor += len(current_ids)

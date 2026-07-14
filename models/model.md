@@ -79,22 +79,18 @@ L_total = L_graph
 
 当前普通训练和 joint contrastive 训练都不包含边分类 loss。
 
-## 7. 超矩形对比学习
+## 7. 类型化真实体积覆盖空间
 
-启用 `use_hyperrectangle` 后，模型从 `rtl_graph_emb` 生成：
-
-```text
-hyper_min: [B, D]
-hyper_max: [B, D]
-```
-
-对两个样本 `(a, b)`，计算超矩形交集度：
+启用 `use_hyperrectangle` 后，模型使用 center-radius 参数化生成五个子矩形：
 
 ```text
-intersection(a, b)
+hyper_min: [B, 5, 10]
+hyper_max: [B, 5, 10]
 ```
 
-然后与覆盖向量相似度对齐。
+第二维固定对应 `line, condition, toggle, fsm, branch`。每个十维子矩形的
+真实几何体积，即十个轴宽的乘积，用来表示对应 coverage type 的覆盖密度。
+模型隐藏维度仍为 256，与超矩形维度解耦。
 
 ## 8. 覆盖向量相似度
 
@@ -104,7 +100,7 @@ joint contrastive 模式使用 `targets.coverage_vectors`，按 coverage type �
 line, condition, toggle, fsm, branch
 ```
 
-相似度定义：
+每种类型的监督目标包括覆盖密度和 Jaccard：
 
 ```text
 Covered_type(sample) = {item.id | item.label == 1}
@@ -113,8 +109,8 @@ similarity_type(a, b) = |Covered_type(a) ∩ Covered_type(b)|
 similarity(a, b) = mean(similarity_type(a, b))
 ```
 
-没有正例的 coverage type 不参与平均。两个报告都没有正例时，相似度为 `0.0`，
-该 pair 在数据集构造阶段被过滤；共同未覆盖的位置不会主导监督。
+`element_count == 0` 的类型不参与体积监督；双方 coverage set 的 union 为空时，
+该类型不参与 pair IoU 监督。共同未覆盖的位置不会主导监督。
 
 ## 9. Joint Loss
 
@@ -131,17 +127,27 @@ out_b = model(batch_b)
 L_sup = L_graph(a) + L_graph(b)
 ```
 
-对比项：
+几何项：
 
 ```text
-L_cl = contrastive_loss(intersection(out_a, out_b), similarity(a, b))
+L_volume = SmoothL1(log Volume(box), log coverage_density)
+L_iou = alignment(true_volume_IoU(box_a, box_b), Jaccard(a, b))
 ```
+
+训练阶段对正 Jaccard pair 使用平滑交集和 log-IoU SmoothL1，以避免十维体积
+乘积下溢并保留不相交 pair 的恢复梯度。验证和推理始终使用硬交集与真实体积
+IoU。零 Jaccard pair 在线性 IoU 空间优化。
 
 总损失：
 
 ```text
-L_total = lambda_ce * L_sup + lambda_cl * L_cl
+L_total = lambda_ce * L_sup
+        + lambda_iou * L_iou
+        + warmed_lambda_volume * L_volume
 ```
+
+五个子矩形可以为存储而展平为 50 维，但不能把 50 个轴宽直接相乘作为总体
+coverage。总体 coverage-space size 是有效类型子矩形体积的等权平均。
 
 ## 10. 当前输出接口
 

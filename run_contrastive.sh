@@ -12,16 +12,17 @@
 #   uv run python prepare_contrastive_data.py --data-root ./data_contrastive --encoder-devices 0,1 --text-batch-size 1024 --asm-chunk-files 64
 #
 # joint loss:
-#   L_total = lambda_ce * (L_graph(a) + L_graph(b)) + lambda_cl * L_contrastive(a, b)
+#   L_total = lambda_ce * L_graph + lambda_iou * L_iou + lambda_volume * L_volume
 #
 # 对比学习参数说明:
 #   --joint-contrastive            启用 coverage-vector pair 对比训练
-#   --contrastive-loss-type        损失类型: mse / bce / margin (默认 mse)
+#   --lambda-iou                   逐类型真实体积 IoU 对齐权重
+#   --lambda-volume                单样本真实体积校准权重
 #   --contrastive-batch-size       对比 DataLoader batch 大小 (默认 16)
 #   --contrastive-pairs-per-sample 每个样本最多构造的同模块 pair 数 (默认 4)
-#   --contrastive-margin           margin 模式下不相似对交集上限 (默认 0.2)
 #   --lambda-ce                    a/b 两路图回归监督损失权重 (默认 1.0)
-#   --lambda-cl                    joint 模式下对比损失权重 (默认 0.5)
+#   --volume-warmup-epochs         真实体积权重 warmup epoch 数 (默认 5)
+#   --smooth-intersection-temperature 训练阶段平滑交集温度 (默认 0.01)
 #   --hyper-min-margin             超矩形每维度最小宽度 (默认 0.01)
 
 set -euo pipefail
@@ -68,12 +69,14 @@ uv run python main.py \
     --text-batch-size 1024 \
     --text-pooling mean \
     --joint-contrastive \
-    --contrastive-loss-type mse \
     --contrastive-batch-size 16 \
     --contrastive-pairs-per-sample 4 \
-    --contrastive-margin 0.2 \
     --lambda-ce 1.0 \
-    --lambda-cl 0.5 \
+    --lambda-iou 1.0 \
+    --lambda-volume 0.25 \
+    --volume-warmup-epochs 5 \
+    --smooth-intersection-temperature 0.01 \
+    --hyperrectangle-dim-per-type 10 \
     --hyper-min-margin 0.01 \
     --experiment-name all-4coverage \
     --logger-type tensorboard \

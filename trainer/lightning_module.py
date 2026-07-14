@@ -10,7 +10,6 @@ from datasets.data_types import ContrastivePairBatch
 from models.data_types import ModelConfig, ModelOutput
 from models.config_artifact import build_model_config_artifact
 from models.model import create_model
-from models.hyperrectangle import hyperrectangle_intersection
 from metrics import (
     CoverageRegressionMetrics,
     ContrastiveMetrics,
@@ -28,13 +27,13 @@ class DualGraphLightningModule(L.LightningModule):
         graph_loss_weight: float = 1.0,
         warmup_steps: int = 100,
         scheduler_type: str = "cosine",
-        contrastive_loss_weight: float = 0.0,
-        contrastive_loss_type: str = "mse",
-        contrastive_margin: float = 0.2,
         coverage_target_keys: tuple = ("branch",),
         joint_contrastive: bool = False,
         lambda_ce: float = 1.0,
-        lambda_cl: float = 0.5,
+        lambda_iou: float = 1.0,
+        lambda_volume: float = 0.25,
+        volume_warmup_epochs: int = 5,
+        smooth_intersection_temperature: float = 0.01,
         model_config_artifact: dict | None = None,
     ):
         super().__init__()
@@ -69,9 +68,6 @@ class DualGraphLightningModule(L.LightningModule):
         self.graph_loss_weight = graph_loss_weight
         self.warmup_steps = warmup_steps
         self.scheduler_type = scheduler_type
-        self.contrastive_loss_weight = contrastive_loss_weight
-        self.contrastive_loss_type = contrastive_loss_type
-        self.contrastive_margin = contrastive_margin
         self.use_hyperrectangle = model_config.use_hyperrectangle
         self.coverage_target_keys = coverage_target_keys
         from datasets.data_types import coverage_key_index
@@ -79,7 +75,12 @@ class DualGraphLightningModule(L.LightningModule):
         self._coverage_key_index = coverage_key_index
         self.joint_contrastive = joint_contrastive
         self.lambda_ce = lambda_ce
-        self.lambda_cl = lambda_cl
+        self.lambda_iou = lambda_iou
+        self.lambda_volume = lambda_volume
+        self.volume_warmup_epochs = max(0, int(volume_warmup_epochs))
+        self.smooth_intersection_temperature = smooth_intersection_temperature
+        if self.smooth_intersection_temperature <= 0.0:
+            raise ValueError("smooth_intersection_temperature must be positive")
 
         # 指标计算器
         self.regression_metrics = CoverageRegressionMetrics()
@@ -125,19 +126,6 @@ class DualGraphLightningModule(L.LightningModule):
 
         return supervised_loss, metrics
 
-    def _compute_contrastive_step_metrics(
-        self, output_a: ModelOutput, output_b: ModelOutput, similarity: torch.Tensor
-    ) -> Dict[str, torch.Tensor]:
-        """计算对比学习 step 级指标"""
-        intersection = hyperrectangle_intersection(
-            output_a.hyper_min,
-            output_a.hyper_max,
-            output_b.hyper_min,
-            output_b.hyper_max,
-        )
-        c_metrics = self.contrastive_metrics.compute(intersection, similarity)
-        return {f"train/contrastive_{k}": v for k, v in c_metrics.items()}
-
     def on_fit_start(self):
         """训练开始时记录超参数"""
         if self.logger is not None:
@@ -160,6 +148,15 @@ class DualGraphLightningModule(L.LightningModule):
         if val_graph_mse is not None:
             self.log("hp/val_graph_mse", val_graph_mse, sync_dist=True)
 
+        if self.joint_contrastive:
+            for key, value in self.contrastive_metrics.compute_epoch().items():
+                self.log(
+                    f"val/pair_{key}",
+                    value,
+                    sync_dist=True,
+                    add_dataloader_idx=False,
+                )
+
         self._val_outputs.clear()
 
     def on_test_epoch_end(self):
@@ -173,8 +170,12 @@ class DualGraphLightningModule(L.LightningModule):
         self.log_dict(metrics, on_step=True, on_epoch=True, prog_bar=True, batch_size=1)
         return loss
 
-    def validation_step(self, batch: DualGraphData, batch_idx: int):
+    def validation_step(self, batch, batch_idx: int, dataloader_idx: int = 0):
         """验证步骤"""
+        if self.joint_contrastive and isinstance(batch, ContrastivePairBatch):
+            from .joint_steps import run_pair_validation_step
+
+            return run_pair_validation_step(self, batch)
         loss, metrics = self._shared_step(batch, "val")
         self._val_outputs.append(metrics)
         self.log_dict(
@@ -184,6 +185,7 @@ class DualGraphLightningModule(L.LightningModule):
             prog_bar=True,
             batch_size=1,
             sync_dist=True,
+            add_dataloader_idx=False,
         )
 
     def test_step(self, batch: DualGraphData, batch_idx: int):

@@ -66,17 +66,16 @@ class TrainerConfig:
     enable_model_summary: bool = True
 
     # 对比学习超矩形配置
-    use_hyperrectangle: bool = False  # 启用超矩形对比学习
-    contrastive_loss_weight: float = 0.5  # 对比损失权重
     contrastive_batch_size: int = 16  # 对比 DataLoader batch 大小
     contrastive_pairs_per_sample: int = 4  # 每个样本最多构造的同模块 pair 数
-    contrastive_margin: float = 0.2  # margin 模式下不相似对的交集上限
-    contrastive_loss_type: str = "mse"  # mse / bce / margin
 
     # coverage-vector pair 对比学习配置（joint mode）
     joint_contrastive: bool = False  # 启用 pair 对比训练
     lambda_ce: float = 1.0  # a/b 两路监督损失的合并权重
-    lambda_cl: float = 0.5  # 对比损失权重（joint 模式下替代 contrastive_loss_weight）
+    lambda_iou: float = 1.0  # 逐 coverage type 真实体积 IoU 损失权重
+    lambda_volume: float = 0.25  # 单样本真实体积校准损失权重
+    volume_warmup_epochs: int = 5
+    smooth_intersection_temperature: float = 0.01
 
     # 图回归目标选择
     coverage_target_keys: tuple = ("branch",)  # 实际用于 loss 的覆盖率列子集

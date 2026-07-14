@@ -9,6 +9,15 @@ from typing import Optional
 from cdfg_rtl import NUM_CELL_TYPES
 
 
+HYPERRECTANGLE_TYPE_NAMES: tuple[str, ...] = (
+    "line",
+    "condition",
+    "toggle",
+    "fsm",
+    "branch",
+)
+
+
 @dataclass
 class ModelConfig:
     """模型配置"""
@@ -44,9 +53,17 @@ class ModelConfig:
     # 对比学习超矩形配置
     use_hyperrectangle: bool = False  # 启用超矩形对比学习
     hyper_min_margin: float = 0.01  # 超矩形每个维度的最小宽度
+    hyperrectangle_type_names: tuple = HYPERRECTANGLE_TYPE_NAMES
+    hyperrectangle_dim_per_type: int = 10
 
     def __post_init__(self):
         self.num_graph_targets = len(self.coverage_target_keys)
+        if self.hyperrectangle_dim_per_type <= 0:
+            raise ValueError("hyperrectangle_dim_per_type must be positive")
+        if self.hyperrectangle_type_names != HYPERRECTANGLE_TYPE_NAMES:
+            raise ValueError(
+                "hyperrectangle_type_names must match the typed coverage target order"
+            )
 
 
 @dataclass
@@ -57,6 +74,6 @@ class ModelOutput:
     rtl_final: Optional[torch.Tensor] = None
     asm_final: Optional[torch.Tensor] = None
     matching_matrix: Optional[torch.Tensor] = None
-    hyper_min: Optional[torch.Tensor] = None  # [B, D] 超矩形下界
-    hyper_max: Optional[torch.Tensor] = None  # [B, D] 超矩形上界
+    hyper_min: Optional[torch.Tensor] = None  # [B, T, D_box] 超矩形下界
+    hyper_max: Optional[torch.Tensor] = None  # [B, T, D_box] 超矩形上界
     rtl_graph_emb: Optional[torch.Tensor] = None  # [B, D] 图级 RTL 嵌入（对比学习用）

@@ -15,8 +15,11 @@ from .encoder import (
     EDGE_TYPE_ENABLE,
 )
 from .interaction import PerceiverCrossFusion
-from .hyperrectangle import HyperrectangleHead, hyperrectangle_intersection
-from .contrastive_loss import compute_contrastive_loss
+from .hyperrectangle import (
+    HyperrectangleHead,
+    hyperrectangle_geometry,
+)
+from .contrastive_loss import compute_coverage_geometry_losses
 from .losses import compute_supervised_losses
 from .model import (
     DualGraphFusionModel,
@@ -40,8 +43,8 @@ __all__ = [
     "EDGE_TYPE_ENABLE",
     "PerceiverCrossFusion",
     "HyperrectangleHead",
-    "hyperrectangle_intersection",
-    "compute_contrastive_loss",
+    "hyperrectangle_geometry",
+    "compute_coverage_geometry_losses",
     "compute_supervised_losses",
     "DualGraphFusionModel",
     "create_model",
