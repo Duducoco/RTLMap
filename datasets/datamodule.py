@@ -408,6 +408,7 @@ class DualGraphDataModule(L.LightningDataModule):
         self.test_dataset = None
         self.train_indices: Optional[list[int]] = None
         self.val_indices: Optional[list[int]] = None
+        self.split_diagnostics: dict[str, object] = {}
 
     def _make_dataset(self, split: str) -> DualGraphDataset:
         return DualGraphDataset(
@@ -431,16 +432,24 @@ class DualGraphDataModule(L.LightningDataModule):
         root_path = Path(self.root)
         if stage == "fit" or stage is None:
             full_train_dataset = self._make_dataset("train")
-            if (root_path / "val" / "processed").exists():
+            dataset_dirs = _normalize_dataset_dirs(self.dataset_dir)
+            if not dataset_dirs:
+                if not (root_path / "val" / "processed").exists():
+                    raise RuntimeError(
+                        "dataset_dir is required when no processed validation cache exists"
+                    )
                 self.train_dataset = full_train_dataset
                 self.val_dataset = self._make_dataset("val")
                 self.train_indices = list(range(len(full_train_dataset)))
                 self.val_indices = None
+                self.split_diagnostics = {
+                    "mode": "explicit_processed_cache",
+                    "train_sample_count": len(self.train_dataset),
+                    "val_sample_count": len(self.val_dataset),
+                }
             else:
                 full_len = len(full_train_dataset)
-                samples = _read_manifest_samples_from_dirs(
-                    _normalize_dataset_dirs(self.dataset_dir)
-                )
+                samples = _read_manifest_samples_from_dirs(dataset_dirs)
                 if len(samples) != full_len:
                     raise RuntimeError(
                         "processed dataset size does not match manifest samples: "
@@ -451,11 +460,46 @@ class DualGraphDataModule(L.LightningDataModule):
                 )
                 self.train_dataset = Subset(full_train_dataset, self.train_indices)
                 self.val_dataset = Subset(full_train_dataset, self.val_indices)
-                logger.info(
-                    "val 集缺失，按 Test Stimulus 自动划分: train=%d, val=%d",
-                    len(self.train_indices),
-                    len(self.val_indices),
-                )
+                train_stimuli = {
+                    (
+                        str(samples[index]["_dataset_dir"]),
+                        str(samples[index]["test_id"]),
+                    )
+                    for index in self.train_indices
+                }
+                val_stimuli = {
+                    (
+                        str(samples[index]["_dataset_dir"]),
+                        str(samples[index]["test_id"]),
+                    )
+                    for index in self.val_indices
+                }
+                train_modules = {
+                    (
+                        str(samples[index]["_dataset_dir"]),
+                        str(samples[index]["module_name"]),
+                    )
+                    for index in self.train_indices
+                }
+                val_modules = {
+                    (
+                        str(samples[index]["_dataset_dir"]),
+                        str(samples[index]["module_name"]),
+                    )
+                    for index in self.val_indices
+                }
+                self.split_diagnostics = {
+                    "mode": "grouped_test_stimulus",
+                    "train_sample_count": len(self.train_indices),
+                    "val_sample_count": len(self.val_indices),
+                    "train_stimulus_count": len(train_stimuli),
+                    "val_stimulus_count": len(val_stimuli),
+                    "train_module_count": len(train_modules),
+                    "val_module_count": len(val_modules),
+                    "val_modules_are_known": val_modules <= train_modules,
+                    "val_stimulus_keys": tuple(sorted(val_stimuli)),
+                }
+            logger.info("Dataset split diagnostics: %s", self.split_diagnostics)
 
         if stage == "test" or stage is None:
             if (root_path / "test" / "processed").exists():

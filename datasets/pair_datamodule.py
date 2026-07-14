@@ -203,7 +203,6 @@ class ContrastivePairDataset(Dataset):
                     scored_candidates.append(
                         (_coverage_similarity(targets), rng.random(), idx_b, targets)
                     )
-                    similarity_values.append(_coverage_similarity(targets))
 
                 scored_candidates.sort(key=lambda candidate: candidate[:2])
                 count = len(scored_candidates)
@@ -219,7 +218,7 @@ class ContrastivePairDataset(Dataset):
                     shuffled = list(candidates)
                     rng.shuffle(shuffled)
                     remaining = self.relative_quotas[stratum]
-                    for _, _, idx_b, targets in shuffled:
+                    for similarity, _, idx_b, targets in shuffled:
                         if remaining <= 0:
                             break
                         pair_key = tuple(sorted((idx_a, idx_b)))
@@ -236,6 +235,7 @@ class ContrastivePairDataset(Dataset):
                             )
                         )
                         fulfilled_by_stratum[stratum] += 1
+                        similarity_values.append(similarity)
                         remaining -= 1
 
         degree_by_index: Counter[int] = Counter()
@@ -300,30 +300,8 @@ class ContrastivePairDataset(Dataset):
             "pair_fingerprint": self.pair_fingerprint,
         }
         logger.info(
-            "ContrastivePairDataset: built %d unique pairs for epoch %d (%s); "
-            "degree[min/mean/max]=%s/%.2f/%s, zero_degree=%s",
-            len(self._pairs),
-            epoch,
-            self.pair_fingerprint,
-            self._sampling_diagnostics["degree_min"],
-            self._sampling_diagnostics["degree_mean"],
-            self._sampling_diagnostics["degree_max"],
-            self._sampling_diagnostics["degree_zero_samples"],
-        )
-        logger.info(
-            "ContrastivePairDataset strata fulfilled/requested: low=%s/%s, "
-            "mid=%s/%s, high=%s/%s; candidate_pool_max=%s, "
-            "coverage_similarity[min/mean/max]=%.4f/%.4f/%.4f",
-            self._sampling_diagnostics["fulfilled_relative_low"],
-            self._sampling_diagnostics["requested_relative_low"],
-            self._sampling_diagnostics["fulfilled_relative_mid"],
-            self._sampling_diagnostics["requested_relative_mid"],
-            self._sampling_diagnostics["fulfilled_relative_high"],
-            self._sampling_diagnostics["requested_relative_high"],
-            self._sampling_diagnostics["candidate_pool_max"],
-            self._sampling_diagnostics["coverage_similarity_min"],
-            self._sampling_diagnostics["coverage_similarity_mean"],
-            self._sampling_diagnostics["coverage_similarity_max"],
+            "ContrastivePairDataset sampling diagnostics: %s",
+            self._sampling_diagnostics,
         )
 
     def __len__(self) -> int:

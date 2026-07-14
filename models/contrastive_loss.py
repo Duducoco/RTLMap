@@ -38,8 +38,10 @@ def _weighted_type_mean(
         raise ValueError("weighted values and mask must have the same shape")
     if sample_weight.shape != (values.shape[0],):
         raise ValueError("sample_weight must have shape [B]")
+    if torch.any(sample_weight < 0):
+        raise ValueError("sample_weight must be non-negative")
     weights = mask.to(values.dtype) * sample_weight.to(values.dtype).unsqueeze(-1)
-    denominator = weights.sum(dim=0)
+    denominator = mask.sum(dim=0)
     defined = denominator > 0
     if not defined.any():
         return values.sum() * 0.0

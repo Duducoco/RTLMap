@@ -43,7 +43,7 @@ def compute_weighted_graph_loss(
             reduction="none",
         )
         weights = endpoint_weight[valid].to(error.dtype)
-        type_losses.append((error * weights).sum() / weights.sum().clamp_min(1e-12))
+        type_losses.append((error * weights).sum() / valid.sum())
     if not type_losses:
         return graph_pred.sum() * 0.0
     return torch.stack(type_losses).mean()

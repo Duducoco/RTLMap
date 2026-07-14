@@ -8,14 +8,18 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
+import lightning as L
 import pytest
+import torch
+from torch.utils.data import DistributedSampler
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import datasets.pair_datamodule as pair_module
 from datasets.datamodule import DualGraphDataModule
+from datasets.data_types import DualGraphData
 from datasets.manifest import read_manifest_samples
-from datasets.pair_datamodule import ContrastivePairDataset
+from datasets.pair_datamodule import ContrastivePairDataModule, ContrastivePairDataset
 from trainer.datamodule_factory import JointTrainDataModule
 from trainer.config import TrainerConfig
 from trainer.lightning_trainer import LightningTrainer
@@ -92,8 +96,9 @@ class _FakeGraphDataset:
     def __len__(self) -> int:
         return 10_000
 
-    def __getitem__(self, index: int) -> int:
-        return index
+    def __getitem__(self, index: int) -> DualGraphData:
+        del index
+        return DualGraphData(y=torch.zeros((1, 5)))
 
 
 @pytest.fixture
@@ -212,6 +217,33 @@ def test_grouped_split_keeps_test_stimuli_intact(
     assert val_stimuli
     assert train_stimuli.isdisjoint(val_stimuli)
     assert val_modules <= train_modules
+    assert module.split_diagnostics["train_stimulus_count"] == len(train_stimuli)
+    assert module.split_diagnostics["val_stimulus_count"] == len(val_stimuli)
+    assert set(module.split_diagnostics["val_stimulus_keys"]) == val_stimuli
+
+
+def test_grouped_split_is_not_bypassed_by_a_val_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset_dir = tmp_path / "dataset"
+    samples = _samples()
+    _write_dataset(dataset_dir, samples)
+    (tmp_path / "cache" / "val" / "processed").mkdir(parents=True)
+    module = DualGraphDataModule(
+        root=str(tmp_path / "cache"),
+        dataset_dir=dataset_dir,
+        num_workers=0,
+    )
+    fake_dataset = list(range(len(samples)))
+    monkeypatch.setattr(module, "_make_dataset", lambda split: fake_dataset)
+
+    module.setup("fit")
+
+    train_indices = set(module.train_indices)
+    val_indices = set(module.val_indices)
+    assert train_indices
+    assert val_indices
+    assert train_indices.isdisjoint(val_indices)
 
 
 def test_endpoint_weights_equalize_full_epoch_sample_contribution(
@@ -279,6 +311,22 @@ def test_sampling_diagnostics_report_bounded_pool_and_quota_fulfillment(
     assert diagnostics["fulfilled_relative_low"] > 0
     assert diagnostics["fulfilled_relative_mid"] > 0
     assert diagnostics["fulfilled_relative_high"] > 0
+    selected_similarities = [
+        sum(
+            score
+            for score, active in zip(
+                record.targets.jaccard,
+                record.targets.iou_mask,
+                strict=True,
+            )
+            if active
+        )
+        / max(1, sum(record.targets.iou_mask))
+        for record in dataset.pair_records
+    ]
+    assert diagnostics["coverage_similarity_mean"] == pytest.approx(
+        sum(selected_similarities) / len(selected_similarities)
+    )
 
 
 @pytest.mark.parametrize(
@@ -315,3 +363,87 @@ def test_joint_trainer_reloads_dataloaders_each_epoch(tmp_path: Path) -> None:
     )
 
     assert wrapper.trainer.reload_dataloaders_every_n_epochs == 1
+
+
+def test_two_epoch_lightning_run_refreshes_pairs_and_sampler_lengths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset_dir = tmp_path / "dataset"
+    _write_dataset(dataset_dir, _samples())
+    monkeypatch.setattr(pair_module, "DualGraphDataset", _FakeGraphDataset)
+    pair_dm = ContrastivePairDataModule(
+        dataset_dir=dataset_dir,
+        batch_size=8,
+        num_workers=0,
+        candidate_pool_size=5,
+        relative_low_quota=2,
+        relative_mid_quota=1,
+        relative_high_quota=1,
+        sampling_seed=41,
+    )
+
+    class RecordingDataModule(L.LightningDataModule):
+        def __init__(self):
+            super().__init__()
+            self.history: list[tuple[int, str, int, int, int]] = []
+
+        def setup(self, stage=None):
+            pair_dm.setup(stage)
+
+        def train_dataloader(self):
+            epoch = int(self.trainer.current_epoch)
+            pair_dm.set_epoch(epoch)
+            loader = pair_dm.train_dataloader()
+            dataset = loader.dataset
+            rank_zero = DistributedSampler(
+                dataset, num_replicas=2, rank=0, shuffle=False
+            )
+            rank_one = DistributedSampler(
+                dataset, num_replicas=2, rank=1, shuffle=False
+            )
+            assert all(0 <= index < len(dataset) for index in rank_zero)
+            assert all(0 <= index < len(dataset) for index in rank_one)
+            self.history.append(
+                (
+                    epoch,
+                    dataset.pair_fingerprint,
+                    len(dataset),
+                    len(loader.sampler),
+                    rank_zero.num_samples,
+                )
+            )
+            return loader
+
+    class TinyModule(L.LightningModule):
+        def __init__(self):
+            super().__init__()
+            self.scale = torch.nn.Parameter(torch.tensor(1.0))
+
+        def training_step(self, batch, batch_idx):
+            del batch, batch_idx
+            return self.scale.square()
+
+        def configure_optimizers(self):
+            return torch.optim.SGD(self.parameters(), lr=0.01)
+
+    data_module = RecordingDataModule()
+    trainer = L.Trainer(
+        max_epochs=2,
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        limit_train_batches=1,
+        limit_val_batches=0,
+        num_sanity_val_steps=0,
+        reload_dataloaders_every_n_epochs=1,
+    )
+    trainer.fit(TinyModule(), datamodule=data_module)
+
+    assert [entry[0] for entry in data_module.history] == [0, 1]
+    assert data_module.history[0][1] != data_module.history[1][1]
+    for _, _, pair_count, sampler_count, distributed_count in data_module.history:
+        assert sampler_count == pair_count
+        assert distributed_count == (pair_count + 1) // 2

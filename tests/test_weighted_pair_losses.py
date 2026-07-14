@@ -33,9 +33,32 @@ def test_weighted_graph_loss_preserves_equal_coverage_type_weighting() -> None:
         coverage_target_keys=("branch", "line"),
     )
 
-    # branch: (0.5*1 + 0*3 + 0.5*1) / 5 = 0.2
-    # line:   (0.5*3 + 0*1 + 0.5*1) / 5 = 0.4
-    assert torch.isclose(loss, torch.tensor(0.3))
+    # branch: (0.5*1 + 0*3 + 0.5*1) / 3 valid endpoints = 1/3
+    # line:   (0.5*3 + 0*1 + 0.5*1) / 3 valid endpoints = 2/3
+    assert torch.isclose(loss, torch.tensor(0.5))
+
+
+def test_inverse_degree_equalizes_gradient_across_single_pair_batches() -> None:
+    graph_pred = torch.full((4, 1), 0.5, requires_grad=True)
+    target = torch.zeros((4, 5))
+    endpoint_weight = torch.tensor([1.5, 0.75, 0.75, 1.5])
+    pair_indices = ((0, 1), (1, 2), (2, 3))
+
+    epoch_loss = sum(
+        compute_weighted_graph_loss(
+            graph_pred[list(pair)],
+            target[list(pair)],
+            endpoint_weight[list(pair)],
+            coverage_target_keys=("branch",),
+        )
+        for pair in pair_indices
+    )
+    epoch_loss.backward()
+
+    assert torch.allclose(
+        graph_pred.grad,
+        torch.full_like(graph_pred.grad, graph_pred.grad[0].item()),
+    )
 
 
 def test_volume_is_endpoint_weighted_but_iou_is_pair_uniform() -> None:
@@ -72,6 +95,6 @@ def test_volume_is_endpoint_weighted_but_iou_is_pair_uniform() -> None:
         **common,
     )
 
-    assert torch.isclose(weighted.volume_loss, torch.tensor(0.160151), atol=1e-6)
+    assert torch.isclose(weighted.volume_loss, torch.tensor(0.240227), atol=1e-6)
     assert torch.equal(weighted.iou_loss, reweighted.iou_loss)
     assert torch.isclose(weighted.iou_loss, torch.tensor(0.120113), atol=1e-6)
