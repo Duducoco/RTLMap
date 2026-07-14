@@ -149,11 +149,13 @@ class DualGraphLightningModule(L.LightningModule):
             self.log("hp/val_graph_mse", val_graph_mse, sync_dist=True)
 
         if self.joint_contrastive:
-            for key, value in self.contrastive_metrics.compute_epoch().items():
+            for key, value in self.contrastive_metrics.compute_epoch(
+                device=self.device
+            ).items():
                 self.log(
                     f"val/pair_{key}",
                     value,
-                    sync_dist=True,
+                    sync_dist=False,
                     add_dataloader_idx=False,
                 )
 
