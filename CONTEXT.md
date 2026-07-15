@@ -37,6 +37,14 @@ _Avoid_: Mean axis IoU
 Two samples for the same RTL module whose typed Coverage Sets provide density and Jaccard supervision for Coverage Subrectangles.
 _Avoid_: Cross-module pair
 
+**Geometry Pair Candidate**:
+A same-module sample considered as a possible partner for an anchor before uniqueness and stratum quotas select a Geometry Pair.
+_Avoid_: Negative sample, candidate pair
+
+**Geometry Pair Set**:
+The unique Geometry Pairs selected for one dataset split and sampling epoch.
+_Avoid_: Pair cache, pair batch
+
 **Relative Similarity Stratum**:
 The relative-low, relative-mid, or relative-high rank region of an anchor sample's same-module Geometry Pair candidates. A relative-low candidate is not necessarily low in absolute Coverage Similarity.
 _Avoid_: Dissimilar pair, negative pair

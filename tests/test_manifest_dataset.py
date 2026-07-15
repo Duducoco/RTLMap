@@ -16,7 +16,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from datasets import DualGraphDataset
 from datasets.coverage_vector_similarity import (
+    build_coverage_signature,
+    compute_coverage_geometry_targets,
+    compute_coverage_geometry_targets_from_signatures,
     compute_coverage_vector_positive_similarity,
+    coverage_similarity_from_signatures,
 )
 from datasets.pair_datamodule import ContrastivePairDataset
 from models import ModelConfig
@@ -176,6 +180,22 @@ def test_coverage_vector_positive_similarity_uses_jaccard() -> None:
 
     # line has Jaccard 1.0; branch has Jaccard 0.0. Other empty types are omitted.
     assert math.isclose(similarity, 0.5)
+
+
+def test_coverage_signature_preserves_geometry_targets() -> None:
+    vec_a = _coverage_vectors(line_count=3, line_ids=[0, 1], branch_ids=[0])
+    vec_b = _coverage_vectors(line_count=3, line_ids=[1, 2], branch_ids=[1])
+
+    signature_a = build_coverage_signature(vec_a)
+    signature_b = build_coverage_signature(vec_b)
+
+    expected = compute_coverage_geometry_targets(vec_a, vec_b)
+    actual = compute_coverage_geometry_targets_from_signatures(signature_a, signature_b)
+
+    assert actual == expected
+    assert coverage_similarity_from_signatures(signature_a, signature_b) == (
+        compute_coverage_vector_positive_similarity(vec_a, vec_b)
+    )
 
 
 def test_coverage_vector_positive_similarity_does_not_count_matching_zeros() -> None:

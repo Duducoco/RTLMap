@@ -26,6 +26,15 @@ class CoverageGeometryTargets:
     iou_mask: tuple[bool, ...]
 
 
+@dataclass(frozen=True)
+class CoverageSignature:
+    """Validated, compact coverage representation for repeated pair scoring."""
+
+    element_counts: tuple[int, ...]
+    covered_masks: tuple[int, ...]
+    covered_counts: tuple[int, ...]
+
+
 def _element_count(vectors: Mapping, vector_type: str) -> int:
     vector = vectors.get(vector_type, {})
     return int(vector.get("element_count", 0))
@@ -77,6 +86,37 @@ def _covered_ids_by_type(vectors: Mapping) -> dict[str, set[int]]:
     return result
 
 
+def build_coverage_signature(vectors: Mapping) -> CoverageSignature:
+    """Validate sparse vectors and encode covered ids as integer bitmasks."""
+    element_counts: list[int] = []
+    covered_masks: list[int] = []
+    covered_counts: list[int] = []
+    for vector_type in COVERAGE_VECTOR_TYPES:
+        vector = vectors.get(vector_type, {})
+        element_count = int(vector.get("element_count", 0))
+        mask = 0
+        for item in vector.get("items", []):
+            item_id = int(item["id"])
+            if item_id < 0 or item_id >= element_count:
+                raise ValueError(
+                    f"coverage vector item id out of range: "
+                    f"{vector_type}[{item_id}] with element_count={element_count}"
+                )
+            label = int(item.get("label", 1))
+            if label == 1:
+                mask |= 1 << item_id
+            elif label != 0:
+                raise ValueError(f"unsupported coverage vector label: {label}")
+        element_counts.append(element_count)
+        covered_masks.append(mask)
+        covered_counts.append(mask.bit_count())
+    return CoverageSignature(
+        element_counts=tuple(element_counts),
+        covered_masks=tuple(covered_masks),
+        covered_counts=tuple(covered_counts),
+    )
+
+
 def compute_coverage_vector_positive_similarity(
     vectors_a: Mapping, vectors_b: Mapping
 ) -> float:
@@ -97,43 +137,69 @@ def compute_coverage_vector_positive_similarity(
     return sum(scores) / len(scores) if scores else 0.0
 
 
-def compute_coverage_geometry_targets(
-    vectors_a: Mapping, vectors_b: Mapping
+def coverage_similarity_from_signatures(
+    signature_a: CoverageSignature, signature_b: CoverageSignature
+) -> float:
+    """Compute positive-only Jaccard similarity from validated signatures."""
+    scores: list[float] = []
+    for count_a, count_b, mask_a, mask_b in zip(
+        signature_a.element_counts,
+        signature_b.element_counts,
+        signature_a.covered_masks,
+        signature_b.covered_masks,
+        strict=True,
+    ):
+        if count_a != count_b:
+            raise ValueError(f"coverage vector length mismatch: {count_a} != {count_b}")
+        union = mask_a | mask_b
+        if union:
+            scores.append((mask_a & mask_b).bit_count() / union.bit_count())
+    return sum(scores) / len(scores) if scores else 0.0
+
+
+def compute_coverage_geometry_targets_from_signatures(
+    signature_a: CoverageSignature, signature_b: CoverageSignature
 ) -> CoverageGeometryTargets:
-    """Return typed density and Jaccard targets without collapsing type structure."""
-    covered_a = _covered_ids_by_type(vectors_a)
-    covered_b = _covered_ids_by_type(vectors_b)
+    """Compute geometry targets from validated coverage signatures."""
     density_a: list[float] = []
     density_b: list[float] = []
     size_mask: list[bool] = []
     jaccard: list[float] = []
     iou_mask: list[bool] = []
-
-    for vector_type in COVERAGE_VECTOR_TYPES:
-        count_a = _element_count(vectors_a, vector_type)
-        count_b = _element_count(vectors_b, vector_type)
+    for count_a, count_b, mask_a, mask_b, covered_a, covered_b in zip(
+        signature_a.element_counts,
+        signature_b.element_counts,
+        signature_a.covered_masks,
+        signature_b.covered_masks,
+        signature_a.covered_counts,
+        signature_b.covered_counts,
+        strict=True,
+    ):
         if count_a != count_b:
-            raise ValueError(
-                f"coverage vector length mismatch for {vector_type}: "
-                f"{count_a} != {count_b}"
-            )
-
+            raise ValueError(f"coverage vector length mismatch: {count_a} != {count_b}")
         exists = count_a > 0
-        union = covered_a[vector_type] | covered_b[vector_type]
-        density_a.append(len(covered_a[vector_type]) / count_a if exists else 0.0)
-        density_b.append(len(covered_b[vector_type]) / count_a if exists else 0.0)
+        union = mask_a | mask_b
+        union_count = union.bit_count()
+        density_a.append(covered_a / count_a if exists else 0.0)
+        density_b.append(covered_b / count_a if exists else 0.0)
         size_mask.append(exists)
         jaccard.append(
-            len(covered_a[vector_type] & covered_b[vector_type]) / len(union)
-            if union
-            else 0.0
+            (mask_a & mask_b).bit_count() / union_count if union_count else 0.0
         )
         iou_mask.append(bool(union))
-
     return CoverageGeometryTargets(
         density_a=tuple(density_a),
         density_b=tuple(density_b),
         size_mask=tuple(size_mask),
         jaccard=tuple(jaccard),
         iou_mask=tuple(iou_mask),
+    )
+
+
+def compute_coverage_geometry_targets(
+    vectors_a: Mapping, vectors_b: Mapping
+) -> CoverageGeometryTargets:
+    """Return typed density and Jaccard targets without collapsing type structure."""
+    return compute_coverage_geometry_targets_from_signatures(
+        build_coverage_signature(vectors_a), build_coverage_signature(vectors_b)
     )

@@ -19,8 +19,11 @@ from torch.utils.data import DataLoader, Dataset
 from torch_geometric.data import Batch
 
 from .coverage_vector_similarity import (
+    CoverageSignature,
     CoverageGeometryTargets,
-    compute_coverage_geometry_targets,
+    build_coverage_signature,
+    compute_coverage_geometry_targets_from_signatures,
+    coverage_similarity_from_signatures,
     total_coverage_vector_length,
 )
 from .data_types import ContrastivePairBatch, DualGraphData
@@ -54,15 +57,6 @@ class GeometryPairRecord:
 def _stable_seed(*parts: object) -> int:
     payload = "\0".join(str(part) for part in parts).encode("utf-8")
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
-
-
-def _coverage_similarity(targets: CoverageGeometryTargets) -> float:
-    scores = [
-        score
-        for score, active in zip(targets.jaccard, targets.iou_mask, strict=True)
-        if active
-    ]
-    return sum(scores) / len(scores) if scores else 0.0
 
 
 class ContrastivePairDataset(Dataset):
@@ -117,6 +111,7 @@ class ContrastivePairDataset(Dataset):
         self._pair_records: list[GeometryPairRecord] = []
         self._pairs: list[tuple[int, int, CoverageGeometryTargets, float, float]] = []
         self._sampling_diagnostics: dict[str, int | float | str] = {}
+        self._coverage_signatures: dict[int, CoverageSignature] = {}
         self.resample(0)
 
     @property
@@ -157,6 +152,10 @@ class ContrastivePairDataset(Dataset):
                 )
             if total_coverage_vector_length(vectors) <= 0:
                 continue
+            signature = self._coverage_signatures.get(idx)
+            if signature is None:
+                signature = build_coverage_signature(vectors)
+                self._coverage_signatures[idx] = signature
             group_key = (sample["_dataset_dir"], sample["module_name"])
             by_source_module.setdefault(group_key, []).append(idx)
 
@@ -190,19 +189,13 @@ class ContrastivePairDataset(Dataset):
                     )
                 candidate_pool_sizes.append(len(candidate_indices))
 
-                scored_candidates: list[
-                    tuple[float, float, int, CoverageGeometryTargets]
-                ] = []
-                sample_a = self._samples[idx_a]
+                scored_candidates: list[tuple[float, float, int]] = []
+                signature_a = self._coverage_signatures[idx_a]
                 for idx_b in candidate_indices:
-                    sample_b = self._samples[idx_b]
-                    targets = compute_coverage_geometry_targets(
-                        sample_a["targets"]["coverage_vectors"],
-                        sample_b["targets"]["coverage_vectors"],
+                    similarity = coverage_similarity_from_signatures(
+                        signature_a, self._coverage_signatures[idx_b]
                     )
-                    scored_candidates.append(
-                        (_coverage_similarity(targets), rng.random(), idx_b, targets)
-                    )
+                    scored_candidates.append((similarity, rng.random(), idx_b))
 
                 scored_candidates.sort(key=lambda candidate: candidate[:2])
                 count = len(scored_candidates)
@@ -218,7 +211,7 @@ class ContrastivePairDataset(Dataset):
                     shuffled = list(candidates)
                     rng.shuffle(shuffled)
                     remaining = self.relative_quotas[stratum]
-                    for similarity, _, idx_b, targets in shuffled:
+                    for similarity, _, idx_b in shuffled:
                         if remaining <= 0:
                             break
                         pair_key = tuple(sorted((idx_a, idx_b)))
@@ -226,6 +219,9 @@ class ContrastivePairDataset(Dataset):
                             duplicate_conflicts += 1
                             continue
                         selected_pairs.add(pair_key)
+                        targets = compute_coverage_geometry_targets_from_signatures(
+                            signature_a, self._coverage_signatures[idx_b]
+                        )
                         records.append(
                             GeometryPairRecord(
                                 idx_a=idx_a,
