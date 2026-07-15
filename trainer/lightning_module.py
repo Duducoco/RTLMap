@@ -19,6 +19,15 @@ from metrics import (
 class DualGraphLightningModule(L.LightningModule):
     """双图融合模型的 Lightning 封装"""
 
+    _GLOBAL_VALIDATION_METRIC_PREFIXES = (
+        "val/graph_rmse",
+        "val/graph_mape",
+        "val/graph_smape",
+        "val/graph_medae",
+        "val/graph_r2",
+        "val/graph_r",
+    )
+
     def __init__(
         self,
         model_config: ModelConfig,
@@ -121,6 +130,8 @@ class DualGraphLightningModule(L.LightningModule):
             lite=lite,
             coverage_keys=self.coverage_target_keys,
         )
+        if stage == "val" and y_target is not None:
+            self.regression_metrics.collect_epoch(output.graph_pred, y_target)
         for k, v in graph_m.items():
             metrics[f"{stage}/{k}"] = v
 
@@ -139,7 +150,7 @@ class DualGraphLightningModule(L.LightningModule):
                 self.logger.log_hyperparams(self.hparams)
 
     def on_validation_epoch_end(self):
-        """验证 epoch 结束：计算 epoch 级 AUC/Spearman 等指标"""
+        """验证 epoch 结束：计算整个验证集上的回归指标。"""
         val_loss = self.trainer.callback_metrics.get("val/total_loss")
         val_graph_mse = self.trainer.callback_metrics.get("val/graph_mse")
 
@@ -147,6 +158,20 @@ class DualGraphLightningModule(L.LightningModule):
             self.log("hp/val_loss", val_loss, sync_dist=True)
         if val_graph_mse is not None:
             self.log("hp/val_graph_mse", val_graph_mse, sync_dist=True)
+
+        for key, value in self.regression_metrics.compute_epoch(
+            device=self.device,
+            coverage_keys=self.coverage_target_keys,
+        ).items():
+            metric_name = f"val/{key}"
+            if not metric_name.startswith(self._GLOBAL_VALIDATION_METRIC_PREFIXES):
+                continue
+            self.log(
+                metric_name,
+                value,
+                sync_dist=False,
+                add_dataloader_idx=False,
+            )
 
         if self.joint_contrastive:
             for key, value in self.contrastive_metrics.compute_epoch(
@@ -178,10 +203,14 @@ class DualGraphLightningModule(L.LightningModule):
             from .joint_steps import run_pair_validation_step
 
             return run_pair_validation_step(self, batch)
-        loss, metrics = self._shared_step(batch, "val")
+        loss, metrics = self._shared_step(batch, "val", lite=True)
         self._val_outputs.append(metrics)
         self.log_dict(
-            metrics,
+            {
+                key: value
+                for key, value in metrics.items()
+                if not key.startswith(self._GLOBAL_VALIDATION_METRIC_PREFIXES)
+            },
             on_step=False,
             on_epoch=True,
             prog_bar=True,

@@ -2,8 +2,34 @@
 """覆盖率回归指标 — 图级覆盖率百分比预测评估"""
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from typing import Dict, Optional, Tuple
+
+
+def _gather_rows(rows: torch.Tensor, *, device: torch.device) -> torch.Tensor:
+    """Gather variable-length metric rows from every DDP rank."""
+    rows = rows.to(device=device, dtype=torch.float32)
+    if not dist.is_available() or not dist.is_initialized():
+        return rows.cpu()
+
+    world_size = dist.get_world_size()
+    local_size = torch.tensor([rows.shape[0]], dtype=torch.long, device=device)
+    sizes = [torch.zeros_like(local_size) for _ in range(world_size)]
+    dist.all_gather(sizes, local_size)
+
+    max_size = max(1, max(int(size.item()) for size in sizes))
+    padded = torch.zeros((max_size, rows.shape[1]), dtype=rows.dtype, device=device)
+    padded[: rows.shape[0]] = rows
+    gathered = [torch.empty_like(padded) for _ in range(world_size)]
+    dist.all_gather(gathered, padded)
+    return torch.cat(
+        [
+            rank_rows[: int(rank_size.item())]
+            for rank_rows, rank_size in zip(gathered, sizes, strict=True)
+        ],
+        dim=0,
+    ).cpu()
 
 
 class CoverageRegressionMetrics:
@@ -12,6 +38,10 @@ class CoverageRegressionMetrics:
     支持 lite 模式（训练 step 级）和 full 模式（验证/测试 step 级）。
 
     """
+
+    def __init__(self) -> None:
+        self._epoch_predictions: list[torch.Tensor] = []
+        self._epoch_targets: list[torch.Tensor] = []
 
     def compute(
         self,
@@ -70,6 +100,45 @@ class CoverageRegressionMetrics:
                     self._zero_single(device=pred.device, lite=lite, suffix=sfx)
                 )
         return result
+
+    def collect_epoch(
+        self, pred: torch.Tensor, target: torch.Tensor
+    ) -> None:
+        """Buffer validation predictions for global epoch-level metrics."""
+        self._epoch_predictions.append(pred.detach().float().cpu())
+        self._epoch_targets.append(target.detach().float().cpu())
+
+    def compute_epoch(
+        self, *, device: torch.device, coverage_keys: Tuple[str, ...]
+    ) -> Dict[str, torch.Tensor]:
+        """Compute full-dataset validation metrics, including global R²."""
+        if (
+            not self._epoch_predictions
+            and (not dist.is_available() or not dist.is_initialized())
+        ):
+            return {}
+
+        if self._epoch_predictions:
+            predictions = torch.cat(self._epoch_predictions, dim=0)
+            targets = torch.cat(self._epoch_targets, dim=0)
+        else:
+            predictions = torch.empty((0, len(coverage_keys)), dtype=torch.float32)
+            targets = torch.empty((0, len(coverage_keys)), dtype=torch.float32)
+        try:
+            predictions = _gather_rows(predictions, device=device)
+            targets = _gather_rows(targets, device=device)
+            return self.compute(
+                predictions,
+                targets,
+                lite=False,
+                coverage_keys=coverage_keys,
+            )
+        finally:
+            self.reset_epoch()
+
+    def reset_epoch(self) -> None:
+        self._epoch_predictions.clear()
+        self._epoch_targets.clear()
 
     def _zero_single(
         self,
@@ -137,7 +206,10 @@ class CoverageRegressionMetrics:
         target_flat = target.view(-1)
         ss_res = (pred_flat - target_flat).pow(2).sum()
         ss_tot = (target_flat - target_flat.mean()).pow(2).sum()
-        r2 = 1.0 - ss_res / (ss_tot + 1e-8)
+        if ss_tot <= 1e-8:
+            r2 = torch.ones((), device=device) if ss_res <= 1e-8 else _zero
+        else:
+            r2 = 1.0 - ss_res / ss_tot
 
         if pred.numel() > 1:
             pred_centered = pred_flat - pred_flat.mean()
