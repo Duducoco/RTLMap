@@ -281,10 +281,10 @@ def test_joint_train_loader_resamples_for_current_epoch() -> None:
         pair_dm=pair_dm,
         pair_val_dm=SimpleNamespace(),
     )
-    joint._trainer = SimpleNamespace(current_epoch=0)
+    joint.trainer = SimpleNamespace(current_epoch=0)
     assert joint.train_dataloader() == 0
 
-    joint._trainer.current_epoch = 1
+    joint.trainer.current_epoch = 1
     assert joint.train_dataloader() == 1
 
 

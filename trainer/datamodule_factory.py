@@ -34,7 +34,7 @@ class JointTrainDataModule(L.LightningDataModule):
             self._pair_val_dm.setup(stage)
 
     def train_dataloader(self):
-        trainer = getattr(self, "_trainer", None)
+        trainer = getattr(self, "trainer", None)
         epoch = int(trainer.current_epoch) if trainer is not None else 0
         self._pair_dm.set_epoch(epoch)
         return self._pair_dm.train_dataloader()
