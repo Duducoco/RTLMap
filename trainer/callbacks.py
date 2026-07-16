@@ -185,7 +185,11 @@ class CallbackFactory:
         """创建模型检查点 callback"""
         return ModelCheckpoint(
             dirpath=f"{config.checkpoint_dir}/{experiment_name}",
-            filename="{epoch:02d}-{val/total_loss:.4f}",
+            filename=(
+                "{epoch:02d}-pair_loss={val/pair_total_loss:.4f}"
+                if config.checkpoint_monitor == "val/pair_total_loss"
+                else "{epoch:02d}-{val/total_loss:.4f}"
+            ),
             monitor=config.checkpoint_monitor,
             mode="min",
             save_top_k=config.save_top_k,

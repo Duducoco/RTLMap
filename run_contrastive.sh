@@ -80,7 +80,7 @@ uv run python main.py \
     --lambda-volume 0.25 \
     --volume-warmup-epochs 5 \
     --smooth-intersection-temperature 0.01 \
-    --hyperrectangle-dim-per-type 10 \
+    --hyperrectangle-dim-per-type 5 \
     --hyper-min-margin 0.01 \
     --experiment-name all-4coverage \
     --logger-type tensorboard \

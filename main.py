@@ -242,8 +242,14 @@ def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
         use_bucketing=args.use_bucketing,
         token_budget=args.token_budget,
         early_stopping_patience=args.early_stopping_patience,
+        early_stopping_monitor=(
+            "val/pair_total_loss" if args.joint_contrastive else "val/total_loss"
+        ),
         checkpoint_dir=args.checkpoint_dir,
         save_top_k=args.save_top_k,
+        checkpoint_monitor=(
+            "val/pair_total_loss" if args.joint_contrastive else "val/total_loss"
+        ),
         accelerator=args.accelerator,
         devices=args.devices,
         precision=args.precision,
