@@ -37,6 +37,7 @@ dataset_root/
 data/
 data
 data_contrastive
+data_contrastive_*/
 # 测试和设计文档
 trainer/test_trainer.py
 models/test_model.py
