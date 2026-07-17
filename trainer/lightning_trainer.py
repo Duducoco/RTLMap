@@ -3,7 +3,7 @@
 
 from typing import Optional, List, Any
 import lightning as L
-from lightning.pytorch.callbacks import Callback
+from lightning.pytorch.callbacks import Callback, EarlyStopping
 from lightning.pytorch.loggers import TensorBoardLogger, CSVLogger
 
 from .config import TrainerConfig
@@ -183,6 +183,6 @@ class LightningTrainer:
     def early_stopping_callback(self) -> Optional[Callback]:
         """获取 EarlyStopping callback"""
         for callback in self.callbacks:
-            if callback.__class__.__name__ == "EarlyStopping":
+            if isinstance(callback, EarlyStopping):
                 return callback
         return None

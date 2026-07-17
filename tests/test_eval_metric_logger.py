@@ -9,7 +9,8 @@ from types import SimpleNamespace
 
 import torch
 
-from trainer.callbacks import EvalMetricJsonLogger
+from trainer.callbacks import CallbackFactory, EvalMetricJsonLogger
+from trainer.config import TrainerConfig
 
 
 def test_eval_metric_json_logger_writes_validation_metrics(tmp_path: Path) -> None:
@@ -40,3 +41,29 @@ def test_eval_metric_json_logger_writes_validation_metrics(tmp_path: Path) -> No
             },
         }
     ]
+
+
+def test_early_stopping_resume_preserves_runtime_patience() -> None:
+    callback = CallbackFactory.create_early_stopping(
+        TrainerConfig(
+            early_stopping_monitor="val/pair_total_loss",
+            early_stopping_patience=30,
+        )
+    )
+
+    assert callback.state_key == (
+        "EarlyStopping{'monitor': 'val/pair_total_loss', 'mode': 'min'}"
+    )
+
+    callback.load_state_dict(
+        {
+            "wait_count": 10,
+            "stopped_epoch": 16,
+            "best_score": torch.tensor(0.0732),
+            "patience": 10,
+        }
+    )
+
+    assert callback.patience == 30
+    assert callback.wait_count == 10
+    assert callback.best_score == torch.tensor(0.0732)

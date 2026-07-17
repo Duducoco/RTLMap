@@ -71,6 +71,19 @@ if _RICH_AVAILABLE:
             super().on_train_batch_end(*args, **kwargs)
 
 
+class RuntimeConfiguredEarlyStopping(EarlyStopping):
+    """Restore progress from checkpoints while keeping runtime stop policy."""
+
+    @property
+    def state_key(self) -> str:
+        return f"{EarlyStopping.__qualname__}{repr({'monitor': self.monitor, 'mode': self.mode})}"
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        configured_patience = self.patience
+        super().load_state_dict(state_dict)
+        self.patience = configured_patience
+
+
 class EvalMetricJsonLogger(Callback):
     """在 logger 的 version 目录下导出每个验证 epoch 的指标 JSON。"""
 
@@ -199,7 +212,7 @@ class CallbackFactory:
     @staticmethod
     def create_early_stopping(config: TrainerConfig) -> EarlyStopping:
         """创建早停 callback"""
-        return EarlyStopping(
+        return RuntimeConfiguredEarlyStopping(
             monitor=config.early_stopping_monitor,
             mode=config.early_stopping_mode,
             patience=config.early_stopping_patience,

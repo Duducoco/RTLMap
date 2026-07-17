@@ -30,6 +30,7 @@ set -euo pipefail
 DATASET_ROOT="${DATASET_ROOT:-/home/u1/projects/coverage-report-extractor/out}"
 ACCELERATOR="${ACCELERATOR:-gpu}"
 DEVICES="${DEVICES:-2}"
+CKPT_PATH="${CKPT_PATH:-}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
@@ -42,6 +43,11 @@ DATASET_DIRS=(
     "$DATASET_ROOT/riscv_simple_multicycle"
 )
 DATA_ROOT="${1:-./data_contrastive}"
+
+RESUME_ARGS=()
+if [[ -n "$CKPT_PATH" ]]; then
+    RESUME_ARGS=(--ckpt-path "$CKPT_PATH")
+fi
 
 uv run python main.py \
     --dataset-dir "${DATASET_DIRS[@]}" \
@@ -86,5 +92,6 @@ uv run python main.py \
     --logger-type tensorboard \
     --checkpoint-dir checkpoints/contrastive \
     --save-top-k 3 \
-    --early-stopping-patience 10 \
-    --seed 42
+    --early-stopping-patience 30 \
+    --seed 42 \
+    "${RESUME_ARGS[@]}"
