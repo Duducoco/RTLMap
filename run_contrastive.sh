@@ -31,8 +31,10 @@ usage() {
   -h, --help        显示帮助
 
 示例:
+  bash run_contrastive.sh archgen_single
   bash run_contrastive.sh ibex
-  bash run_contrastive.sh picorv32 --data-root ./data_contrastive_picorv32
+  bash run_contrastive.sh picorv32
+  bash run_contrastive.sh riscv_simple_multicycle
 
 环境变量:
   DATASET_ROOT, CKPT_PATH, ACCELERATOR, DEVICES

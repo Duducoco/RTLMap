@@ -4,6 +4,12 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DATASET_NAMES = (
+    "archgen_single",
+    "ibex",
+    "picorv32",
+    "riscv_simple_multicycle",
+)
 
 
 def _run_script(
@@ -20,12 +26,7 @@ def _run_script(
     )
     fake_uv.chmod(0o755)
     dataset_root = tmp_path / "datasets"
-    for dataset_name in (
-        "archgen_single",
-        "ibex",
-        "picorv32",
-        "riscv_simple_multicycle",
-    ):
+    for dataset_name in DATASET_NAMES:
         dataset_dir = dataset_root / dataset_name
         dataset_dir.mkdir(parents=True)
         (dataset_dir / "manifest.json").write_text("{}", encoding="utf-8")
@@ -134,4 +135,6 @@ def test_run_contrastive_help_describes_dataset_selection(tmp_path: Path) -> Non
     assert "--dataset NAME" in result.stdout
     assert "--data-root PATH" in result.stdout
     assert "--ckpt-path PATH" in result.stdout
+    for dataset_name in DATASET_NAMES:
+        assert f"bash run_contrastive.sh {dataset_name}" in result.stdout
     assert args == []
