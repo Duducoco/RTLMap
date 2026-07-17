@@ -59,6 +59,23 @@ def _hard_geometry_metrics(module, out_a, out_b, batch):
     return geometry, metrics
 
 
+def _pair_graph_losses(module, out_a, out_b, batch):
+    common = {"coverage_target_keys": module.coverage_target_keys}
+    loss_a = module.graph_loss_weight * compute_weighted_graph_loss(
+        out_a.graph_pred,
+        batch.batch_a.y,
+        batch.endpoint_weight_a,
+        **common,
+    )
+    loss_b = module.graph_loss_weight * compute_weighted_graph_loss(
+        out_b.graph_pred,
+        batch.batch_b.y,
+        batch.endpoint_weight_b,
+        **common,
+    )
+    return loss_a, loss_b, 0.5 * (loss_a + loss_b)
+
+
 def run_pair_training_step(module, batch: ContrastivePairBatch) -> torch.Tensor:
     """执行覆盖向量 pair 对比训练步骤。"""
     batch.batch_a = batch.batch_a.to(module.device)
@@ -68,12 +85,7 @@ def run_pair_training_step(module, batch: ContrastivePairBatch) -> torch.Tensor:
     out_a = module(batch.batch_a)
     out_b = module(batch.batch_b)
 
-    l_sup = module.graph_loss_weight * compute_weighted_graph_loss(
-        torch.cat((out_a.graph_pred, out_b.graph_pred), dim=0),
-        torch.cat((batch.batch_a.y, batch.batch_b.y), dim=0),
-        torch.cat((batch.endpoint_weight_a, batch.endpoint_weight_b), dim=0),
-        coverage_target_keys=module.coverage_target_keys,
-    )
+    l_sup_a, l_sup_b, l_sup = _pair_graph_losses(module, out_a, out_b, batch)
     geometry_losses = _geometry_losses(module, out_a, out_b, batch, training=True)
     warmup = (
         1.0
@@ -81,17 +93,21 @@ def run_pair_training_step(module, batch: ContrastivePairBatch) -> torch.Tensor:
         else min(1.0, module.current_epoch / module.volume_warmup_epochs)
     )
     effective_volume_weight = module.lambda_volume * warmup
-    total = (
-        module.lambda_ce * l_sup
-        + module.lambda_iou * geometry_losses.iou_loss
-        + effective_volume_weight * geometry_losses.volume_loss
-    )
+    weighted_supervised = module.lambda_ce * l_sup
+    weighted_iou = module.lambda_iou * geometry_losses.iou_loss
+    weighted_volume = effective_volume_weight * geometry_losses.volume_loss
+    total = weighted_supervised + weighted_iou + weighted_volume
 
     module.log_dict(
         {
+            "train/supervised_loss_a": l_sup_a.detach(),
+            "train/supervised_loss_b": l_sup_b.detach(),
             "train/supervised_loss": l_sup.detach(),
             "train/iou_loss": geometry_losses.iou_loss.detach(),
             "train/volume_loss": geometry_losses.volume_loss.detach(),
+            "train/weighted_supervised_loss": weighted_supervised.detach(),
+            "train/weighted_iou_loss": weighted_iou.detach(),
+            "train/weighted_volume_loss": weighted_volume.detach(),
             "train/effective_volume_weight": torch.tensor(
                 effective_volume_weight, device=module.device
             ),
@@ -123,6 +139,7 @@ def run_pair_validation_step(module, batch: ContrastivePairBatch) -> torch.Tenso
     _move_geometry_targets(batch, module.device)
     out_a = module(batch.batch_a)
     out_b = module(batch.batch_b)
+    l_sup_a, l_sup_b, l_sup = _pair_graph_losses(module, out_a, out_b, batch)
     losses = _geometry_losses(module, out_a, out_b, batch, training=False)
     geometry, metrics = _hard_geometry_metrics(module, out_a, out_b, batch)
     module.contrastive_metrics.collect(
@@ -133,13 +150,20 @@ def run_pair_validation_step(module, batch: ContrastivePairBatch) -> torch.Tenso
         jaccard=batch.jaccard,
         iou_mask=batch.iou_mask,
     )
-    total = (
-        module.lambda_iou * losses.iou_loss + module.lambda_volume * losses.volume_loss
-    )
+    weighted_supervised = module.lambda_ce * l_sup
+    weighted_iou = module.lambda_iou * losses.iou_loss
+    weighted_volume = module.lambda_volume * losses.volume_loss
+    total = weighted_supervised + weighted_iou + weighted_volume
     values = {
         "val/pair_total_loss": total.detach(),
+        "val/pair_supervised_loss_a": l_sup_a.detach(),
+        "val/pair_supervised_loss_b": l_sup_b.detach(),
+        "val/pair_supervised_loss": l_sup.detach(),
         "val/pair_iou_loss": losses.iou_loss.detach(),
         "val/pair_volume_loss": losses.volume_loss.detach(),
+        "val/pair_weighted_supervised_loss": weighted_supervised.detach(),
+        "val/pair_weighted_iou_loss": weighted_iou.detach(),
+        "val/pair_weighted_volume_loss": weighted_volume.detach(),
     }
     values.update({f"val/pair_{key}": value for key, value in metrics.items()})
     module.log_dict(

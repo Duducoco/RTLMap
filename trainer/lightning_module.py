@@ -36,11 +36,14 @@ class DualGraphLightningModule(L.LightningModule):
         graph_loss_weight: float = 1.0,
         warmup_steps: int = 100,
         scheduler_type: str = "cosine",
+        plateau_factor: float = 0.5,
+        plateau_patience: int = 5,
+        min_learning_rate: float = 1e-6,
         coverage_target_keys: tuple = ("branch",),
         joint_contrastive: bool = False,
         lambda_ce: float = 1.0,
         lambda_iou: float = 1.0,
-        lambda_volume: float = 0.25,
+        lambda_volume: float = 1.0,
         volume_warmup_epochs: int = 5,
         smooth_intersection_temperature: float = 0.01,
         model_config_artifact: dict | None = None,
@@ -77,6 +80,9 @@ class DualGraphLightningModule(L.LightningModule):
         self.graph_loss_weight = graph_loss_weight
         self.warmup_steps = warmup_steps
         self.scheduler_type = scheduler_type
+        self.plateau_factor = plateau_factor
+        self.plateau_patience = plateau_patience
+        self.min_learning_rate = min_learning_rate
         self.use_hyperrectangle = model_config.use_hyperrectangle
         self.coverage_target_keys = coverage_target_keys
         from datasets.data_types import coverage_key_index
@@ -245,4 +251,10 @@ class DualGraphLightningModule(L.LightningModule):
             weight_decay=self.weight_decay,
             scheduler_type=self.scheduler_type,
             warmup_steps=self.warmup_steps,
+            plateau_monitor=(
+                "val/pair_total_loss" if self.joint_contrastive else "val/total_loss"
+            ),
+            plateau_factor=self.plateau_factor,
+            plateau_patience=self.plateau_patience,
+            min_learning_rate=self.min_learning_rate,
         )

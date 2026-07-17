@@ -23,7 +23,7 @@ _Avoid_: Coverage volume
 The five typed geometric subspaces that represent a sample's Coverage Sets.
 
 **Coverage Subrectangle**:
-A ten-dimensional axis-aligned rectangle for one Coverage Type whose true geometric volume represents Coverage Density.
+A configured-dimensional axis-aligned rectangle for one Coverage Type whose true geometric volume represents Coverage Density.
 _Avoid_: Embedding box, latent box
 
 **Coverage Similarity**:

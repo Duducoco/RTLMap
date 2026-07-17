@@ -31,6 +31,7 @@ class HyperrectangleHead(nn.Module):
         num_types: int = 5,
         dim_per_type: int = 10,
         margin: float = 0.01,
+        dropout: float = 0.1,
     ):
         super().__init__()
         if not 0.0 < margin < 1.0:
@@ -38,16 +39,33 @@ class HyperrectangleHead(nn.Module):
         if num_types <= 0 or dim_per_type <= 0:
             raise ValueError("num_types and dim_per_type must be positive")
         output_dim = num_types * dim_per_type
+        self.feature_proj = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+        )
         self.center_proj = nn.Linear(hidden_dim, output_dim)
         self.radius_proj = nn.Linear(hidden_dim, output_dim)
         self.num_types = num_types
         self.dim_per_type = dim_per_type
         self.margin = margin
+        self._reset_parameters()
+
+    def _reset_parameters(self) -> None:
+        feature_linear = self.feature_proj[1]
+        nn.init.xavier_uniform_(feature_linear.weight)
+        nn.init.zeros_(feature_linear.bias)
+        nn.init.xavier_uniform_(self.center_proj.weight, gain=0.1)
+        nn.init.zeros_(self.center_proj.bias)
+        nn.init.xavier_uniform_(self.radius_proj.weight, gain=0.1)
+        nn.init.constant_(self.radius_proj.bias, 2.0)
 
     def forward(self, rtl_graph: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         shape = (-1, self.num_types, self.dim_per_type)
-        center_ratio = torch.sigmoid(self.center_proj(rtl_graph)).view(shape)
-        radius_ratio = torch.sigmoid(self.radius_proj(rtl_graph)).view(shape)
+        features = rtl_graph + self.feature_proj(rtl_graph)
+        center_ratio = torch.sigmoid(self.center_proj(features)).view(shape)
+        radius_ratio = torch.sigmoid(self.radius_proj(features)).view(shape)
 
         half_margin = self.margin / 2.0
         center = half_margin + (1.0 - self.margin) * center_ratio

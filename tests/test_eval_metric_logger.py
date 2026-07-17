@@ -18,6 +18,7 @@ def test_eval_metric_json_logger_writes_validation_metrics(tmp_path: Path) -> No
     logger = SimpleNamespace(log_dir=str(tmp_path / "version_0"))
     trainer = SimpleNamespace(
         logger=logger,
+        is_global_zero=True,
         current_epoch=0,
         global_step=12,
         callback_metrics={
@@ -41,6 +42,22 @@ def test_eval_metric_json_logger_writes_validation_metrics(tmp_path: Path) -> No
             },
         }
     ]
+
+
+def test_eval_metric_json_logger_skips_nonzero_rank(tmp_path: Path) -> None:
+    callback = EvalMetricJsonLogger()
+    trainer = SimpleNamespace(
+        logger=SimpleNamespace(log_dir=str(tmp_path / "version_0")),
+        is_global_zero=False,
+        current_epoch=0,
+        global_step=12,
+        callback_metrics={"val/total_loss": torch.tensor(0.5)},
+        sanity_checking=False,
+    )
+
+    callback.on_validation_epoch_end(trainer, pl_module=None)
+
+    assert not (tmp_path / "version_0" / "eval_metric.json").exists()
 
 
 def test_early_stopping_resume_preserves_runtime_patience() -> None:

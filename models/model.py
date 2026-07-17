@@ -70,6 +70,7 @@ class DualGraphFusionModel(nn.Module):
                 num_types=len(config.hyperrectangle_type_names),
                 dim_per_type=config.hyperrectangle_dim_per_type,
                 margin=config.hyper_min_margin,
+                dropout=config.dropout,
             )
 
     def forward(self, data: DualGraphData) -> ModelOutput:

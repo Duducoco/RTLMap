@@ -19,6 +19,24 @@ def test_typed_center_radius_head_preserves_bounds_and_minimum_width() -> None:
     assert torch.all(hyper_max - hyper_min >= 0.01 - 1e-6)
 
 
+def test_hyperrectangle_head_starts_with_broad_non_saturated_boxes() -> None:
+    head = HyperrectangleHead(
+        hidden_dim=16,
+        num_types=5,
+        dim_per_type=5,
+        margin=0.01,
+        dropout=0.0,
+    )
+
+    hyper_min, hyper_max = head(torch.zeros(2, 16))
+    volume = (hyper_max - hyper_min).prod(dim=-1)
+
+    assert hasattr(head, "feature_proj")
+    assert torch.all(volume > 0.4)
+    assert torch.all(hyper_min > 0.01)
+    assert torch.all(hyper_max < 0.99)
+
+
 def test_true_volume_iou_matches_known_partial_overlap() -> None:
     min_a = torch.zeros(1, 1, 10)
     max_a = torch.ones(1, 1, 10)

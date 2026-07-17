@@ -9,6 +9,8 @@ import os
 import sys
 from pathlib import Path
 
+from contrastive_defaults import DEFAULT_PAIR_CANDIDATE_POOL_SIZE
+
 
 def _normalize_encoder_devices(devices: str) -> str:
     devices = devices.strip()
@@ -72,7 +74,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--contrastive-batch-size", type=int, default=16)
-    parser.add_argument("--pair-candidate-pool-size", type=int, default=128)
+    parser.add_argument(
+        "--pair-candidate-pool-size",
+        type=int,
+        default=DEFAULT_PAIR_CANDIDATE_POOL_SIZE,
+    )
     parser.add_argument("--pair-relative-low-quota", type=int, default=2)
     parser.add_argument("--pair-relative-mid-quota", type=int, default=1)
     parser.add_argument("--pair-relative-high-quota", type=int, default=1)

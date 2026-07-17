@@ -18,6 +18,8 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from torch_geometric.data import Batch
 
+from contrastive_defaults import DEFAULT_PAIR_CANDIDATE_POOL_SIZE
+
 from .coverage_vector_similarity import (
     CoverageSignature,
     CoverageGeometryTargets,
@@ -65,7 +67,7 @@ class ContrastivePairDataset(Dataset):
     def __init__(
         self,
         dataset_dir: DatasetDirInput,
-        candidate_pool_size: int = 128,
+        candidate_pool_size: int = DEFAULT_PAIR_CANDIDATE_POOL_SIZE,
         relative_low_quota: int = 2,
         relative_mid_quota: int = 1,
         relative_high_quota: int = 1,
@@ -348,7 +350,7 @@ class ContrastivePairDataModule:
         batch_size: int = 8,
         num_workers: int = 0,
         shuffle: bool = True,
-        candidate_pool_size: int = 128,
+        candidate_pool_size: int = DEFAULT_PAIR_CANDIDATE_POOL_SIZE,
         relative_low_quota: int = 2,
         relative_mid_quota: int = 1,
         relative_high_quota: int = 1,

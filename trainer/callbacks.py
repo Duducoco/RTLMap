@@ -139,7 +139,9 @@ class EvalMetricJsonLogger(Callback):
     def on_validation_epoch_end(
         self, trainer: L.Trainer, pl_module: L.LightningModule
     ) -> None:
-        if getattr(trainer, "sanity_checking", False):
+        if getattr(trainer, "sanity_checking", False) or not getattr(
+            trainer, "is_global_zero", True
+        ):
             return
 
         log_dir = self._resolve_log_dir(trainer)
@@ -160,7 +162,9 @@ class EvalMetricJsonLogger(Callback):
                 "metrics": metrics,
             }
         )
-        output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True))
+        temporary_path = output_path.with_suffix(f"{output_path.suffix}.tmp")
+        temporary_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True))
+        temporary_path.replace(output_path)
 
 
 class CallbackFactory:
@@ -201,8 +205,9 @@ class CallbackFactory:
             filename=(
                 "{epoch:02d}-pair_loss={val/pair_total_loss:.4f}"
                 if config.checkpoint_monitor == "val/pair_total_loss"
-                else "{epoch:02d}-{val/total_loss:.4f}"
+                else "{epoch:02d}-graph_loss={val/total_loss:.4f}"
             ),
+            auto_insert_metric_name=False,
             monitor=config.checkpoint_monitor,
             mode="min",
             save_top_k=config.save_top_k,

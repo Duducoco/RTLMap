@@ -4,6 +4,8 @@
 from dataclasses import dataclass
 from typing import Union
 
+from contrastive_defaults import DEFAULT_PAIR_CANDIDATE_POOL_SIZE
+
 
 @dataclass
 class TrainerConfig:
@@ -13,7 +15,10 @@ class TrainerConfig:
     learning_rate: float = 1e-4
     weight_decay: float = 1e-5
     warmup_steps: int = 100
-    scheduler_type: str = "cosine"  # cosine / linear / none
+    scheduler_type: str = "cosine"  # cosine / linear / plateau / none
+    plateau_factor: float = 0.5
+    plateau_patience: int = 5
+    min_learning_rate: float = 1e-6
 
     # 损失权重
     graph_loss_weight: float = 1.0
@@ -67,7 +72,7 @@ class TrainerConfig:
 
     # 对比学习超矩形配置
     contrastive_batch_size: int = 16  # 对比 DataLoader batch 大小
-    pair_candidate_pool_size: int = 128
+    pair_candidate_pool_size: int = DEFAULT_PAIR_CANDIDATE_POOL_SIZE
     pair_relative_low_quota: int = 2
     pair_relative_mid_quota: int = 1
     pair_relative_high_quota: int = 1
@@ -77,7 +82,7 @@ class TrainerConfig:
     joint_contrastive: bool = False  # 启用 pair 对比训练
     lambda_ce: float = 1.0  # a/b 两路监督损失的合并权重
     lambda_iou: float = 1.0  # 逐 coverage type 真实体积 IoU 损失权重
-    lambda_volume: float = 0.25  # 单样本真实体积校准损失权重
+    lambda_volume: float = 1.0  # 单样本真实体积校准损失权重
     volume_warmup_epochs: int = 5
     smooth_intersection_temperature: float = 0.01
 
@@ -85,6 +90,12 @@ class TrainerConfig:
     coverage_target_keys: tuple = ("branch",)  # 实际用于 loss 的覆盖率列子集
 
     def __post_init__(self) -> None:
+        if not 0.0 < self.plateau_factor < 1.0:
+            raise ValueError("plateau_factor must be between zero and one")
+        if self.plateau_patience < 0:
+            raise ValueError("plateau_patience must be non-negative")
+        if self.min_learning_rate < 0.0:
+            raise ValueError("min_learning_rate must be non-negative")
         if self.pair_candidate_pool_size <= 0:
             raise ValueError("pair_candidate_pool_size must be positive")
         quotas = (

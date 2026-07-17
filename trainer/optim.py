@@ -12,6 +12,10 @@ def configure_adamw_with_scheduler(
     weight_decay: float,
     scheduler_type: str,
     warmup_steps: int,
+    plateau_monitor: str = "val/total_loss",
+    plateau_factor: float = 0.5,
+    plateau_patience: int = 5,
+    min_learning_rate: float = 1e-6,
 ):
     """按现有 LightningModule 语义创建 AdamW 和可选 step scheduler。"""
     optimizer = torch.optim.AdamW(
@@ -20,6 +24,25 @@ def configure_adamw_with_scheduler(
 
     if scheduler_type == "none":
         return optimizer
+
+    if scheduler_type == "plateau":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=plateau_factor,
+            patience=plateau_patience,
+            min_lr=min_learning_rate,
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "monitor": plateau_monitor,
+                "interval": "epoch",
+                "frequency": 1,
+                "strict": True,
+            },
+        }
 
     trainer = module.trainer
     if trainer.max_steps > 0:

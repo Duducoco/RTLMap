@@ -16,6 +16,7 @@ HYPERRECTANGLE_TYPE_NAMES: tuple[str, ...] = (
     "fsm",
     "branch",
 )
+HYPERRECTANGLE_HEAD_TYPE = "residual_mlp_v1"
 
 
 @dataclass
@@ -55,6 +56,7 @@ class ModelConfig:
     hyper_min_margin: float = 0.01  # 超矩形每个维度的最小宽度
     hyperrectangle_type_names: tuple = HYPERRECTANGLE_TYPE_NAMES
     hyperrectangle_dim_per_type: int = 10
+    hyperrectangle_head_type: str = HYPERRECTANGLE_HEAD_TYPE
 
     def __post_init__(self):
         self.num_graph_targets = len(self.coverage_target_keys)
@@ -63,6 +65,11 @@ class ModelConfig:
         if self.hyperrectangle_type_names != HYPERRECTANGLE_TYPE_NAMES:
             raise ValueError(
                 "hyperrectangle_type_names must match the typed coverage target order"
+            )
+        if self.hyperrectangle_head_type != HYPERRECTANGLE_HEAD_TYPE:
+            raise ValueError(
+                f"unsupported hyperrectangle_head_type: "
+                f"{self.hyperrectangle_head_type!r}"
             )
 
 

@@ -28,6 +28,7 @@ import sys
 
 import torch
 
+from contrastive_defaults import DEFAULT_PAIR_CANDIDATE_POOL_SIZE
 from datasets import DualGraphDataModule
 from models.data_types import ModelConfig
 from trainer.config import TrainerConfig
@@ -97,9 +98,12 @@ def parse_args() -> argparse.Namespace:
     train_g.add_argument("--warmup-steps", type=int, default=100)
     train_g.add_argument(
         "--scheduler",
-        choices=["cosine", "linear", "none"],
+        choices=["cosine", "linear", "plateau", "none"],
         default="cosine",
     )
+    train_g.add_argument("--plateau-factor", type=float, default=0.5)
+    train_g.add_argument("--plateau-patience", type=int, default=5)
+    train_g.add_argument("--min-lr", type=float, default=1e-6)
     train_g.add_argument("--graph-loss-weight", type=float, default=1.0)
     train_g.add_argument(
         "--coverage-targets",
@@ -168,7 +172,11 @@ def parse_args() -> argparse.Namespace:
         default=16,
         help="对比 DataLoader batch 大小",
     )
-    hyper.add_argument("--pair-candidate-pool-size", type=int, default=128)
+    hyper.add_argument(
+        "--pair-candidate-pool-size",
+        type=int,
+        default=DEFAULT_PAIR_CANDIDATE_POOL_SIZE,
+    )
     hyper.add_argument("--pair-relative-low-quota", type=int, default=2)
     hyper.add_argument("--pair-relative-mid-quota", type=int, default=1)
     hyper.add_argument("--pair-relative-high-quota", type=int, default=1)
@@ -188,7 +196,7 @@ def parse_args() -> argparse.Namespace:
         "--lambda-iou", type=float, default=1.0, help="逐类型真实体积 IoU 损失权重"
     )
     joint.add_argument(
-        "--lambda-volume", type=float, default=0.25, help="真实体积校准损失权重"
+        "--lambda-volume", type=float, default=1.0, help="真实体积校准损失权重"
     )
     joint.add_argument(
         "--volume-warmup-epochs",
@@ -233,6 +241,9 @@ def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
         weight_decay=args.weight_decay,
         warmup_steps=args.warmup_steps,
         scheduler_type=args.scheduler,
+        plateau_factor=args.plateau_factor,
+        plateau_patience=args.plateau_patience,
+        min_learning_rate=args.min_lr,
         graph_loss_weight=args.graph_loss_weight,
         max_epochs=args.max_epochs,
         batch_size=args.batch_size,
@@ -357,6 +368,9 @@ def main() -> None:
             graph_loss_weight=args.graph_loss_weight,
             warmup_steps=args.warmup_steps,
             scheduler_type=args.scheduler,
+            plateau_factor=args.plateau_factor,
+            plateau_patience=args.plateau_patience,
+            min_learning_rate=args.min_lr,
             coverage_target_keys=tuple(args.coverage_targets),
             joint_contrastive=args.joint_contrastive,
             lambda_ce=args.lambda_ce,

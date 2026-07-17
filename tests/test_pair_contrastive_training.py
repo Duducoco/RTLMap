@@ -106,7 +106,9 @@ def test_pair_training_step_uses_only_a_and_b() -> None:
     assert seen_ids == [id(batch.batch_a), id(batch.batch_b)]
 
 
-def test_pair_training_step_uses_one_weighted_endpoint_graph_loss(monkeypatch) -> None:
+def test_pair_training_step_combines_both_graph_volume_and_iou_losses(
+    monkeypatch,
+) -> None:
     torch.manual_seed(0)
     batch = make_contrastive_pair_batch(batch_size=2, asm_instruction_dim=32)
     config = ModelConfig(
@@ -120,6 +122,8 @@ def test_pair_training_step_uses_one_weighted_endpoint_graph_loss(monkeypatch) -
         joint_contrastive=True,
         lambda_ce=1.0,
         lambda_iou=0.5,
+        lambda_volume=1.0,
+        volume_warmup_epochs=0,
     )
     module.train()
 
@@ -135,7 +139,10 @@ def test_pair_training_step_uses_one_weighted_endpoint_graph_loss(monkeypatch) -
     def fake_weighted_graph_loss(graph_pred, target, endpoint_weight, **kwargs):
         del graph_pred, target, kwargs
         seen_weights.append(endpoint_weight.detach().cpu())
-        return torch.tensor(5.0, device=module.device)
+        return torch.tensor(
+            4.0 if len(seen_weights) == 1 else 6.0,
+            device=module.device,
+        )
 
     monkeypatch.setattr(
         joint_steps,
@@ -147,18 +154,70 @@ def test_pair_training_step_uses_one_weighted_endpoint_graph_loss(monkeypatch) -
         joint_steps,
         "compute_coverage_geometry_losses",
         lambda *args, **kwargs: SimpleNamespace(
-            iou_loss=torch.tensor(0.0, device=module.device),
-            volume_loss=torch.tensor(0.0, device=module.device),
+            iou_loss=torch.tensor(2.0, device=module.device),
+            volume_loss=torch.tensor(3.0, device=module.device),
         ),
     )
 
     loss = module.training_step(batch, 0)
 
-    assert torch.equal(loss, torch.tensor(5.0, device=module.device))
-    assert len(seen_weights) == 1
-    assert torch.equal(seen_weights[0], torch.tensor([1.0, 2.0, 3.0, 4.0]))
+    assert torch.equal(loss, torch.tensor(9.0, device=module.device))
+    assert len(seen_weights) == 2
+    assert torch.equal(seen_weights[0], torch.tensor([1.0, 2.0]))
+    assert torch.equal(seen_weights[1], torch.tensor([3.0, 4.0]))
+
+
+def test_pair_validation_total_uses_the_same_three_loss_parts(monkeypatch) -> None:
+    batch = make_contrastive_pair_batch(batch_size=2, asm_instruction_dim=32)
+    module = DualGraphLightningModule(
+        model_config=ModelConfig(
+            hidden_dim=32,
+            num_gnn_layers=1,
+            asm_instruction_dim=32,
+            use_hyperrectangle=True,
+        ),
+        joint_contrastive=True,
+        lambda_ce=1.0,
+        lambda_iou=0.5,
+        lambda_volume=1.0,
+    )
+    out = SimpleNamespace(graph_pred=torch.zeros(2, 1))
+    outputs = iter((out, out))
+    module.forward = lambda batch: next(outputs)
+    monkeypatch.setattr(
+        joint_steps,
+        "_pair_graph_losses",
+        lambda *args: (
+            torch.tensor(4.0),
+            torch.tensor(6.0),
+            torch.tensor(5.0),
+        ),
+    )
+    monkeypatch.setattr(
+        joint_steps,
+        "_geometry_losses",
+        lambda *args, **kwargs: SimpleNamespace(
+            iou_loss=torch.tensor(2.0),
+            volume_loss=torch.tensor(3.0),
+        ),
+    )
+    monkeypatch.setattr(
+        joint_steps,
+        "_hard_geometry_metrics",
+        lambda *args: (object(), {}),
+    )
+    module.contrastive_metrics.collect = lambda **kwargs: None
+    logged = {}
+    module.log_dict = lambda values, **kwargs: logged.update(values)
+
+    loss = joint_steps.run_pair_validation_step(module, batch)
+
+    assert torch.equal(loss, torch.tensor(9.0))
+    assert torch.equal(logged["val/pair_supervised_loss_a"], torch.tensor(4.0))
+    assert torch.equal(logged["val/pair_supervised_loss_b"], torch.tensor(6.0))
+    assert torch.equal(logged["val/pair_supervised_loss"], torch.tensor(5.0))
 
 
 if __name__ == "__main__":
     test_pair_training_step_uses_only_a_and_b()
-    test_pair_training_step_uses_one_weighted_endpoint_graph_loss()
+    test_pair_training_step_combines_both_graph_volume_and_iou_losses()
