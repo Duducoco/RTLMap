@@ -19,10 +19,11 @@ import torch
 import lightning as L
 from torch_geometric.data import Dataset
 from torch_geometric.loader import DataLoader as PyGDataLoader
-from torch.utils.data import Subset
+from torch.utils.data import DistributedSampler, Subset
 
 from .asm_encoding import load_asm_encodings as _load_asm_encodings
 from .data_types import DualGraphData
+from .samplers import DistributedEvalBatchSampler
 from .graph_builders import (
     build_asm_graph as _build_asm_graph,
     build_rtl_structure as _build_rtl_structure,
@@ -380,6 +381,7 @@ class DualGraphDataModule(L.LightningDataModule):
         use_bucketing: bool = False,
         token_budget: int = 8192,
         persistent_workers: bool = True,
+        manual_distributed_sampling: bool = False,
     ):
         """
         Args:
@@ -393,6 +395,7 @@ class DualGraphDataModule(L.LightningDataModule):
             use_bucketing: 是否启用按 RTL 图大小分桶的动态 batch（默认 False）
             token_budget: bucketing 模式下每 batch 最大节点总数
             persistent_workers: 是否跨 epoch 保留 DataLoader worker
+            manual_distributed_sampling: 是否由 DataModule 显式进行 DDP 分片
         """
         super().__init__()
         self.root = root
@@ -405,6 +408,7 @@ class DualGraphDataModule(L.LightningDataModule):
         self.use_bucketing = use_bucketing
         self.token_budget = token_budget
         self.persistent_workers = persistent_workers
+        self.manual_distributed_sampling = manual_distributed_sampling
 
         self.train_dataset = None
         self.val_dataset = None
@@ -412,6 +416,15 @@ class DualGraphDataModule(L.LightningDataModule):
         self.train_indices: Optional[list[int]] = None
         self.val_indices: Optional[list[int]] = None
         self.split_diagnostics: dict[str, object] = {}
+
+    @property
+    def manages_distributed_sampling(self) -> bool:
+        """Whether Lightning must leave this DataModule's samplers unchanged."""
+        return self.use_bucketing or self.manual_distributed_sampling
+
+    def enable_manual_distributed_sampling(self) -> None:
+        """Let composed DataModules take ownership of DDP sampling."""
+        self.manual_distributed_sampling = True
 
     def _make_dataset(self, split: str) -> DualGraphDataset:
         return DualGraphDataset(
@@ -545,10 +558,32 @@ class DualGraphDataModule(L.LightningDataModule):
                 persistent_workers=persistent,
             )
 
+        sampler = None
+        if (
+            self.manual_distributed_sampling
+            and torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        ):
+            if not shuffle:
+                return PyGDataLoader(
+                    dataset,
+                    batch_sampler=DistributedEvalBatchSampler(
+                        dataset_size=len(dataset),
+                        batch_size=self.batch_size,
+                    ),
+                    num_workers=effective_workers,
+                    follow_batch=["asm_node_type"],
+                    pin_memory=True,
+                    persistent_workers=persistent,
+                )
+            sampler = DistributedSampler(dataset, shuffle=shuffle)
+            shuffle = False
+
         return PyGDataLoader(
             dataset,
             batch_size=self.batch_size,
             shuffle=shuffle,
+            sampler=sampler,
             num_workers=effective_workers,
             follow_batch=["asm_node_type"],
             pin_memory=True,

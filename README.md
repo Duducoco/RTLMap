@@ -261,6 +261,12 @@ Joint contrastive 模式直接使用新版 `dataset.v1` 普通数据集，不再
 覆盖签名完全相同的候选；仅在全部候选签名都相同时回退。graph 和 volume 这两个 endpoint-local loss 使用 inverse-degree 权重保持
 样本等权，IoU calibration 和 ranking loss 按有效 coverage type 等权。
 
+Pair DataLoader 会把本轮已选 pair 按全局 Coverage Similarity 排序，再把完整的
+低到高排序蛇形铺到所有 batch，使每个 batch 获得覆盖全分布的等距 rank。DDP
+先对全局排序做无重复的交错分片，再在各 rank 内铺排；各 rank 步数一致，尾批
+大小可以相差 1。从而在不使用固定 Jaccard 绝对区间的前提下，为 ranking loss
+提供足够的目标差。
+
 自动验证集按 `(dataset_dir, test_id)` 整组划分，保证同一个 Test Stimulus 不会
 同时出现在训练和验证中，并保证验证 module 在训练集中仍有样本。
 每种 coverage type 对应一个五维子矩形。子矩形 log 真实体积监督为该类型的

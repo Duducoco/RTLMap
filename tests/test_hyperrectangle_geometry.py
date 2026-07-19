@@ -192,6 +192,8 @@ def test_iou_rank_loss_penalizes_collapsed_pair_ordering() -> None:
     )
 
     assert losses.iou_rank_loss.item() == pytest.approx(0.05, abs=1e-6)
+    assert losses.iou_rank_informative_pair_count.item() == 1
+    assert losses.iou_rank_active_type_count.item() == 1
     assert losses.iou_loss > losses.iou_calibration_loss
     losses.iou_rank_loss.backward()
     assert hyper_max_a.grad is not None

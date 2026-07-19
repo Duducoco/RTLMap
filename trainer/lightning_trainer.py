@@ -29,6 +29,7 @@ class LightningTrainer:
         logger_type: str = "tensorboard",
         extra_callbacks: Optional[List[Callback]] = None,
         has_validation: bool = True,
+        datamodule_manages_distributed_sampling: bool = False,
     ):
         """
         Args:
@@ -37,6 +38,7 @@ class LightningTrainer:
             logger_type: 日志类型 (tensorboard / csv)
             extra_callbacks: 额外的自定义 callbacks
             has_validation: 是否有验证数据（影响 checkpoint 和 early stopping）
+            datamodule_manages_distributed_sampling: DataModule 是否自行进行 DDP 分片
         """
         self.config = config
         self.experiment_name = experiment_name
@@ -84,7 +86,9 @@ class LightningTrainer:
             # 性能
             deterministic=config.deterministic,
             benchmark=config.benchmark,
-            use_distributed_sampler=not config.use_bucketing,
+            use_distributed_sampler=not (
+                config.use_bucketing or datamodule_manages_distributed_sampling
+            ),
             # 日志
             log_every_n_steps=config.log_every_n_steps,
             # sanity check

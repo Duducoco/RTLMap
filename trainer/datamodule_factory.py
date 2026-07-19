@@ -11,6 +11,8 @@ from datasets.pair_datamodule import ContrastivePairDataModule
 class JointTrainDataModule(L.LightningDataModule):
     """训练 dataloader 来自 pair loader，验证/测试来自普通 DataModule。"""
 
+    manages_distributed_sampling = True
+
     def __init__(
         self,
         base: DualGraphDataModule,
@@ -18,6 +20,7 @@ class JointTrainDataModule(L.LightningDataModule):
         pair_val_dm: ContrastivePairDataModule,
     ):
         super().__init__()
+        base.enable_manual_distributed_sampling()
         self._base = base
         self._pair_dm = pair_dm
         self._pair_val_dm = pair_val_dm

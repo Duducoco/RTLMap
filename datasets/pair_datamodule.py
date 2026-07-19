@@ -35,6 +35,7 @@ from .manifest import (
     normalize_dataset_dirs as _normalize_dataset_dirs,
     read_manifest_samples_from_dirs as _read_manifest_samples_from_dirs,
 )
+from .samplers import RankingAwarePairBatchSampler
 
 if TYPE_CHECKING:
     from text_encoder import TextEncoderConfig
@@ -54,6 +55,17 @@ class GeometryPairRecord:
     degree_b: int = 0
     endpoint_weight_a: float = 0.0
     endpoint_weight_b: float = 0.0
+
+    @property
+    def coverage_similarity(self) -> float:
+        scores = [
+            score
+            for score, active in zip(
+                self.targets.jaccard, self.targets.iou_mask, strict=True
+            )
+            if active
+        ]
+        return sum(scores) / len(scores) if scores else 0.0
 
 
 def _stable_seed(*parts: object) -> int:
@@ -394,6 +406,7 @@ class ContrastivePairDataModule:
         )
         self.asm_chunk_files = max(1, int(asm_chunk_files))
         self._dataset: Optional[ContrastivePairDataset] = None
+        self._epoch = 0
 
     def set_sample_indices(self, sample_indices: Optional[Sequence[int]]) -> None:
         self.sample_indices = (
@@ -420,31 +433,32 @@ class ContrastivePairDataModule:
     def set_epoch(self, epoch: int) -> None:
         if self._dataset is None:
             self.setup("fit")
-        self._dataset.resample(epoch)
+        self._epoch = int(epoch)
+        self._dataset.resample(self._epoch)
+
+    def _create_loader(self, *, shuffle: bool) -> DataLoader:
+        if self._dataset is None:
+            self.setup()
+        batch_sampler = RankingAwarePairBatchSampler(
+            self._dataset,
+            batch_size=self.batch_size,
+            shuffle=shuffle,
+            seed=self.sampling_seed,
+        )
+        batch_sampler.set_epoch(self._epoch)
+        return DataLoader(
+            self._dataset,
+            batch_sampler=batch_sampler,
+            num_workers=self.num_workers,
+            collate_fn=contrastive_pair_collate,
+            pin_memory=True,
+        )
 
     def train_dataloader(self) -> DataLoader:
-        if self._dataset is None:
-            self.setup()
-        return DataLoader(
-            self._dataset,
-            batch_size=self.batch_size,
-            shuffle=self.shuffle,
-            num_workers=self.num_workers,
-            collate_fn=contrastive_pair_collate,
-            pin_memory=True,
-        )
+        return self._create_loader(shuffle=self.shuffle)
 
     def val_dataloader(self) -> DataLoader:
-        if self._dataset is None:
-            self.setup()
-        return DataLoader(
-            self._dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            collate_fn=contrastive_pair_collate,
-            pin_memory=True,
-        )
+        return self._create_loader(shuffle=False)
 
     def __len__(self) -> int:
         if self._dataset is None:

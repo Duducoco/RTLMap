@@ -81,6 +81,22 @@ def _pair_graph_losses(module, out_a, out_b, batch):
     return loss_a, loss_b, 0.5 * (loss_a + loss_b)
 
 
+def _ddp_sample_mean_scale(local_batch_size: int, device: torch.device) -> torch.Tensor:
+    """Preserve a global sample mean when DDP tail-batch sizes differ."""
+    scale = torch.ones((), device=device)
+    if not (
+        torch.distributed.is_available() and torch.distributed.is_initialized()
+    ):
+        return scale
+    global_batch_size = torch.tensor(float(local_batch_size), device=device)
+    torch.distributed.all_reduce(global_batch_size)
+    return scale * (
+        torch.distributed.get_world_size()
+        * float(local_batch_size)
+        / global_batch_size.clamp_min(1.0)
+    )
+
+
 def run_pair_training_step(module, batch: ContrastivePairBatch) -> torch.Tensor:
     """执行覆盖向量 pair 对比训练步骤。"""
     batch.batch_a = batch.batch_a.to(module.device)
@@ -110,6 +126,9 @@ def run_pair_training_step(module, batch: ContrastivePairBatch) -> torch.Tensor:
     )
     weighted_volume = effective_volume_weight * geometry_losses.volume_loss
     total = weighted_supervised + weighted_iou + weighted_volume
+    optimization_total = total * _ddp_sample_mean_scale(
+        batch.jaccard.shape[0], total.device
+    )
 
     module.log_dict(
         {
@@ -121,6 +140,12 @@ def run_pair_training_step(module, batch: ContrastivePairBatch) -> torch.Tensor:
                 geometry_losses.iou_calibration_loss.detach()
             ),
             "train/iou_rank_loss": geometry_losses.iou_rank_loss.detach(),
+            "train/iou_rank_informative_pairs_per_batch": (
+                geometry_losses.iou_rank_informative_pair_count.detach()
+            ),
+            "train/iou_rank_active_types_per_batch": (
+                geometry_losses.iou_rank_active_type_count.detach()
+            ),
             "train/volume_loss": geometry_losses.volume_loss.detach(),
             "train/weighted_supervised_loss": weighted_supervised.detach(),
             "train/weighted_iou_loss": weighted_iou.detach(),
@@ -149,7 +174,7 @@ def run_pair_training_step(module, batch: ContrastivePairBatch) -> torch.Tensor:
         sync_dist=True,
     )
 
-    return total
+    return optimization_total
 
 
 def run_pair_validation_step(module, batch: ContrastivePairBatch) -> torch.Tensor:
@@ -185,6 +210,12 @@ def run_pair_validation_step(module, batch: ContrastivePairBatch) -> torch.Tenso
         "val/pair_iou_loss": losses.iou_loss.detach(),
         "val/pair_iou_calibration_loss": losses.iou_calibration_loss.detach(),
         "val/pair_iou_rank_loss": losses.iou_rank_loss.detach(),
+        "val/pair_iou_rank_informative_pairs_per_batch": (
+            losses.iou_rank_informative_pair_count.detach()
+        ),
+        "val/pair_iou_rank_active_types_per_batch": (
+            losses.iou_rank_active_type_count.detach()
+        ),
         "val/pair_volume_loss": losses.volume_loss.detach(),
         "val/pair_weighted_supervised_loss": weighted_supervised.detach(),
         "val/pair_weighted_iou_loss": weighted_iou.detach(),

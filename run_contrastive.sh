@@ -118,7 +118,7 @@ fi
 
 DATASET_DIRS=("$DATASET_DIR")
 DATA_ROOT="${DATA_ROOT:-./data_contrastive_${DATASET_NAME}}"
-EXPERIMENT_NAME="${DATASET_NAME}-4coverage-split-rect-mlp-asm-geometry-rank"
+EXPERIMENT_NAME="${DATASET_NAME}-4coverage-split-rect-mlp-asm-geometry-rank-batch"
 
 set --
 if [[ -n "$CKPT_PATH" ]]; then

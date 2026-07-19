@@ -48,3 +48,7 @@ _Avoid_: Pair cache, pair batch
 **Relative Similarity Stratum**:
 The relative-low, relative-mid, or relative-high rank region of an anchor sample's same-module Geometry Pair candidates. A relative-low candidate is not necessarily low in absolute Coverage Similarity.
 _Avoid_: Dissimilar pair, negative pair
+
+**Ranking-Aware Pair Batch**:
+A Geometry Pair batch receiving evenly spaced ranks from the full sorted Coverage Similarity range of one Geometry Pair Set. DDP takes a strided rank slice before snake-distributing low-to-high ranks across local batches.
+_Avoid_: Absolute-interval batch

@@ -157,6 +157,8 @@ def test_pair_training_step_combines_both_graph_volume_and_iou_losses(
             iou_loss=torch.tensor(2.0, device=module.device),
             iou_calibration_loss=torch.tensor(1.5, device=module.device),
             iou_rank_loss=torch.tensor(1.0, device=module.device),
+            iou_rank_informative_pair_count=torch.tensor(7, device=module.device),
+            iou_rank_active_type_count=torch.tensor(4, device=module.device),
             volume_loss=torch.tensor(3.0, device=module.device),
         ),
     )
@@ -167,6 +169,21 @@ def test_pair_training_step_combines_both_graph_volume_and_iou_losses(
     assert len(seen_weights) == 2
     assert torch.equal(seen_weights[0], torch.tensor([1.0, 2.0]))
     assert torch.equal(seen_weights[1], torch.tensor([3.0, 4.0]))
+
+
+def test_ddp_tail_batch_scale_preserves_global_sample_mean(monkeypatch) -> None:
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+
+    def fake_all_reduce(value: torch.Tensor) -> None:
+        value.add_(4.0)
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", fake_all_reduce)
+
+    scale = joint_steps._ddp_sample_mean_scale(5, torch.device("cpu"))
+
+    torch.testing.assert_close(scale, torch.tensor(10.0 / 9.0))
 
 
 def test_pair_validation_total_uses_the_same_three_loss_parts(monkeypatch) -> None:
@@ -202,6 +219,8 @@ def test_pair_validation_total_uses_the_same_three_loss_parts(monkeypatch) -> No
             iou_loss=torch.tensor(2.0),
             iou_calibration_loss=torch.tensor(1.5),
             iou_rank_loss=torch.tensor(1.0),
+            iou_rank_informative_pair_count=torch.tensor(7),
+            iou_rank_active_type_count=torch.tensor(4),
             volume_loss=torch.tensor(3.0),
         ),
     )
@@ -222,6 +241,12 @@ def test_pair_validation_total_uses_the_same_three_loss_parts(monkeypatch) -> No
     assert torch.equal(logged["val/pair_supervised_loss"], torch.tensor(5.0))
     assert torch.equal(logged["val/pair_iou_calibration_loss"], torch.tensor(1.5))
     assert torch.equal(logged["val/pair_iou_rank_loss"], torch.tensor(1.0))
+    assert torch.equal(
+        logged["val/pair_iou_rank_informative_pairs_per_batch"], torch.tensor(7)
+    )
+    assert torch.equal(
+        logged["val/pair_iou_rank_active_types_per_batch"], torch.tensor(4)
+    )
 
 
 if __name__ == "__main__":

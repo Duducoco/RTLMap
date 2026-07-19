@@ -93,6 +93,9 @@ def train_model(
         logger_type=app_config.runtime.logger_type,
         extra_callbacks=extra_callbacks,
         has_validation=has_validation,
+        datamodule_manages_distributed_sampling=bool(
+            getattr(effective_datamodule, "manages_distributed_sampling", False)
+        ),
     )
 
     lightning_trainer.fit(

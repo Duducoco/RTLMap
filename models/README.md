@@ -68,6 +68,11 @@ L_total = lambda_ce * (L_graph(a) + L_graph(b)) / 2
 或完全相同的 pair。训练使用平滑交集和 log-IoU，验证与推理使用硬交集；不使用
 merged report，也不使用边分类标签。
 
+Pair batch 从当前 Geometry Pair Set 的完整 Coverage Similarity 排序中取得等距
+rank。日志中的 `iou_rank_informative_pairs_per_batch` 和
+`iou_rank_active_types_per_batch` 用于确认每批平均有多少个有效比较和覆盖类型，
+batch 内实际存在可用的排序监督。
+
 ## 测试
 
 ```bash

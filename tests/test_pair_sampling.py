@@ -19,8 +19,11 @@ import datasets.pair_datamodule as pair_module
 from datasets.coverage_vector_similarity import build_coverage_signature
 from datasets.datamodule import DualGraphDataModule
 from datasets.data_types import DualGraphData
+from datasets.coverage_vector_similarity import CoverageGeometryTargets
 from datasets.manifest import read_manifest_samples
 from datasets.pair_datamodule import ContrastivePairDataModule, ContrastivePairDataset
+from datasets.pair_datamodule import GeometryPairRecord
+from datasets.samplers import DistributedEvalBatchSampler, RankingAwarePairBatchSampler
 from trainer.datamodule_factory import JointTrainDataModule, build_training_datamodule
 from trainer.config import TrainerConfig
 from trainer.lightning_trainer import LightningTrainer
@@ -119,6 +122,163 @@ def pair_dataset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def _unordered_pairs(dataset: ContrastivePairDataset) -> set[frozenset[int]]:
     return {frozenset((record.idx_a, record.idx_b)) for record in dataset.pair_records}
+
+
+class _ScoredPairDataset:
+    def __init__(self, scores: list[float]):
+        self.pair_records = tuple(
+            GeometryPairRecord(
+                idx_a=index,
+                idx_b=index + 100,
+                targets=CoverageGeometryTargets(
+                    density_a=(0.5,),
+                    density_b=(0.5,),
+                    size_mask=(True,),
+                    jaccard=(score,),
+                    iou_mask=(True,),
+                ),
+                stratum="test",
+            )
+            for index, score in enumerate(scores)
+        )
+
+    def __len__(self) -> int:
+        return len(self.pair_records)
+
+
+def test_ranking_aware_batches_mix_global_similarity_tertiles() -> None:
+    dataset = _ScoredPairDataset([index / 23 for index in range(24)])
+    sampler = RankingAwarePairBatchSampler(
+        dataset,
+        batch_size=6,
+        shuffle=False,
+        num_replicas=1,
+        rank=0,
+    )
+
+    batches = list(sampler)
+
+    assert len(batches) == 4
+    assert sorted(index for batch in batches for index in batch) == list(range(24))
+    for batch in batches:
+        assert any(index < 8 for index in batch)
+        assert any(8 <= index < 16 for index in batch)
+        assert any(index >= 16 for index in batch)
+
+
+def test_ranking_aware_batches_shard_each_tertile_across_ddp_ranks() -> None:
+    dataset = _ScoredPairDataset([index / 23 for index in range(24)])
+    rank_zero = RankingAwarePairBatchSampler(
+        dataset,
+        batch_size=6,
+        shuffle=False,
+        num_replicas=2,
+        rank=0,
+    )
+    rank_one = RankingAwarePairBatchSampler(
+        dataset,
+        batch_size=6,
+        shuffle=False,
+        num_replicas=2,
+        rank=1,
+    )
+
+    batches_zero = list(rank_zero)
+    batches_one = list(rank_one)
+    indices_zero = {index for batch in batches_zero for index in batch}
+    indices_one = {index for batch in batches_one for index in batch}
+
+    assert len(batches_zero) == len(batches_one) == 2
+    assert indices_zero.isdisjoint(indices_one)
+    assert indices_zero | indices_one == set(range(24))
+    for batch in batches_zero + batches_one:
+        assert any(index < 8 for index in batch)
+        assert any(8 <= index < 16 for index in batch)
+        assert any(index >= 16 for index in batch)
+
+
+def test_ranking_aware_ddp_batches_do_not_pad_non_divisible_pair_count() -> None:
+    dataset = _ScoredPairDataset([index / 24 for index in range(25)])
+    samplers = [
+        RankingAwarePairBatchSampler(
+            dataset,
+            batch_size=6,
+            shuffle=False,
+            num_replicas=2,
+            rank=rank,
+        )
+        for rank in range(2)
+    ]
+
+    batches_by_rank = [list(sampler) for sampler in samplers]
+    indices_by_rank = [
+        [index for batch in batches for index in batch]
+        for batches in batches_by_rank
+    ]
+
+    assert [len(batches) for batches in batches_by_rank] == [3, 3]
+    assert set(indices_by_rank[0]).isdisjoint(indices_by_rank[1])
+    assert sorted(indices_by_rank[0] + indices_by_rank[1]) == list(range(25))
+
+
+def test_distributed_eval_batches_cover_non_divisible_dataset_without_padding() -> None:
+    samplers = [
+        DistributedEvalBatchSampler(
+            dataset_size=13,
+            batch_size=4,
+            num_replicas=2,
+            rank=rank,
+        )
+        for rank in range(2)
+    ]
+
+    batches_by_rank = [list(sampler) for sampler in samplers]
+    indices_by_rank = [
+        [index for batch in batches for index in batch]
+        for batches in batches_by_rank
+    ]
+
+    assert [len(batches) for batches in batches_by_rank] == [2, 2]
+    assert set(indices_by_rank[0]).isdisjoint(indices_by_rank[1])
+    assert sorted(indices_by_rank[0] + indices_by_rank[1]) == list(range(13))
+
+
+def test_unpadded_ddp_batches_reject_an_impossible_equal_step_layout() -> None:
+    dataset = _ScoredPairDataset([0.0, 0.5, 1.0])
+
+    with pytest.raises(ValueError, match="too small"):
+        RankingAwarePairBatchSampler(
+            dataset,
+            batch_size=1,
+            num_replicas=2,
+            rank=0,
+        )
+    with pytest.raises(ValueError, match="too small"):
+        DistributedEvalBatchSampler(
+            dataset_size=3,
+            batch_size=1,
+            num_replicas=2,
+            rank=0,
+        )
+
+
+def test_pair_datamodule_uses_ranking_aware_batches_for_train_and_validation(
+    pair_dataset: ContrastivePairDataset,
+) -> None:
+    datamodule = ContrastivePairDataModule(
+        dataset_dir=Path("unused"),
+        batch_size=8,
+        sampling_seed=19,
+    )
+    datamodule._dataset = pair_dataset
+
+    train_loader = datamodule.train_dataloader()
+    val_loader = datamodule.val_dataloader()
+
+    assert isinstance(train_loader.batch_sampler, RankingAwarePairBatchSampler)
+    assert train_loader.batch_sampler.shuffle is True
+    assert isinstance(val_loader.batch_sampler, RankingAwarePairBatchSampler)
+    assert val_loader.batch_sampler.shuffle is False
 
 
 def test_pair_sampling_is_unique_relative_and_epoch_deterministic(
@@ -330,7 +490,7 @@ def test_joint_train_loader_resamples_for_current_epoch() -> None:
 
     pair_dm = EpochAwarePairDataModule()
     joint = JointTrainDataModule(
-        base=SimpleNamespace(),
+        base=SimpleNamespace(enable_manual_distributed_sampling=lambda: None),
         pair_dm=pair_dm,
         pair_val_dm=SimpleNamespace(),
     )
@@ -413,9 +573,11 @@ def test_joint_trainer_reloads_dataloaders_each_epoch(tmp_path: Path) -> None:
         ),
         logger_type="csv",
         has_validation=False,
+        datamodule_manages_distributed_sampling=True,
     )
 
     assert wrapper.trainer.reload_dataloaders_every_n_epochs == 1
+    assert wrapper.trainer._accelerator_connector.use_distributed_sampler is False
 
 
 def test_joint_training_disables_persistent_workers_for_reloaded_loaders(
@@ -439,6 +601,40 @@ def test_joint_training_disables_persistent_workers_for_reloaded_loaders(
     assert loader.num_workers == 2
     assert loader.pin_memory is True
     assert loader.persistent_workers is False
+
+
+def test_joint_base_validation_loader_manages_ddp_sampling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    datamodule, _ = build_training_datamodule(
+        data_root=str(tmp_path / "data"),
+        dataset_dir=tmp_path / "dataset",
+        text_encoder_config=None,
+        trainer_config=TrainerConfig(
+            joint_contrastive=True,
+            batch_size=4,
+            num_workers=0,
+        ),
+    )
+    datamodule._base.val_dataset = list(range(13))
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda: 2)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 1)
+
+    loader = datamodule._base.val_dataloader()
+
+    assert isinstance(loader.batch_sampler, DistributedEvalBatchSampler)
+    assert loader.batch_sampler.num_replicas == 2
+    assert loader.batch_sampler.rank == 1
+    assert sorted(index for batch in loader.batch_sampler for index in batch) == [
+        1,
+        3,
+        5,
+        7,
+        9,
+        11,
+    ]
 
 
 def test_standard_training_keeps_persistent_workers(tmp_path: Path) -> None:

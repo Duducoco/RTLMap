@@ -40,6 +40,8 @@ class CoverageGeometryLosses:
     iou_loss: torch.Tensor
     iou_calibration_loss: torch.Tensor
     iou_rank_loss: torch.Tensor
+    iou_rank_informative_pair_count: torch.Tensor
+    iou_rank_active_type_count: torch.Tensor
     geometry: HyperrectangleGeometry
 
 
@@ -79,8 +81,10 @@ def _pairwise_rank_loss(
     *,
     margin: float,
     min_target_gap: float,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     type_losses: list[torch.Tensor] = []
+    informative_pair_count = prediction.new_zeros(())
+    active_type_count = prediction.new_zeros(())
     for column in range(prediction.shape[1]):
         valid = mask[:, column]
         pred = prediction[valid, column]
@@ -95,6 +99,10 @@ def _pairwise_rank_loss(
         informative = (target_gap > 0.0) & (target_gap >= min_target_gap)
         if not informative.any():
             continue
+        informative_pair_count = informative_pair_count + informative.sum().to(
+            prediction.dtype
+        )
+        active_type_count = active_type_count + 1.0
         signed_prediction_delta = target_delta[informative].sign() * (
             pred[row[informative]] - pred[col[informative]]
         )
@@ -102,8 +110,12 @@ def _pairwise_rank_loss(
             F.relu(margin - signed_prediction_delta).mean()
         )
     if not type_losses:
-        return prediction.sum() * 0.0
-    return torch.stack(type_losses).mean()
+        return prediction.sum() * 0.0, informative_pair_count, active_type_count
+    return (
+        torch.stack(type_losses).mean(),
+        informative_pair_count,
+        active_type_count,
+    )
 
 
 def compute_coverage_geometry_losses(
@@ -180,7 +192,11 @@ def compute_coverage_geometry_losses(
     zero_error = geometry.iou.square()
     iou_error = torch.where(positive_target, positive_error, zero_error)
     iou_calibration_loss = _equal_type_mean(iou_error, iou_mask)
-    iou_rank_loss = _pairwise_rank_loss(
+    (
+        iou_rank_loss,
+        iou_rank_informative_pair_count,
+        iou_rank_active_type_count,
+    ) = _pairwise_rank_loss(
         geometry.iou,
         jaccard_float,
         iou_mask,
@@ -193,5 +209,7 @@ def compute_coverage_geometry_losses(
         iou_loss=iou_loss,
         iou_calibration_loss=iou_calibration_loss,
         iou_rank_loss=iou_rank_loss,
+        iou_rank_informative_pair_count=iou_rank_informative_pair_count,
+        iou_rank_active_type_count=iou_rank_active_type_count,
         geometry=geometry,
     )
