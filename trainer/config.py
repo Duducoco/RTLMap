@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from typing import Union
 
 from contrastive_defaults import DEFAULT_PAIR_CANDIDATE_POOL_SIZE
+from models.contrastive_loss import (
+    DEFAULT_IOU_RANKING_CONFIG,
+    IoURankingConfig,
+)
 from models.losses import (
     DEFAULT_GRAPH_RELATIVE_LOSS_FLOOR,
     DEFAULT_GRAPH_RELATIVE_LOSS_WEIGHT,
@@ -88,6 +92,9 @@ class TrainerConfig:
     joint_contrastive: bool = False  # 启用 pair 对比训练
     lambda_ce: float = 1.0  # a/b 两路监督损失的合并权重
     lambda_iou: float = 1.0  # 逐 coverage type 真实体积 IoU 损失权重
+    iou_rank_loss_weight: float = DEFAULT_IOU_RANKING_CONFIG.weight
+    iou_rank_margin: float = DEFAULT_IOU_RANKING_CONFIG.margin
+    iou_rank_min_target_gap: float = DEFAULT_IOU_RANKING_CONFIG.min_target_gap
     lambda_volume: float = 1.0  # 单样本真实体积校准损失权重
     volume_warmup_epochs: int = 5
     smooth_intersection_temperature: float = 0.01
@@ -106,6 +113,11 @@ class TrainerConfig:
             raise ValueError("graph_relative_loss_weight must be non-negative")
         if self.graph_relative_loss_floor <= 0.0:
             raise ValueError("graph_relative_loss_floor must be positive")
+        IoURankingConfig(
+            weight=self.iou_rank_loss_weight,
+            margin=self.iou_rank_margin,
+            min_target_gap=self.iou_rank_min_target_gap,
+        )
         if self.pair_candidate_pool_size <= 0:
             raise ValueError("pair_candidate_pool_size must be positive")
         quotas = (

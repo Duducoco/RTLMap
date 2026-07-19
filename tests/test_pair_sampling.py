@@ -16,6 +16,7 @@ from torch.utils.data import DistributedSampler
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import datasets.pair_datamodule as pair_module
+from datasets.coverage_vector_similarity import build_coverage_signature
 from datasets.datamodule import DualGraphDataModule
 from datasets.data_types import DualGraphData
 from datasets.manifest import read_manifest_samples
@@ -178,6 +179,58 @@ def test_pair_sampling_is_independent_of_manifest_order(
     )
 
     assert reordered.pair_fingerprint == first_fingerprint
+
+
+def test_pair_sampling_avoids_identical_signatures_when_informative_pairs_exist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dataset_dir = tmp_path / "dataset"
+    samples = []
+    covered_sets = [set(range(16))] * 4 + [
+        set(range(12)),
+        set(range(10)),
+        set(range(8)),
+        set(range(6)),
+    ]
+    for index, covered in enumerate(covered_sets):
+        samples.append(
+            {
+                "schema_version": "sample.v1",
+                "sample_id": f"sample-{index}",
+                "test_id": f"test-{index}",
+                "module_name": "M",
+                "rtl_graph": "rtl_graphs/M.json",
+                "asm_graph": None,
+                "targets": {
+                    "coverage_vectors": _vectors(
+                        element_count=16,
+                        covered=covered,
+                    )
+                },
+            }
+        )
+    _write_dataset(dataset_dir, samples)
+    monkeypatch.setattr(pair_module, "DualGraphDataset", _FakeGraphDataset)
+
+    dataset = ContrastivePairDataset(
+        dataset_dir=dataset_dir,
+        candidate_pool_size=8,
+        relative_low_quota=0,
+        relative_mid_quota=0,
+        relative_high_quota=1,
+        sampling_seed=31,
+    )
+
+    assert dataset.pair_records
+    assert all(
+        build_coverage_signature(
+            dataset.samples[record.idx_a]["targets"]["coverage_vectors"]
+        )
+        != build_coverage_signature(
+            dataset.samples[record.idx_b]["targets"]["coverage_vectors"]
+        )
+        for record in dataset.pair_records
+    )
 
 
 def test_grouped_split_keeps_test_stimuli_intact(

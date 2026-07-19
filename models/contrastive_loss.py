@@ -11,21 +11,36 @@ import torch.nn.functional as F
 
 from models.hyperrectangle import HyperrectangleGeometry, hyperrectangle_geometry
 
+DEFAULT_IOU_RANK_LOSS_WEIGHT = 0.5
+DEFAULT_IOU_RANK_MARGIN = 0.05
+DEFAULT_IOU_RANK_MIN_TARGET_GAP = 0.05
+
+
+@dataclass(frozen=True)
+class IoURankingConfig:
+    weight: float = DEFAULT_IOU_RANK_LOSS_WEIGHT
+    margin: float = DEFAULT_IOU_RANK_MARGIN
+    min_target_gap: float = DEFAULT_IOU_RANK_MIN_TARGET_GAP
+
+    def __post_init__(self) -> None:
+        if self.weight < 0.0:
+            raise ValueError("IoU ranking weight must be non-negative")
+        if self.margin < 0.0:
+            raise ValueError("IoU ranking margin must be non-negative")
+        if self.min_target_gap < 0.0:
+            raise ValueError("IoU ranking minimum target gap must be non-negative")
+
+
+DEFAULT_IOU_RANKING_CONFIG = IoURankingConfig()
+
 
 @dataclass(frozen=True)
 class CoverageGeometryLosses:
     volume_loss: torch.Tensor
     iou_loss: torch.Tensor
+    iou_calibration_loss: torch.Tensor
+    iou_rank_loss: torch.Tensor
     geometry: HyperrectangleGeometry
-
-
-def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    if values.shape != mask.shape:
-        raise ValueError(
-            f"masked values and mask shapes differ: {values.shape} != {mask.shape}"
-        )
-    weights = mask.to(values.dtype)
-    return (values * weights).sum() / weights.sum().clamp_min(1.0)
 
 
 def _weighted_type_mean(
@@ -49,6 +64,48 @@ def _weighted_type_mean(
     return per_type[defined].mean()
 
 
+def _equal_type_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    return _weighted_type_mean(
+        values,
+        mask,
+        torch.ones(values.shape[0], device=values.device, dtype=values.dtype),
+    )
+
+
+def _pairwise_rank_loss(
+    prediction: torch.Tensor,
+    target: torch.Tensor,
+    mask: torch.Tensor,
+    *,
+    margin: float,
+    min_target_gap: float,
+) -> torch.Tensor:
+    type_losses: list[torch.Tensor] = []
+    for column in range(prediction.shape[1]):
+        valid = mask[:, column]
+        pred = prediction[valid, column]
+        truth = target[valid, column]
+        if pred.numel() < 2:
+            continue
+        row, col = torch.triu_indices(
+            pred.numel(), pred.numel(), offset=1, device=prediction.device
+        )
+        target_delta = truth[row] - truth[col]
+        target_gap = target_delta.abs()
+        informative = (target_gap > 0.0) & (target_gap >= min_target_gap)
+        if not informative.any():
+            continue
+        signed_prediction_delta = target_delta[informative].sign() * (
+            pred[row[informative]] - pred[col[informative]]
+        )
+        type_losses.append(
+            F.relu(margin - signed_prediction_delta).mean()
+        )
+    if not type_losses:
+        return prediction.sum() * 0.0
+    return torch.stack(type_losses).mean()
+
+
 def compute_coverage_geometry_losses(
     output_a,
     output_b,
@@ -62,6 +119,7 @@ def compute_coverage_geometry_losses(
     endpoint_weight_b: torch.Tensor | None = None,
     min_width: float,
     smooth_temperature: float | None,
+    iou_ranking: IoURankingConfig = DEFAULT_IOU_RANKING_CONFIG,
 ) -> CoverageGeometryLosses:
     """Supervise typed true volumes and pairwise true-volume IoU."""
     geometry = hyperrectangle_geometry(
@@ -90,17 +148,17 @@ def compute_coverage_geometry_losses(
 
     box_dim = output_a.hyper_min.shape[-1]
     minimum_volume = float(min_width) ** box_dim
-    target_log_scale_a = (
-        torch.log(density_a.float().clamp(min=minimum_volume, max=1.0)) / box_dim
+    target_log_volume_a = torch.log(
+        density_a.float().clamp(min=minimum_volume, max=1.0)
     )
-    target_log_scale_b = (
-        torch.log(density_b.float().clamp(min=minimum_volume, max=1.0)) / box_dim
+    target_log_volume_b = torch.log(
+        density_b.float().clamp(min=minimum_volume, max=1.0)
     )
     volume_error_a = F.smooth_l1_loss(
-        geometry.mean_log_width_a, target_log_scale_a, reduction="none"
+        geometry.log_volume_a, target_log_volume_a, reduction="none"
     )
     volume_error_b = F.smooth_l1_loss(
-        geometry.mean_log_width_b, target_log_scale_b, reduction="none"
+        geometry.log_volume_b, target_log_volume_b, reduction="none"
     )
     volume_loss = _weighted_type_mean(
         torch.cat((volume_error_a, volume_error_b), dim=0),
@@ -121,9 +179,19 @@ def compute_coverage_geometry_losses(
     )
     zero_error = geometry.iou.square()
     iou_error = torch.where(positive_target, positive_error, zero_error)
-    iou_loss = _masked_mean(iou_error, iou_mask)
+    iou_calibration_loss = _equal_type_mean(iou_error, iou_mask)
+    iou_rank_loss = _pairwise_rank_loss(
+        geometry.iou,
+        jaccard_float,
+        iou_mask,
+        margin=iou_ranking.margin,
+        min_target_gap=iou_ranking.min_target_gap,
+    )
+    iou_loss = iou_calibration_loss + iou_ranking.weight * iou_rank_loss
     return CoverageGeometryLosses(
         volume_loss=volume_loss,
         iou_loss=iou_loss,
+        iou_calibration_loss=iou_calibration_loss,
+        iou_rank_loss=iou_rank_loss,
         geometry=geometry,
     )

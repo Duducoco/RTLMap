@@ -89,10 +89,13 @@ def test_run_contrastive_selects_dataset_and_derived_defaults(tmp_path: Path) ->
     assert _argument_value(args, "--data-root") == "./data_contrastive_picorv32"
     assert (
         _argument_value(args, "--experiment-name")
-        == "picorv32-4coverage-split-rect-mlp-asm-readout"
+        == "picorv32-4coverage-split-rect-mlp-asm-geometry-rank"
     )
     assert _argument_value(args, "--graph-relative-loss-weight") == "0.1"
     assert _argument_value(args, "--graph-relative-loss-floor") == "0.1"
+    assert _argument_value(args, "--iou-rank-loss-weight") == "0.5"
+    assert _argument_value(args, "--iou-rank-margin") == "0.05"
+    assert _argument_value(args, "--iou-rank-min-target-gap") == "0.05"
 
 
 def test_run_contrastive_accepts_dataset_name_as_positional_argument(

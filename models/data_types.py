@@ -16,7 +16,7 @@ HYPERRECTANGLE_TYPE_NAMES: tuple[str, ...] = (
     "fsm",
     "branch",
 )
-HYPERRECTANGLE_HEAD_TYPE = "residual_mlp_v1"
+HYPERRECTANGLE_HEAD_TYPE = "dual_graph_mlp_v2"
 
 
 @dataclass

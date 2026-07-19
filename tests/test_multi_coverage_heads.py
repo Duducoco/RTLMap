@@ -14,6 +14,22 @@ from datasets import DualGraphData
 from models import DualGraphFusionModel, ModelConfig, ModelOutput
 from models.losses import compute_supervised_losses
 
+_EXPECTED_JOINT_GRAPH = torch.tensor(
+    [[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]]
+)
+
+
+class _StubGraphEncoder(torch.nn.Module):
+    def forward(self, **kwargs):
+        del kwargs
+        return (
+            torch.zeros((1, 4)),
+            torch.zeros((0, 4)),
+            _EXPECTED_JOINT_GRAPH[:, :4],
+            torch.zeros((1, 4)),
+            _EXPECTED_JOINT_GRAPH[:, 4:],
+        )
+
 
 def _batch_with_missing_targets() -> DualGraphData:
     return DualGraphData(
@@ -78,17 +94,6 @@ def test_graph_regressor_directly_reads_rtl_and_asm_graph_embeddings() -> None:
     )
     model = DualGraphFusionModel(config)
 
-    class StubEncoder(torch.nn.Module):
-        def forward(self, **kwargs):
-            del kwargs
-            return (
-                torch.zeros((1, 4)),
-                torch.zeros((0, 4)),
-                torch.tensor([[1.0, 2.0, 3.0, 4.0]]),
-                torch.zeros((1, 4)),
-                torch.tensor([[5.0, 6.0, 7.0, 8.0]]),
-            )
-
     class CapturingRegressor(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
@@ -98,7 +103,7 @@ def test_graph_regressor_directly_reads_rtl_and_asm_graph_embeddings() -> None:
             self.input = graph_embedding
             return graph_embedding[:, :1]
 
-    model.encoder = StubEncoder()
+    model.encoder = _StubGraphEncoder()
     regressor = CapturingRegressor()
     model.graph_regressor = regressor
 
@@ -106,7 +111,38 @@ def test_graph_regressor_directly_reads_rtl_and_asm_graph_embeddings() -> None:
 
     assert torch.equal(
         regressor.input,
-        torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]]),
+        _EXPECTED_JOINT_GRAPH,
+    )
+
+
+def test_geometry_head_directly_reads_rtl_and_asm_graph_embeddings() -> None:
+    config = ModelConfig(
+        hidden_dim=4,
+        num_gnn_layers=1,
+        coverage_target_keys=("branch",),
+        use_hyperrectangle=True,
+    )
+    model = DualGraphFusionModel(config)
+
+    class CapturingGeometryHead(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.input = None
+
+        def forward(self, graph_embedding: torch.Tensor):
+            self.input = graph_embedding
+            shape = (graph_embedding.shape[0], 5, 5)
+            return torch.zeros(shape), torch.ones(shape)
+
+    model.encoder = _StubGraphEncoder()
+    geometry_head = CapturingGeometryHead()
+    model.hyperrectangle_head = geometry_head
+
+    model(_batch_with_missing_targets())
+
+    assert torch.equal(
+        geometry_head.input,
+        _EXPECTED_JOINT_GRAPH,
     )
 
 

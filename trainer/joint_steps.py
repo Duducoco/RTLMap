@@ -31,6 +31,7 @@ def _geometry_losses(module, out_a, out_b, batch, *, training: bool):
         endpoint_weight_a=batch.endpoint_weight_a,
         endpoint_weight_b=batch.endpoint_weight_b,
         min_width=module.model.config.hyper_min_margin,
+        iou_ranking=module.iou_ranking,
         smooth_temperature=(
             module.smooth_intersection_temperature if training else None
         ),
@@ -99,6 +100,14 @@ def run_pair_training_step(module, batch: ContrastivePairBatch) -> torch.Tensor:
     effective_volume_weight = module.lambda_volume * warmup
     weighted_supervised = module.lambda_ce * l_sup
     weighted_iou = module.lambda_iou * geometry_losses.iou_loss
+    weighted_iou_calibration = (
+        module.lambda_iou * geometry_losses.iou_calibration_loss
+    )
+    weighted_iou_rank = (
+        module.lambda_iou
+        * module.iou_ranking.weight
+        * geometry_losses.iou_rank_loss
+    )
     weighted_volume = effective_volume_weight * geometry_losses.volume_loss
     total = weighted_supervised + weighted_iou + weighted_volume
 
@@ -108,9 +117,15 @@ def run_pair_training_step(module, batch: ContrastivePairBatch) -> torch.Tensor:
             "train/supervised_loss_b": l_sup_b.detach(),
             "train/supervised_loss": l_sup.detach(),
             "train/iou_loss": geometry_losses.iou_loss.detach(),
+            "train/iou_calibration_loss": (
+                geometry_losses.iou_calibration_loss.detach()
+            ),
+            "train/iou_rank_loss": geometry_losses.iou_rank_loss.detach(),
             "train/volume_loss": geometry_losses.volume_loss.detach(),
             "train/weighted_supervised_loss": weighted_supervised.detach(),
             "train/weighted_iou_loss": weighted_iou.detach(),
+            "train/weighted_iou_calibration_loss": weighted_iou_calibration.detach(),
+            "train/weighted_iou_rank_loss": weighted_iou_rank.detach(),
             "train/weighted_volume_loss": weighted_volume.detach(),
             "train/effective_volume_weight": torch.tensor(
                 effective_volume_weight, device=module.device
@@ -156,6 +171,10 @@ def run_pair_validation_step(module, batch: ContrastivePairBatch) -> torch.Tenso
     )
     weighted_supervised = module.lambda_ce * l_sup
     weighted_iou = module.lambda_iou * losses.iou_loss
+    weighted_iou_calibration = module.lambda_iou * losses.iou_calibration_loss
+    weighted_iou_rank = (
+        module.lambda_iou * module.iou_ranking.weight * losses.iou_rank_loss
+    )
     weighted_volume = module.lambda_volume * losses.volume_loss
     total = weighted_supervised + weighted_iou + weighted_volume
     values = {
@@ -164,9 +183,13 @@ def run_pair_validation_step(module, batch: ContrastivePairBatch) -> torch.Tenso
         "val/pair_supervised_loss_b": l_sup_b.detach(),
         "val/pair_supervised_loss": l_sup.detach(),
         "val/pair_iou_loss": losses.iou_loss.detach(),
+        "val/pair_iou_calibration_loss": losses.iou_calibration_loss.detach(),
+        "val/pair_iou_rank_loss": losses.iou_rank_loss.detach(),
         "val/pair_volume_loss": losses.volume_loss.detach(),
         "val/pair_weighted_supervised_loss": weighted_supervised.detach(),
         "val/pair_weighted_iou_loss": weighted_iou.detach(),
+        "val/pair_weighted_iou_calibration_loss": weighted_iou_calibration.detach(),
+        "val/pair_weighted_iou_rank_loss": weighted_iou_rank.detach(),
         "val/pair_weighted_volume_loss": weighted_volume.detach(),
     }
     values.update({f"val/pair_{key}": value for key, value in metrics.items()})

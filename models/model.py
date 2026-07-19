@@ -72,6 +72,7 @@ class DualGraphFusionModel(nn.Module):
         # 超矩形头（条件创建）
         if config.use_hyperrectangle:
             self.hyperrectangle_head = HyperrectangleHead(
+                input_dim=config.hidden_dim * 2,
                 hidden_dim=config.hidden_dim,
                 num_types=len(config.hyperrectangle_type_names),
                 dim_per_type=config.hyperrectangle_dim_per_type,
@@ -112,12 +113,13 @@ class DualGraphFusionModel(nn.Module):
             asm_batch=getattr(data, "asm_node_type_batch", None),
         )
 
-        graph_pred = self.graph_regressor(torch.cat((rtl_graph, asm_graph), dim=-1))
+        joint_graph = torch.cat((rtl_graph, asm_graph), dim=-1)
+        graph_pred = self.graph_regressor(joint_graph)
 
         # 超矩形输出（条件计算）
         hyper_min, hyper_max = None, None
         if self.config.use_hyperrectangle and hasattr(self, "hyperrectangle_head"):
-            hyper_min, hyper_max = self.hyperrectangle_head(rtl_graph)
+            hyper_min, hyper_max = self.hyperrectangle_head(joint_graph)
 
         return ModelOutput(
             graph_pred=graph_pred,

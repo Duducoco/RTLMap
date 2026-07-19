@@ -14,6 +14,10 @@ from models.losses import (
     DEFAULT_GRAPH_RELATIVE_LOSS_FLOOR,
     DEFAULT_GRAPH_RELATIVE_LOSS_WEIGHT,
 )
+from models.contrastive_loss import (
+    DEFAULT_IOU_RANKING_CONFIG,
+    IoURankingConfig,
+)
 from metrics import (
     CoverageRegressionMetrics,
     ContrastiveMetrics,
@@ -49,6 +53,9 @@ class DualGraphLightningModule(L.LightningModule):
         joint_contrastive: bool = False,
         lambda_ce: float = 1.0,
         lambda_iou: float = 1.0,
+        iou_rank_loss_weight: float = DEFAULT_IOU_RANKING_CONFIG.weight,
+        iou_rank_margin: float = DEFAULT_IOU_RANKING_CONFIG.margin,
+        iou_rank_min_target_gap: float = DEFAULT_IOU_RANKING_CONFIG.min_target_gap,
         lambda_volume: float = 1.0,
         volume_warmup_epochs: int = 5,
         smooth_intersection_temperature: float = 0.01,
@@ -99,6 +106,11 @@ class DualGraphLightningModule(L.LightningModule):
         self.joint_contrastive = joint_contrastive
         self.lambda_ce = lambda_ce
         self.lambda_iou = lambda_iou
+        self.iou_ranking = IoURankingConfig(
+            weight=iou_rank_loss_weight,
+            margin=iou_rank_margin,
+            min_target_gap=iou_rank_min_target_gap,
+        )
         self.lambda_volume = lambda_volume
         self.volume_warmup_epochs = max(0, int(volume_warmup_epochs))
         self.smooth_intersection_temperature = smooth_intersection_temperature

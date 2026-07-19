@@ -118,7 +118,7 @@ fi
 
 DATASET_DIRS=("$DATASET_DIR")
 DATA_ROOT="${DATA_ROOT:-./data_contrastive_${DATASET_NAME}}"
-EXPERIMENT_NAME="${DATASET_NAME}-4coverage-split-rect-mlp-asm-readout"
+EXPERIMENT_NAME="${DATASET_NAME}-4coverage-split-rect-mlp-asm-geometry-rank"
 
 set --
 if [[ -n "$CKPT_PATH" ]]; then
@@ -164,8 +164,11 @@ uv run python main.py \
     --pair-sampling-seed 42 \
     --lambda-ce 1.0 \
     --lambda-iou 1.0 \
+    --iou-rank-loss-weight 0.5 \
+    --iou-rank-margin 0.05 \
+    --iou-rank-min-target-gap 0.05 \
     --lambda-volume 1.0 \
-    --volume-warmup-epochs 0 \
+    --volume-warmup-epochs 5 \
     --smooth-intersection-temperature 0.01 \
     --hyperrectangle-dim-per-type 5 \
     --hyper-min-margin 0.01 \

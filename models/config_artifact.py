@@ -13,7 +13,7 @@ from text_encoder import TextEncoderConfig
 from .data_types import ModelConfig
 
 
-SCHEMA_VERSION = "rtlmap_model_config.v4"
+SCHEMA_VERSION = "rtlmap_model_config.v5"
 
 
 class ModelConfigMismatch(ValueError):

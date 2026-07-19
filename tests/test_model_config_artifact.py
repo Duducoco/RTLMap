@@ -60,7 +60,7 @@ def test_model_config_yaml_round_trip_preserves_inference_fields(tmp_path: Path)
     assert model_config == _model_config()
     assert text_config == _text_config()
     assert (
-        yaml.safe_load(path.read_text())["schema_version"] == "rtlmap_model_config.v4"
+        yaml.safe_load(path.read_text())["schema_version"] == "rtlmap_model_config.v5"
     )
     assert loaded["model"]["coverage_target_keys"] == [
         "branch",
@@ -77,7 +77,7 @@ def test_model_config_yaml_round_trip_preserves_inference_fields(tmp_path: Path)
         "branch",
     ]
     assert loaded["model"]["hyperrectangle_dim_per_type"] == 10
-    assert loaded["model"]["hyperrectangle_head_type"] == "residual_mlp_v1"
+    assert loaded["model"]["hyperrectangle_head_type"] == "dual_graph_mlp_v2"
     assert "num_graph_targets" not in loaded["model"]
 
 

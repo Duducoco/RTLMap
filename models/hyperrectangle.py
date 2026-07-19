@@ -14,11 +14,11 @@ import torch.nn.functional as F
 class HyperrectangleGeometry:
     volume_a: torch.Tensor
     volume_b: torch.Tensor
+    log_volume_a: torch.Tensor
+    log_volume_b: torch.Tensor
     intersection: torch.Tensor
     iou: torch.Tensor
     log_iou: torch.Tensor
-    mean_log_width_a: torch.Tensor
-    mean_log_width_b: torch.Tensor
     has_hard_intersection: torch.Tensor
 
 
@@ -27,6 +27,7 @@ class HyperrectangleHead(nn.Module):
 
     def __init__(
         self,
+        input_dim: int,
         hidden_dim: int,
         num_types: int = 5,
         dim_per_type: int = 10,
@@ -40,8 +41,8 @@ class HyperrectangleHead(nn.Module):
             raise ValueError("num_types and dim_per_type must be positive")
         output_dim = num_types * dim_per_type
         self.feature_proj = nn.Sequential(
-            nn.LayerNorm(hidden_dim),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
         )
@@ -61,9 +62,9 @@ class HyperrectangleHead(nn.Module):
         nn.init.xavier_uniform_(self.radius_proj.weight, gain=0.1)
         nn.init.constant_(self.radius_proj.bias, 2.0)
 
-    def forward(self, rtl_graph: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, graph_embedding: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         shape = (-1, self.num_types, self.dim_per_type)
-        features = rtl_graph + self.feature_proj(rtl_graph)
+        features = self.feature_proj(graph_embedding)
         center_ratio = torch.sigmoid(self.center_proj(features)).view(shape)
         radius_ratio = torch.sigmoid(self.radius_proj(features)).view(shape)
 
@@ -149,10 +150,10 @@ def hyperrectangle_geometry(
     return HyperrectangleGeometry(
         volume_a=volume_1,
         volume_b=volume_2,
+        log_volume_a=log_volume_1,
+        log_volume_b=log_volume_2,
         intersection=intersection,
         iou=torch.exp(log_iou).clamp(0.0, 1.0),
         log_iou=log_iou,
-        mean_log_width_a=log_volume_1 / width_1.shape[-1],
-        mean_log_width_b=log_volume_2 / width_2.shape[-1],
         has_hard_intersection=has_hard_intersection,
     )

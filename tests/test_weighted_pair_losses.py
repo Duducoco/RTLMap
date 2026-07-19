@@ -11,7 +11,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from models.losses import compute_weighted_graph_loss
-from models.contrastive_loss import compute_coverage_geometry_losses
+from models.contrastive_loss import IoURankingConfig, compute_coverage_geometry_losses
 
 
 def test_weighted_graph_loss_preserves_equal_coverage_type_weighting() -> None:
@@ -99,6 +99,7 @@ def test_volume_is_endpoint_weighted_but_iou_is_pair_uniform() -> None:
         iou_mask=torch.ones((2, 1), dtype=torch.bool),
         min_width=0.01,
         smooth_temperature=None,
+        iou_ranking=IoURankingConfig(weight=0.0),
     )
 
     weighted = compute_coverage_geometry_losses(

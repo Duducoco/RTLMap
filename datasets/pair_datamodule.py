@@ -169,6 +169,7 @@ class ContrastivePairDataset(Dataset):
         requested_by_stratum: Counter[str] = Counter()
         fulfilled_by_stratum: Counter[str] = Counter()
         duplicate_conflicts = 0
+        identical_signature_candidates_skipped = 0
         for group_key, indices in sorted(by_source_module.items()):
             if len(indices) < 2:
                 continue
@@ -181,10 +182,23 @@ class ContrastivePairDataset(Dataset):
             )
             rng.shuffle(anchor_indices)
             for idx_a in anchor_indices:
-                candidate_indices = sorted(
+                all_candidate_indices = sorted(
                     (idx for idx in indices if idx != idx_a),
                     key=lambda idx: str(self._samples[idx]["sample_id"]),
                 )
+                signature_a = self._coverage_signatures[idx_a]
+                informative_candidates = [
+                    idx_b
+                    for idx_b in all_candidate_indices
+                    if self._coverage_signatures[idx_b] != signature_a
+                ]
+                if informative_candidates:
+                    identical_signature_candidates_skipped += len(
+                        all_candidate_indices
+                    ) - len(informative_candidates)
+                    candidate_indices = informative_candidates
+                else:
+                    candidate_indices = all_candidate_indices
                 if len(candidate_indices) > self.candidate_pool_size:
                     candidate_indices = rng.sample(
                         candidate_indices, self.candidate_pool_size
@@ -192,7 +206,6 @@ class ContrastivePairDataset(Dataset):
                 candidate_pool_sizes.append(len(candidate_indices))
 
                 scored_candidates: list[tuple[float, float, int]] = []
-                signature_a = self._coverage_signatures[idx_a]
                 for idx_b in candidate_indices:
                     similarity = coverage_similarity_from_signatures(
                         signature_a, self._coverage_signatures[idx_b]
@@ -278,6 +291,9 @@ class ContrastivePairDataset(Dataset):
             "fulfilled_relative_mid": fulfilled_by_stratum["relative-mid"],
             "fulfilled_relative_high": fulfilled_by_stratum["relative-high"],
             "duplicate_conflicts": duplicate_conflicts,
+            "identical_signature_candidates_skipped": (
+                identical_signature_candidates_skipped
+            ),
             "candidate_pool_min": min(candidate_pool_sizes, default=0),
             "candidate_pool_mean": (
                 sum(candidate_pool_sizes) / len(candidate_pool_sizes)

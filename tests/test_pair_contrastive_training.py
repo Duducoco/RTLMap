@@ -155,6 +155,8 @@ def test_pair_training_step_combines_both_graph_volume_and_iou_losses(
         "compute_coverage_geometry_losses",
         lambda *args, **kwargs: SimpleNamespace(
             iou_loss=torch.tensor(2.0, device=module.device),
+            iou_calibration_loss=torch.tensor(1.5, device=module.device),
+            iou_rank_loss=torch.tensor(1.0, device=module.device),
             volume_loss=torch.tensor(3.0, device=module.device),
         ),
     )
@@ -198,6 +200,8 @@ def test_pair_validation_total_uses_the_same_three_loss_parts(monkeypatch) -> No
         "_geometry_losses",
         lambda *args, **kwargs: SimpleNamespace(
             iou_loss=torch.tensor(2.0),
+            iou_calibration_loss=torch.tensor(1.5),
+            iou_rank_loss=torch.tensor(1.0),
             volume_loss=torch.tensor(3.0),
         ),
     )
@@ -216,6 +220,8 @@ def test_pair_validation_total_uses_the_same_three_loss_parts(monkeypatch) -> No
     assert torch.equal(logged["val/pair_supervised_loss_a"], torch.tensor(4.0))
     assert torch.equal(logged["val/pair_supervised_loss_b"], torch.tensor(6.0))
     assert torch.equal(logged["val/pair_supervised_loss"], torch.tensor(5.0))
+    assert torch.equal(logged["val/pair_iou_calibration_loss"], torch.tensor(1.5))
+    assert torch.equal(logged["val/pair_iou_rank_loss"], torch.tensor(1.0))
 
 
 if __name__ == "__main__":

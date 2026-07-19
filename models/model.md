@@ -18,13 +18,12 @@ branch, line, fsm, toggle, condition
 ## 2. 数据流
 
 ```text
-RTL CDFG ──┐
-           ├── PerceiverDualEncoder ── rtl_graph_emb ── GraphRegressor ── graph_pred
-ASM CDFG ──┘                                  │
-                                              └── HyperrectangleHead ── hyper_min / hyper_max
+RTL CDFG ──┐                              ┌── GraphRegressor ── graph_pred
+           ├── PerceiverDualEncoder ── concat(rtl_graph, asm_graph)
+ASM CDFG ──┘                              └── HyperrectangleHead ── hyper_min / hyper_max
 ```
 
-RTL CDFG 提供节点、边、位宽、端口位置等结构信息。ASM CDFG 提供测试激励上下文。编码阶段使用双图融合；预测阶段只使用 RTL 图级表示。
+RTL CDFG 提供节点、边、位宽、端口位置等结构信息。ASM CDFG 提供测试激励上下文。编码阶段使用双图融合；两个预测头都直接读取 RTL 与 ASM 图级表示。
 
 ## 3. RTL 消息传递
 
@@ -52,7 +51,7 @@ RTL 编码器仍然使用边结构特征，包括：
 `GraphRegressor` 对每个覆盖率目标维护独立 head：
 
 ```text
-graph_pred[k] = CoverageHead_k(rtl_graph_emb)
+graph_pred[k] = CoverageHead_k(concat(rtl_graph, asm_graph))
 ```
 
 如果配置为：
@@ -84,12 +83,12 @@ L_total = L_graph
 启用 `use_hyperrectangle` 后，模型使用 center-radius 参数化生成五个子矩形：
 
 ```text
-hyper_min: [B, 5, 10]
-hyper_max: [B, 5, 10]
+hyper_min: [B, 5, D_box]
+hyper_max: [B, 5, D_box]
 ```
 
-第二维固定对应 `line, condition, toggle, fsm, branch`。每个十维子矩形的
-真实几何体积，即十个轴宽的乘积，用来表示对应 coverage type 的覆盖密度。
+第二维固定对应 `line, condition, toggle, fsm, branch`。每个子矩形的真实几何
+体积，即所有轴宽的乘积，用来表示对应 coverage type 的覆盖密度。
 模型隐藏维度仍为 256，与超矩形维度解耦。
 
 ## 8. 覆盖向量相似度
@@ -124,19 +123,19 @@ out_b = model(batch_b)
 监督项：
 
 ```text
-L_sup = L_graph(a) + L_graph(b)
+L_sup = (L_graph(a) + L_graph(b)) / 2
 ```
 
 几何项：
 
 ```text
 L_volume = SmoothL1(log Volume(box), log coverage_density)
-L_iou = alignment(true_volume_IoU(box_a, box_b), Jaccard(a, b))
+L_iou = L_iou_calibration + w_rank * L_iou_rank
 ```
 
-训练阶段对正 Jaccard pair 使用平滑交集和 log-IoU SmoothL1，以避免十维体积
-乘积下溢并保留不相交 pair 的恢复梯度。验证和推理始终使用硬交集与真实体积
-IoU。零 Jaccard pair 在线性 IoU 空间优化。
+训练阶段对正 Jaccard pair 使用平滑交集和 log-IoU SmoothL1，并对目标差达到
+阈值的 pair 加入预测 IoU 排序 margin。所有有效 coverage type 等权。验证和推理
+始终使用硬交集与真实体积 IoU。零 Jaccard pair 在线性 IoU 空间优化。
 
 总损失：
 

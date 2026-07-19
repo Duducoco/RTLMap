@@ -35,6 +35,9 @@ from models.losses import (
     DEFAULT_GRAPH_RELATIVE_LOSS_FLOOR,
     DEFAULT_GRAPH_RELATIVE_LOSS_WEIGHT,
 )
+from models.contrastive_loss import (
+    DEFAULT_IOU_RANKING_CONFIG,
+)
 from trainer.config import TrainerConfig
 from trainer.app_config import AppConfig, DataConfig, RuntimeConfig
 from trainer.lightning_module import DualGraphLightningModule
@@ -210,6 +213,19 @@ def parse_args() -> argparse.Namespace:
         "--lambda-iou", type=float, default=1.0, help="逐类型真实体积 IoU 损失权重"
     )
     joint.add_argument(
+        "--iou-rank-loss-weight",
+        type=float,
+        default=DEFAULT_IOU_RANKING_CONFIG.weight,
+    )
+    joint.add_argument(
+        "--iou-rank-margin", type=float, default=DEFAULT_IOU_RANKING_CONFIG.margin
+    )
+    joint.add_argument(
+        "--iou-rank-min-target-gap",
+        type=float,
+        default=DEFAULT_IOU_RANKING_CONFIG.min_target_gap,
+    )
+    joint.add_argument(
         "--lambda-volume", type=float, default=1.0, help="真实体积校准损失权重"
     )
     joint.add_argument(
@@ -292,6 +308,9 @@ def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
         joint_contrastive=args.joint_contrastive,
         lambda_ce=args.lambda_ce,
         lambda_iou=args.lambda_iou,
+        iou_rank_loss_weight=args.iou_rank_loss_weight,
+        iou_rank_margin=args.iou_rank_margin,
+        iou_rank_min_target_gap=args.iou_rank_min_target_gap,
         lambda_volume=args.lambda_volume,
         volume_warmup_epochs=args.volume_warmup_epochs,
         smooth_intersection_temperature=args.smooth_intersection_temperature,
@@ -393,6 +412,9 @@ def main() -> None:
             joint_contrastive=args.joint_contrastive,
             lambda_ce=args.lambda_ce,
             lambda_iou=args.lambda_iou,
+            iou_rank_loss_weight=args.iou_rank_loss_weight,
+            iou_rank_margin=args.iou_rank_margin,
+            iou_rank_min_target_gap=args.iou_rank_min_target_gap,
             lambda_volume=args.lambda_volume,
             volume_warmup_epochs=args.volume_warmup_epochs,
             smooth_intersection_temperature=args.smooth_intersection_temperature,
