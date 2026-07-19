@@ -55,7 +55,11 @@ def test_standard_training_step_uses_graph_loss_only(monkeypatch) -> None:
 
     def fake_compute_loss(output, data, *args, **kwargs):
         del output, data, args
-        assert kwargs == {"graph_loss_weight": module.graph_loss_weight}
+        assert kwargs == {
+            "graph_loss_weight": module.graph_loss_weight,
+            "relative_loss_weight": module.graph_relative_loss_weight,
+            "relative_loss_floor": module.graph_relative_loss_floor,
+        }
         unrelated_loss = torch.tensor(100.0)
         graph_loss = torch.tensor(5.0)
         return {

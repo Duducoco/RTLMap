@@ -10,6 +10,10 @@ from datasets.data_types import ContrastivePairBatch
 from models.data_types import ModelConfig, ModelOutput
 from models.config_artifact import build_model_config_artifact
 from models.model import create_model
+from models.losses import (
+    DEFAULT_GRAPH_RELATIVE_LOSS_FLOOR,
+    DEFAULT_GRAPH_RELATIVE_LOSS_WEIGHT,
+)
 from metrics import (
     CoverageRegressionMetrics,
     ContrastiveMetrics,
@@ -34,6 +38,8 @@ class DualGraphLightningModule(L.LightningModule):
         learning_rate: float = 1e-4,
         weight_decay: float = 1e-5,
         graph_loss_weight: float = 1.0,
+        graph_relative_loss_weight: float = DEFAULT_GRAPH_RELATIVE_LOSS_WEIGHT,
+        graph_relative_loss_floor: float = DEFAULT_GRAPH_RELATIVE_LOSS_FLOOR,
         warmup_steps: int = 100,
         scheduler_type: str = "cosine",
         plateau_factor: float = 0.5,
@@ -78,6 +84,8 @@ class DualGraphLightningModule(L.LightningModule):
         self.learning_rate = learning_rate
         self.weight_decay = weight_decay
         self.graph_loss_weight = graph_loss_weight
+        self.graph_relative_loss_weight = graph_relative_loss_weight
+        self.graph_relative_loss_floor = graph_relative_loss_floor
         self.warmup_steps = warmup_steps
         self.scheduler_type = scheduler_type
         self.plateau_factor = plateau_factor
@@ -118,6 +126,8 @@ class DualGraphLightningModule(L.LightningModule):
             output,
             batch,
             graph_loss_weight=self.graph_loss_weight,
+            relative_loss_weight=self.graph_relative_loss_weight,
+            relative_loss_floor=self.graph_relative_loss_floor,
         )
         supervised_loss = losses["graph_loss"]
 

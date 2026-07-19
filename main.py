@@ -11,7 +11,7 @@
     # 自定义超参数
     uv run python main.py --dataset-dir /path/to/dataset --data-root ./data \
         --max-epochs 200 --lr 3e-4 --batch-size 16 \
-        --fusion-type ssm_film --precision bf16-mixed
+        --precision bf16-mixed
 
     # 从检查点恢复训练
     uv run python main.py --dataset-dir /path/to/dataset --data-root ./data \
@@ -31,6 +31,10 @@ import torch
 from contrastive_defaults import DEFAULT_PAIR_CANDIDATE_POOL_SIZE
 from datasets import DualGraphDataModule
 from models.data_types import ModelConfig
+from models.losses import (
+    DEFAULT_GRAPH_RELATIVE_LOSS_FLOOR,
+    DEFAULT_GRAPH_RELATIVE_LOSS_WEIGHT,
+)
 from trainer.config import TrainerConfig
 from trainer.app_config import AppConfig, DataConfig, RuntimeConfig
 from trainer.lightning_module import DualGraphLightningModule
@@ -105,6 +109,16 @@ def parse_args() -> argparse.Namespace:
     train_g.add_argument("--plateau-patience", type=int, default=5)
     train_g.add_argument("--min-lr", type=float, default=1e-6)
     train_g.add_argument("--graph-loss-weight", type=float, default=1.0)
+    train_g.add_argument(
+        "--graph-relative-loss-weight",
+        type=float,
+        default=DEFAULT_GRAPH_RELATIVE_LOSS_WEIGHT,
+    )
+    train_g.add_argument(
+        "--graph-relative-loss-floor",
+        type=float,
+        default=DEFAULT_GRAPH_RELATIVE_LOSS_FLOOR,
+    )
     train_g.add_argument(
         "--coverage-targets",
         nargs="+",
@@ -245,6 +259,8 @@ def build_trainer_config(args: argparse.Namespace) -> TrainerConfig:
         plateau_patience=args.plateau_patience,
         min_learning_rate=args.min_lr,
         graph_loss_weight=args.graph_loss_weight,
+        graph_relative_loss_weight=args.graph_relative_loss_weight,
+        graph_relative_loss_floor=args.graph_relative_loss_floor,
         max_epochs=args.max_epochs,
         batch_size=args.batch_size,
         gradient_clip_val=args.gradient_clip_val,
@@ -366,6 +382,8 @@ def main() -> None:
             learning_rate=args.lr,
             weight_decay=args.weight_decay,
             graph_loss_weight=args.graph_loss_weight,
+            graph_relative_loss_weight=args.graph_relative_loss_weight,
+            graph_relative_loss_floor=args.graph_relative_loss_floor,
             warmup_steps=args.warmup_steps,
             scheduler_type=args.scheduler,
             plateau_factor=args.plateau_factor,

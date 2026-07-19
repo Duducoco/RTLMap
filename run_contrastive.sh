@@ -118,7 +118,7 @@ fi
 
 DATASET_DIRS=("$DATASET_DIR")
 DATA_ROOT="${DATA_ROOT:-./data_contrastive_${DATASET_NAME}}"
-EXPERIMENT_NAME="${DATASET_NAME}-4coverage-split-rect-mlp"
+EXPERIMENT_NAME="${DATASET_NAME}-4coverage-split-rect-mlp-asm-readout"
 
 set --
 if [[ -n "$CKPT_PATH" ]]; then
@@ -143,6 +143,8 @@ uv run python main.py \
     --plateau-patience 5 \
     --min-lr 1e-6 \
     --graph-loss-weight 1.0 \
+    --graph-relative-loss-weight 0.1 \
+    --graph-relative-loss-floor 0.1 \
     --coverage-targets branch line toggle condition \
     --accelerator "$ACCELERATOR" \
     --devices "$DEVICES" \

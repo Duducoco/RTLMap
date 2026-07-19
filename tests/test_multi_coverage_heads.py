@@ -70,6 +70,46 @@ def test_graph_regressor_uses_one_head_per_coverage_target() -> None:
     assert losses["num_valid_graph_targets"] == 5
 
 
+def test_graph_regressor_directly_reads_rtl_and_asm_graph_embeddings() -> None:
+    config = ModelConfig(
+        hidden_dim=4,
+        num_gnn_layers=1,
+        coverage_target_keys=("branch",),
+    )
+    model = DualGraphFusionModel(config)
+
+    class StubEncoder(torch.nn.Module):
+        def forward(self, **kwargs):
+            del kwargs
+            return (
+                torch.zeros((1, 4)),
+                torch.zeros((0, 4)),
+                torch.tensor([[1.0, 2.0, 3.0, 4.0]]),
+                torch.zeros((1, 4)),
+                torch.tensor([[5.0, 6.0, 7.0, 8.0]]),
+            )
+
+    class CapturingRegressor(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.input = None
+
+        def forward(self, graph_embedding: torch.Tensor) -> torch.Tensor:
+            self.input = graph_embedding
+            return graph_embedding[:, :1]
+
+    model.encoder = StubEncoder()
+    regressor = CapturingRegressor()
+    model.graph_regressor = regressor
+
+    model(_batch_with_missing_targets())
+
+    assert torch.equal(
+        regressor.input,
+        torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]]),
+    )
+
+
 def test_graph_loss_weights_each_available_coverage_target_equally() -> None:
     output = ModelOutput(
         graph_pred=torch.tensor(
@@ -97,6 +137,7 @@ def test_graph_loss_weights_each_available_coverage_target_equally() -> None:
         output,
         data,
         coverage_target_keys=("branch", "line", "toggle", "condition"),
+        relative_loss_weight=0.0,
     )
 
     expected_per_target_losses = torch.tensor([0.0, 0.0, 0.375, 0.5])

@@ -60,7 +60,11 @@ def _hard_geometry_metrics(module, out_a, out_b, batch):
 
 
 def _pair_graph_losses(module, out_a, out_b, batch):
-    common = {"coverage_target_keys": module.coverage_target_keys}
+    common = {
+        "coverage_target_keys": module.coverage_target_keys,
+        "relative_loss_weight": module.graph_relative_loss_weight,
+        "relative_loss_floor": module.graph_relative_loss_floor,
+    }
     loss_a = module.graph_loss_weight * compute_weighted_graph_loss(
         out_a.graph_pred,
         batch.batch_a.y,

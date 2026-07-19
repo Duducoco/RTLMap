@@ -3,8 +3,8 @@
 双图融合模型
 
 设计理念：
-- ASM 和 RTL 通过双向 FiLM 注入相互增强（ASM ↔ RTL）
-- 图级覆盖率回归只使用 RTL CDFG 的特征
+- ASM 和 RTL 通过双向 Perceiver 注入相互增强（ASM ↔ RTL）
+- 图级覆盖率回归直接使用 RTL 与 ASM 的图级特征
 - RTL 节点特征：node_cell_type + node_width
 - RTL 边特征：edge_type + edge_width
 - ASM 节点特征：node_type + instruction_encoding（外部模型生成）
@@ -21,6 +21,11 @@ from .data_types import ModelConfig, ModelOutput
 from .encoder import PerceiverDualEncoder
 from .heads import GraphRegressor
 from .hyperrectangle import HyperrectangleHead
+from .losses import (
+    DEFAULT_GRAPH_RELATIVE_LOSS_FLOOR,
+    DEFAULT_GRAPH_RELATIVE_LOSS_WEIGHT,
+    compute_supervised_losses,
+)
 
 
 class DualGraphFusionModel(nn.Module):
@@ -29,12 +34,10 @@ class DualGraphFusionModel(nn.Module):
 
     架构设计：
     - 编码阶段：ASM 和 RTL 通过双向融合相互增强（ASM ↔ RTL）
-    - 预测阶段：仅使用 RTL CDFG 进行图级覆盖率回归
+    - 预测阶段：拼接 RTL 与 ASM 图级嵌入进行覆盖率回归
     - ASM CDFG 作为上下文，模拟"测试激励驱动硬件"
 
-    支持两种融合模式：
-    - film: 标准 FiLM 注入（全局池化上下文）
-    - ssm_film: SSM 增强的 FiLM（状态空间动态上下文）
+    ASM 与 RTL 在每层 GNN 后通过双向 Perceiver cross-attention 交互。
     """
 
     def __init__(self, config: ModelConfig):
@@ -58,9 +61,12 @@ class DualGraphFusionModel(nn.Module):
             perceiver_num_heads=config.perceiver_num_heads,
         )
 
-        # 图回归器（仅 RTL）
+        # 图回归器直接读取 RTL 与 ASM 的图级摘要。
         self.graph_regressor = GraphRegressor(
-            config.hidden_dim, config.coverage_target_keys, config.dropout
+            config.hidden_dim * 2,
+            config.hidden_dim,
+            config.coverage_target_keys,
+            config.dropout,
         )
 
         # 超矩形头（条件创建）
@@ -84,10 +90,10 @@ class DualGraphFusionModel(nn.Module):
                 ASM: asm_node_type, asm_instruction_encoding, asm_edge_index, asm_edge_type
 
         Returns:
-            ModelOutput: 图级覆盖率预测（基于 RTL）
+            ModelOutput: 图级覆盖率预测（基于 RTL 与 ASM）
         """
-        # 编码阶段（双向 FiLM 注入：ASM ↔ RTL）
-        rtl_node, rtl_edge_attr, rtl_graph, asm_node, _ = self.encoder(
+        # 编码阶段（双向 Perceiver 注入：ASM ↔ RTL）
+        rtl_node, rtl_edge_attr, rtl_graph, asm_node, asm_graph = self.encoder(
             # RTL 图
             rtl_edge_index=data.edge_index,
             rtl_node_cell_type=data.node_cell_type,
@@ -106,8 +112,7 @@ class DualGraphFusionModel(nn.Module):
             asm_batch=getattr(data, "asm_node_type_batch", None),
         )
 
-        # 预测阶段：仅使用 RTL
-        graph_pred = self.graph_regressor(rtl_graph)
+        graph_pred = self.graph_regressor(torch.cat((rtl_graph, asm_graph), dim=-1))
 
         # 超矩形输出（条件计算）
         hyper_min, hyper_max = None, None
@@ -128,15 +133,17 @@ class DualGraphFusionModel(nn.Module):
         output: ModelOutput,
         data: DualGraphData,
         graph_loss_weight: float = 1.0,
+        relative_loss_weight: float = DEFAULT_GRAPH_RELATIVE_LOSS_WEIGHT,
+        relative_loss_floor: float = DEFAULT_GRAPH_RELATIVE_LOSS_FLOOR,
     ) -> Dict[str, torch.Tensor]:
         """计算模型基础监督损失。"""
-        from .losses import compute_supervised_losses
-
         return compute_supervised_losses(
             output,
             data,
             coverage_target_keys=self.config.coverage_target_keys,
             graph_loss_weight=graph_loss_weight,
+            relative_loss_weight=relative_loss_weight,
+            relative_loss_floor=relative_loss_floor,
         )
 
 

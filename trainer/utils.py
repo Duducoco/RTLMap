@@ -59,6 +59,8 @@ def train_model(
         learning_rate=trainer_config.learning_rate,
         weight_decay=trainer_config.weight_decay,
         graph_loss_weight=trainer_config.graph_loss_weight,
+        graph_relative_loss_weight=trainer_config.graph_relative_loss_weight,
+        graph_relative_loss_floor=trainer_config.graph_relative_loss_floor,
         warmup_steps=trainer_config.warmup_steps,
         scheduler_type=trainer_config.scheduler_type,
         plateau_factor=trainer_config.plateau_factor,

@@ -31,11 +31,32 @@ def test_weighted_graph_loss_preserves_equal_coverage_type_weighting() -> None:
         target,
         endpoint_weight,
         coverage_target_keys=("branch", "line"),
+        relative_loss_weight=0.0,
     )
 
     # branch: (0.5*1 + 0*3 + 0.5*1) / 3 valid endpoints = 1/3
     # line:   (0.5*3 + 0*1 + 0.5*1) / 3 valid endpoints = 2/3
     assert torch.isclose(loss, torch.tensor(0.5))
+
+
+def test_relative_graph_loss_emphasizes_low_coverage_targets() -> None:
+    graph_pred = torch.tensor([[0.2], [0.6]])
+    target = torch.tensor(
+        [
+            [0.1, 0.0, 0.0, 0.0, 0.0],
+            [0.5, 0.0, 0.0, 0.0, 0.0],
+        ]
+    )
+
+    loss = compute_weighted_graph_loss(
+        graph_pred,
+        target,
+        torch.ones(2),
+        coverage_target_keys=("branch",),
+    )
+
+    # Absolute SmoothL1 = 0.005. Relative SmoothL1 = mean(0.5, 0.02).
+    assert torch.isclose(loss, torch.tensor(0.031), atol=1e-6)
 
 
 def test_inverse_degree_equalizes_gradient_across_single_pair_batches() -> None:

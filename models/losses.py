@@ -12,6 +12,9 @@ from datasets import DualGraphData
 from datasets.data_types import coverage_key_index
 from .data_types import ModelOutput
 
+DEFAULT_GRAPH_RELATIVE_LOSS_WEIGHT = 0.1
+DEFAULT_GRAPH_RELATIVE_LOSS_FLOOR = 0.1
+
 
 def compute_weighted_graph_loss(
     graph_pred: torch.Tensor,
@@ -19,8 +22,10 @@ def compute_weighted_graph_loss(
     endpoint_weight: torch.Tensor,
     *,
     coverage_target_keys: tuple = ("branch",),
+    relative_loss_weight: float = DEFAULT_GRAPH_RELATIVE_LOSS_WEIGHT,
+    relative_loss_floor: float = DEFAULT_GRAPH_RELATIVE_LOSS_FLOOR,
 ) -> torch.Tensor:
-    """Compute a type-equal graph loss with sample weights inside each type."""
+    """Compute type-equal absolute and low-target-aware graph supervision."""
     if graph_pred.ndim != 2 or graph_pred.shape[1] != len(coverage_target_keys):
         raise ValueError("graph_pred must have shape [B, len(coverage_target_keys)]")
     if target.ndim != 2 or target.shape[0] != graph_pred.shape[0]:
@@ -29,6 +34,10 @@ def compute_weighted_graph_loss(
         raise ValueError("endpoint_weight must have shape [B]")
     if torch.any(endpoint_weight < 0):
         raise ValueError("endpoint_weight must be non-negative")
+    if relative_loss_weight < 0.0:
+        raise ValueError("relative_loss_weight must be non-negative")
+    if relative_loss_floor <= 0.0:
+        raise ValueError("relative_loss_floor must be positive")
 
     col_idx = [coverage_key_index(key) for key in coverage_target_keys]
     selected_target = target[:, col_idx]
@@ -42,6 +51,15 @@ def compute_weighted_graph_loss(
             selected_target[valid, column],
             reduction="none",
         )
+        if relative_loss_weight > 0.0:
+            relative_error = (
+                graph_pred[valid, column] - selected_target[valid, column]
+            ) / selected_target[valid, column].abs().clamp_min(relative_loss_floor)
+            error = error + relative_loss_weight * F.smooth_l1_loss(
+                relative_error,
+                torch.zeros_like(relative_error),
+                reduction="none",
+            )
         weights = endpoint_weight[valid].to(error.dtype)
         type_losses.append((error * weights).sum() / valid.sum())
     if not type_losses:
@@ -54,6 +72,8 @@ def compute_supervised_losses(
     data: DualGraphData,
     coverage_target_keys: tuple = ("branch",),
     graph_loss_weight: float = 1.0,
+    relative_loss_weight: float = DEFAULT_GRAPH_RELATIVE_LOSS_WEIGHT,
+    relative_loss_floor: float = DEFAULT_GRAPH_RELATIVE_LOSS_FLOOR,
 ) -> Dict[str, torch.Tensor]:
     """计算图级覆盖率回归监督损失。"""
     if output.graph_pred is not None:
@@ -76,6 +96,8 @@ def compute_supervised_losses(
                     dtype=output.graph_pred.dtype,
                 ),
                 coverage_target_keys=coverage_target_keys,
+                relative_loss_weight=relative_loss_weight,
+                relative_loss_floor=relative_loss_floor,
             )
             losses["num_valid_graph_targets"] = int(valid.sum().item())
         else:

@@ -5,6 +5,10 @@ from dataclasses import dataclass
 from typing import Union
 
 from contrastive_defaults import DEFAULT_PAIR_CANDIDATE_POOL_SIZE
+from models.losses import (
+    DEFAULT_GRAPH_RELATIVE_LOSS_FLOOR,
+    DEFAULT_GRAPH_RELATIVE_LOSS_WEIGHT,
+)
 
 
 @dataclass
@@ -22,6 +26,8 @@ class TrainerConfig:
 
     # 损失权重
     graph_loss_weight: float = 1.0
+    graph_relative_loss_weight: float = DEFAULT_GRAPH_RELATIVE_LOSS_WEIGHT
+    graph_relative_loss_floor: float = DEFAULT_GRAPH_RELATIVE_LOSS_FLOOR
 
     # 训练参数
     max_epochs: int = 100
@@ -96,6 +102,10 @@ class TrainerConfig:
             raise ValueError("plateau_patience must be non-negative")
         if self.min_learning_rate < 0.0:
             raise ValueError("min_learning_rate must be non-negative")
+        if self.graph_relative_loss_weight < 0.0:
+            raise ValueError("graph_relative_loss_weight must be non-negative")
+        if self.graph_relative_loss_floor <= 0.0:
+            raise ValueError("graph_relative_loss_floor must be positive")
         if self.pair_candidate_pool_size <= 0:
             raise ValueError("pair_candidate_pool_size must be positive")
         quotas = (
