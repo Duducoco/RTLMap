@@ -60,7 +60,7 @@ def test_model_config_yaml_round_trip_preserves_inference_fields(tmp_path: Path)
     assert model_config == _model_config()
     assert text_config == _text_config()
     assert (
-        yaml.safe_load(path.read_text())["schema_version"] == "rtlmap_model_config.v5"
+        yaml.safe_load(path.read_text())["schema_version"] == "rtlmap_model_config.v6"
     )
     assert loaded["model"]["coverage_target_keys"] == [
         "branch",
@@ -78,7 +78,32 @@ def test_model_config_yaml_round_trip_preserves_inference_fields(tmp_path: Path)
     ]
     assert loaded["model"]["hyperrectangle_dim_per_type"] == 10
     assert loaded["model"]["hyperrectangle_head_type"] == "dual_graph_mlp_v2"
+    assert loaded["model"]["model_architecture"] == "perceiver_fusion"
     assert "num_graph_targets" not in loaded["model"]
+
+
+def test_v5_artifact_loads_as_current_fusion_architecture(tmp_path: Path):
+    path = tmp_path / "legacy_model_config.yaml"
+    artifact = build_model_config_artifact(_model_config(), _text_config())
+    artifact["schema_version"] = "rtlmap_model_config.v5"
+    artifact["model"].pop("model_architecture")
+    save_model_config_artifact(path, artifact)
+
+    loaded, model_config, text_config = load_model_config_artifact(path)
+
+    assert loaded["schema_version"] == "rtlmap_model_config.v6"
+    assert loaded["model"]["model_architecture"] == "perceiver_fusion"
+    assert model_config.model_architecture == "perceiver_fusion"
+    assert text_config == _text_config()
+
+
+def test_v5_checkpoint_artifact_matches_normalized_v6_sidecar():
+    sidecar = build_model_config_artifact(_model_config(), _text_config())
+    checkpoint = build_model_config_artifact(_model_config(), _text_config())
+    checkpoint["schema_version"] = "rtlmap_model_config.v5"
+    checkpoint["model"].pop("model_architecture")
+
+    validate_checkpoint_artifact(sidecar, {"model_config_artifact": checkpoint})
 
 
 def test_checkpoint_artifact_mismatch_is_rejected():

@@ -17,6 +17,12 @@ HYPERRECTANGLE_TYPE_NAMES: tuple[str, ...] = (
     "branch",
 )
 HYPERRECTANGLE_HEAD_TYPE = "dual_graph_mlp_v2"
+MODEL_ARCHITECTURE_PERCEIVER_FUSION = "perceiver_fusion"
+MODEL_ARCHITECTURE_POOLED_ADD = "pooled_add"
+MODEL_ARCHITECTURES = (
+    MODEL_ARCHITECTURE_PERCEIVER_FUSION,
+    MODEL_ARCHITECTURE_POOLED_ADD,
+)
 
 
 @dataclass
@@ -27,6 +33,7 @@ class ModelConfig:
     hidden_dim: int = 256
     num_gnn_layers: int = 4
     dropout: float = 0.1
+    model_architecture: str = MODEL_ARCHITECTURE_PERCEIVER_FUSION
 
     # 任务配置
     num_graph_targets: int = field(init=False, default=1)
@@ -60,6 +67,10 @@ class ModelConfig:
 
     def __post_init__(self):
         self.num_graph_targets = len(self.coverage_target_keys)
+        if self.model_architecture not in MODEL_ARCHITECTURES:
+            raise ValueError(
+                f"unsupported model_architecture: {self.model_architecture!r}"
+            )
         if self.hyperrectangle_dim_per_type <= 0:
             raise ValueError("hyperrectangle_dim_per_type must be positive")
         if self.hyperrectangle_type_names != HYPERRECTANGLE_TYPE_NAMES:

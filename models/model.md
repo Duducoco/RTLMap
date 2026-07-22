@@ -18,12 +18,20 @@ branch, line, fsm, toggle, condition
 ## 2. 数据流
 
 ```text
+perceiver_fusion:
 RTL CDFG ──┐                              ┌── GraphRegressor ── graph_pred
-           ├── PerceiverDualEncoder ── concat(rtl_graph, asm_graph)
+           ├── DualGraphEncoder ── concat(rtl_graph, asm_graph)
 ASM CDFG ──┘                              └── HyperrectangleHead ── hyper_min / hyper_max
+
+pooled_add:
+RTL CDFG ── RTL GNN ── mean_pool ─┐      ┌── GraphRegressor ── graph_pred
+                                  ├─ add ┤
+ASM CDFG ── ASM GNN ── mean_pool ─┘      └── HyperrectangleHead ── hyper_min / hyper_max
 ```
 
-RTL CDFG 提供节点、边、位宽、端口位置等结构信息。ASM CDFG 提供测试激励上下文。编码阶段使用双图融合；两个预测头都直接读取 RTL 与 ASM 图级表示。
+RTL CDFG 提供节点、边、位宽、端口位置等结构信息。ASM CDFG 提供测试激励上下文。
+`model_architecture=perceiver_fusion` 在编码阶段使用双图融合；
+`model_architecture=pooled_add` 不创建跨图融合模块，只在两路独立池化后相加。
 
 ## 3. RTL 消息传递
 
@@ -38,7 +46,7 @@ RTL 编码器仍然使用边结构特征，包括：
 
 ## 4. ASM ↔ RTL 融合
 
-`PerceiverDualEncoder` 使用 Perceiver 风格跨图融合，让 RTL 表示读取 ASM 测试激励上下文。
+`DualGraphEncoder` 在融合架构下使用 Perceiver 风格跨图融合，让 RTL 表示读取 ASM 测试激励上下文。
 
 核心目的：
 
@@ -46,12 +54,21 @@ RTL 编码器仍然使用边结构特征，包括：
 - 将测试上下文注入 RTL 节点和图级表示。
 - 避免直接构造 merged coverage report。
 
+无融合 baseline 仍复用两路特征编码器和 GNN 层，但跳过上述双向注入。它没有
+`fusion_asm2rtl` 或 `fusion_rtl2asm` 参数。
+
 ## 5. 图级回归
 
 `GraphRegressor` 对每个覆盖率目标维护独立 head：
 
 ```text
 graph_pred[k] = CoverageHead_k(concat(rtl_graph, asm_graph))
+```
+
+无融合 baseline 则使用：
+
+```text
+graph_pred[k] = CoverageHead_k(rtl_graph + asm_graph)
 ```
 
 如果配置为：
@@ -90,6 +107,8 @@ hyper_max: [B, 5, D_box]
 第二维固定对应 `line, condition, toggle, fsm, branch`。每个子矩形的真实几何
 体积，即所有轴宽的乘积，用来表示对应 coverage type 的覆盖密度。
 模型隐藏维度仍为 256，与超矩形维度解耦。
+两种模型架构复用相同的 hyperrectangle 配置；baseline 的 head 输入为相加后的
+`[B, hidden_dim]` 图级表示。
 
 ## 8. 覆盖向量相似度
 

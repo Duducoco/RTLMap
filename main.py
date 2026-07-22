@@ -30,7 +30,7 @@ import torch
 
 from contrastive_defaults import DEFAULT_PAIR_CANDIDATE_POOL_SIZE
 from datasets import DualGraphDataModule
-from models.data_types import ModelConfig
+from models.data_types import MODEL_ARCHITECTURES, ModelConfig
 from models.losses import (
     DEFAULT_GRAPH_RELATIVE_LOSS_FLOOR,
     DEFAULT_GRAPH_RELATIVE_LOSS_WEIGHT,
@@ -69,6 +69,12 @@ def parse_args() -> argparse.Namespace:
 
     # ── 模型架构 ──────────────────────────────────────────
     model = p.add_argument_group("模型架构")
+    model.add_argument(
+        "--model-architecture",
+        choices=MODEL_ARCHITECTURES,
+        default="perceiver_fusion",
+        help="perceiver_fusion 使用逐层跨图融合；pooled_add 仅在池化后相加",
+    )
     model.add_argument("--hidden-dim", type=int, default=256)
     model.add_argument("--num-gnn-layers", type=int, default=6)
     model.add_argument("--dropout", type=float, default=0.1)
@@ -254,6 +260,7 @@ def parse_args() -> argparse.Namespace:
 
 def build_model_config(args: argparse.Namespace) -> ModelConfig:
     return ModelConfig(
+        model_architecture=args.model_architecture,
         hidden_dim=args.hidden_dim,
         num_gnn_layers=args.num_gnn_layers,
         dropout=args.dropout,
@@ -368,7 +375,8 @@ def main() -> None:
 
     logger.info("实验: %s", args.experiment_name)
     logger.info(
-        "模型: hidden_dim=%d, gnn_layers=%d, hyperrectangle=%s",
+        "模型: architecture=%s, hidden_dim=%d, gnn_layers=%d, hyperrectangle=%s",
+        model_config.model_architecture,
         model_config.hidden_dim,
         model_config.num_gnn_layers,
         model_config.use_hyperrectangle,

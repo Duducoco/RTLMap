@@ -6,10 +6,13 @@
 
 1. **model.py**
    - `DualGraphFusionModel`：整合 RTL/ASM 编码器、图级覆盖率回归头和可选超矩形头。
+   - `PooledAddBaselineModel`：不创建跨图融合层，分别池化 RTL/ASM 后逐元素相加。
    - `create_model`、`create_small_model`、`create_base_model`：模型工厂函数。
 
 2. **encoder.py**
-   - `PerceiverDualEncoder`：对 RTL 图和 ASM 图进行编码，并通过 Perceiver 风格跨图融合注入测试激励上下文。
+   - `DualGraphEncoder`：对 RTL 图和 ASM 图进行编码，可启用 Perceiver 风格跨图融合。
+   - `PerceiverDualEncoder`：保留的兼容别名，默认启用融合。
+   - baseline 模式关闭融合时不会实例化 Perceiver 模块。
    - RTL 边类型、边宽、端口位置仍作为结构特征参与编码。
 
 3. **heads.py**
@@ -35,6 +38,10 @@ output.rtl_graph_emb   # [B, hidden_dim]，供对比学习使用
 ```
 
 模型不再输出 `edge_logits`。
+
+通过 `ModelConfig(model_architecture="pooled_add")` 选择无融合 baseline；默认的
+`perceiver_fusion` 保持原有逐层融合和图级拼接行为。两种架构均支持相同的
+`use_hyperrectangle`、`hyperrectangle_dim_per_type` 和 `hyper_min_margin` 配置。
 
 ## 监督损失
 

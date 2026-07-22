@@ -692,7 +692,7 @@ class ControlGatedGNNLayer(MessagePassing):
         return self.edge_mlp(torch.cat([x_j, edge_attr], dim=-1))
 
 
-class PerceiverDualEncoder(nn.Module):
+class DualGraphEncoder(nn.Module):
     """
     双向 Perceiver 注入式双图编码器
 
@@ -723,10 +723,12 @@ class PerceiverDualEncoder(nn.Module):
         # Perceiver 融合配置
         perceiver_num_latents: int = 16,
         perceiver_num_heads: int = 4,
+        enable_cross_fusion: bool = True,
     ):
         super().__init__()
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
+        self.enable_cross_fusion = enable_cross_fusion
 
         # RTL 编码器
         self.rtl_node_encoder = RTLNodeFeatureEncoder(num_cell_types, hidden_dim)
@@ -752,23 +754,30 @@ class PerceiverDualEncoder(nn.Module):
             [GNNLayer(hidden_dim, drop_rates[i]) for i in range(num_layers)]
         )
 
-        # 双向 Perceiver 融合层
-        self.fusion_asm2rtl = nn.ModuleList(
-            [
-                PerceiverCrossFusion(
-                    hidden_dim, perceiver_num_latents, perceiver_num_heads, num_layers
-                )
-                for _ in range(num_layers)
-            ]
-        )
-        self.fusion_rtl2asm = nn.ModuleList(
-            [
-                PerceiverCrossFusion(
-                    hidden_dim, perceiver_num_latents, perceiver_num_heads, num_layers
-                )
-                for _ in range(num_layers)
-            ]
-        )
+        # Baseline 不实例化融合层，确保参数量和 checkpoint 中均无融合参数。
+        if enable_cross_fusion:
+            self.fusion_asm2rtl = nn.ModuleList(
+                [
+                    PerceiverCrossFusion(
+                        hidden_dim,
+                        perceiver_num_latents,
+                        perceiver_num_heads,
+                        num_layers,
+                    )
+                    for _ in range(num_layers)
+                ]
+            )
+            self.fusion_rtl2asm = nn.ModuleList(
+                [
+                    PerceiverCrossFusion(
+                        hidden_dim,
+                        perceiver_num_latents,
+                        perceiver_num_heads,
+                        num_layers,
+                    )
+                    for _ in range(num_layers)
+                ]
+            )
 
         # 输出投影
         self.rtl_output = nn.Linear(hidden_dim, output_dim)
@@ -837,14 +846,15 @@ class PerceiverDualEncoder(nn.Module):
                 rtl_edge_target_port_idx,
             )
 
-            # 2. 双向 Perceiver 注入：快照避免链式污染
-            rtl_in, asm_in = rtl_h, asm_h
-            rtl_h = self.fusion_asm2rtl[i](
-                rtl_in, asm_in, rtl_batch, asm_batch
-            )  # ASM → RTL
-            asm_h = self.fusion_rtl2asm[i](
-                asm_in, rtl_in, asm_batch, rtl_batch
-            )  # RTL → ASM
+            if self.enable_cross_fusion:
+                # 双向 Perceiver 注入：快照避免链式污染
+                rtl_in, asm_in = rtl_h, asm_h
+                rtl_h = self.fusion_asm2rtl[i](
+                    rtl_in, asm_in, rtl_batch, asm_batch
+                )  # ASM → RTL
+                asm_h = self.fusion_rtl2asm[i](
+                    asm_in, rtl_in, asm_batch, rtl_batch
+                )  # RTL → ASM
 
         rtl_node = self.rtl_output(rtl_h)
         asm_node = self.asm_output(asm_h)
@@ -852,3 +862,7 @@ class PerceiverDualEncoder(nn.Module):
         asm_graph = global_mean_pool(asm_node, asm_batch)
 
         return rtl_node, rtl_edge_attr, rtl_graph, asm_node, asm_graph
+
+
+# Backward-compatible import name for callers that use the fusion-default encoder.
+PerceiverDualEncoder = DualGraphEncoder

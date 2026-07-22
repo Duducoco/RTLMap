@@ -10,10 +10,11 @@ import yaml
 
 from text_encoder import TextEncoderConfig
 
-from .data_types import ModelConfig
+from .data_types import MODEL_ARCHITECTURE_PERCEIVER_FUSION, ModelConfig
 
 
-SCHEMA_VERSION = "rtlmap_model_config.v5"
+SCHEMA_VERSION = "rtlmap_model_config.v6"
+LEGACY_SCHEMA_VERSION = "rtlmap_model_config.v5"
 
 
 class ModelConfigMismatch(ValueError):
@@ -64,23 +65,27 @@ def _require_exact_fields(
         )
 
 
-def load_model_config_artifact(
-    path: str | Path,
+def _normalize_artifact(
+    artifact: Mapping[str, Any],
 ) -> tuple[dict[str, Any], ModelConfig, TextEncoderConfig | None]:
-    artifact = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(artifact, dict):
+    if not isinstance(artifact, Mapping):
         raise ValueError("model config artifact must be a mapping")
-    if artifact.get("schema_version") != SCHEMA_VERSION:
-        raise ValueError(
-            f"unsupported model config schema: {artifact.get('schema_version')!r}"
-        )
+    schema_version = artifact.get("schema_version")
+    if schema_version not in (SCHEMA_VERSION, LEGACY_SCHEMA_VERSION):
+        raise ValueError(f"unsupported model config schema: {schema_version!r}")
 
     model_raw = artifact.get("model")
-    if not isinstance(model_raw, dict):
+    if not isinstance(model_raw, Mapping):
         raise ValueError("model config artifact missing model mapping")
     model_fields = {item.name for item in fields(ModelConfig) if item.init}
-    _require_exact_fields(model_raw, model_fields, "model")
     model_values = dict(model_raw)
+    if schema_version == LEGACY_SCHEMA_VERSION:
+        _require_exact_fields(
+            model_values, model_fields - {"model_architecture"}, "model"
+        )
+        model_values["model_architecture"] = MODEL_ARCHITECTURE_PERCEIVER_FUSION
+    else:
+        _require_exact_fields(model_values, model_fields, "model")
     model_values["coverage_target_keys"] = tuple(model_values["coverage_target_keys"])
     model_values["hyperrectangle_type_names"] = tuple(
         model_values["hyperrectangle_type_names"]
@@ -90,7 +95,7 @@ def load_model_config_artifact(
     text_raw = artifact.get("text_encoder")
     text_config = None
     if text_raw is not None:
-        if not isinstance(text_raw, dict):
+        if not isinstance(text_raw, Mapping):
             raise ValueError("text_encoder must be a mapping or null")
         text_fields = {item.name for item in fields(TextEncoderConfig) if item.init}
         _require_exact_fields(text_raw, text_fields, "text_encoder")
@@ -98,6 +103,13 @@ def load_model_config_artifact(
 
     normalized = build_model_config_artifact(model_config, text_config)
     return normalized, model_config, text_config
+
+
+def load_model_config_artifact(
+    path: str | Path,
+) -> tuple[dict[str, Any], ModelConfig, TextEncoderConfig | None]:
+    artifact = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    return _normalize_artifact(artifact)
 
 
 def validate_checkpoint_artifact(
@@ -108,7 +120,12 @@ def validate_checkpoint_artifact(
         raise ModelConfigMismatch(
             "checkpoint hyperparameters missing model_config_artifact"
         )
-    if dict(sidecar) != dict(checkpoint_artifact):
+    try:
+        normalized_sidecar, _, _ = _normalize_artifact(sidecar)
+        normalized_checkpoint, _, _ = _normalize_artifact(checkpoint_artifact)
+    except ValueError as exc:
+        raise ModelConfigMismatch(str(exc)) from exc
+    if normalized_sidecar != normalized_checkpoint:
         raise ModelConfigMismatch(
             "sidecar model config does not match checkpoint model config artifact"
         )

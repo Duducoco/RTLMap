@@ -23,6 +23,7 @@ RTLMap/
 ├── main.py                         # 训练/测试 CLI 入口
 ├── pyproject.toml                  # Python 版本、依赖和 uv 配置
 ├── run_train.sh                    # 普通训练示例脚本
+├── run_train_queue_no_fusion.sh    # pooled-add 无融合模型排队训练
 ├── run_contrastive.sh              # joint contrastive 训练示例脚本
 ├── datasets/
 │   ├── data_types.py               # DualGraphData、覆盖率目标定义
@@ -35,7 +36,7 @@ RTLMap/
 │   ├── data_types.py               # ModelConfig、ModelOutput
 │   ├── encoder.py                  # RTL/ASM 编码器
 │   ├── interaction.py              # Perceiver 跨图融合
-│   ├── model.py                    # DualGraphFusionModel 与任务头
+│   ├── model.py                    # 融合模型、pooled-add baseline 与任务头
 │   ├── hyperrectangle.py           # 超矩形表示
 │   └── contrastive_loss.py         # 对比损失
 ├── trainer/
@@ -329,6 +330,7 @@ uv run python main.py \
 |------|--------|------|
 | `--dataset-dir` | 必需 | 一个或多个 manifest 数据集目录 |
 | `--data-root` | 必需 | 预处理缓存根目录 |
+| `--model-architecture` | `perceiver_fusion` | `perceiver_fusion` 或无融合的 `pooled_add` |
 | `--hidden-dim` | `256` | 模型隐藏维度 |
 | `--num-gnn-layers` | `6` | GNN 层数 |
 | `--dropout` | `0.1` | dropout |
@@ -348,6 +350,25 @@ uv run python main.py \
 | `--fast-dev-run` | `false` | Lightning 快速调试模式 |
 | `--seed` | `None` | 全局随机种子 |
 
+### 无融合 pooled-add baseline
+
+`pooled_add` 保留 RTL 和 ASM 各自的 GNN 编码器，但不创建 Perceiver
+cross-attention。两路节点表示分别执行 mean pooling，然后逐元素相加：
+
+```text
+joint_graph = mean_pool(rtl_node) + mean_pool(asm_node)
+```
+
+回归 head、可选 hyperrectangle head 及其维度和 margin 配置与融合模型一致。
+单次训练可通过 `--model-architecture pooled_add` 选择。依次训练四个数据集：
+
+```bash
+bash run_train_queue_no_fusion.sh
+```
+
+该队列脚本复用 `run_train.sh` 的仅监督配置，默认输出到
+`checkpoints/no_fusion`，实验名为 `<dataset>-4coverage-no-fusion`。
+
 注意：`TrainerConfig` 中还存在 `use_bucketing`、`token_budget`、`strategy` 等配置，目前未在 `main.py` CLI 暴露。如需使用，可通过 Python API 构造配置。
 
 ## Python API
@@ -362,6 +383,7 @@ app_config = AppConfig(
         dataset_dir="/path/to/dataset",
     ),
     model=ModelConfig(
+        model_architecture="pooled_add",
         hidden_dim=256,
         num_gnn_layers=6,
         coverage_target_keys=("branch",),

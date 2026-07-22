@@ -17,8 +17,13 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 from datasets import DualGraphData
-from .data_types import ModelConfig, ModelOutput
-from .encoder import PerceiverDualEncoder
+from .data_types import (
+    MODEL_ARCHITECTURE_PERCEIVER_FUSION,
+    MODEL_ARCHITECTURE_POOLED_ADD,
+    ModelConfig,
+    ModelOutput,
+)
+from .encoder import DualGraphEncoder
 from .heads import GraphRegressor
 from .hyperrectangle import HyperrectangleHead
 from .losses import (
@@ -28,24 +33,18 @@ from .losses import (
 )
 
 
-class DualGraphFusionModel(nn.Module):
-    """
-    双图融合模型
+class _DualGraphModelBase(nn.Module):
+    """Shared dual-graph prediction implementation behind architecture adapters."""
 
-    架构设计：
-    - 编码阶段：ASM 和 RTL 通过双向融合相互增强（ASM ↔ RTL）
-    - 预测阶段：拼接 RTL 与 ASM 图级嵌入进行覆盖率回归
-    - ASM CDFG 作为上下文，模拟"测试激励驱动硬件"
-
-    ASM 与 RTL 在每层 GNN 后通过双向 Perceiver cross-attention 交互。
-    """
+    enable_cross_fusion: bool
+    graph_embedding_multiplier: int
 
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
+        graph_embedding_dim = config.hidden_dim * self.graph_embedding_multiplier
 
-        # 双图编码器（PerceiverCrossFusion 双向融合）
-        self.encoder = PerceiverDualEncoder(
+        self.encoder = DualGraphEncoder(
             hidden_dim=config.hidden_dim,
             output_dim=config.hidden_dim,
             num_layers=config.num_gnn_layers,
@@ -59,20 +58,19 @@ class DualGraphFusionModel(nn.Module):
             use_asm_adapter=config.use_asm_adapter,
             perceiver_num_latents=config.perceiver_num_latents,
             perceiver_num_heads=config.perceiver_num_heads,
+            enable_cross_fusion=self.enable_cross_fusion,
         )
 
-        # 图回归器直接读取 RTL 与 ASM 的图级摘要。
         self.graph_regressor = GraphRegressor(
-            config.hidden_dim * 2,
+            graph_embedding_dim,
             config.hidden_dim,
             config.coverage_target_keys,
             config.dropout,
         )
 
-        # 超矩形头（条件创建）
         if config.use_hyperrectangle:
             self.hyperrectangle_head = HyperrectangleHead(
-                input_dim=config.hidden_dim * 2,
+                input_dim=graph_embedding_dim,
                 hidden_dim=config.hidden_dim,
                 num_types=len(config.hyperrectangle_type_names),
                 dim_per_type=config.hyperrectangle_dim_per_type,
@@ -80,22 +78,13 @@ class DualGraphFusionModel(nn.Module):
                 dropout=config.dropout,
             )
 
+    def _combine_graph_embeddings(
+        self, rtl_graph: torch.Tensor, asm_graph: torch.Tensor
+    ) -> torch.Tensor:
+        raise NotImplementedError
+
     def forward(self, data: DualGraphData) -> ModelOutput:
-        """
-        前向传播
-
-        Args:
-            data: 双图数据，包含 RTL 和 ASM 图
-                RTL: node_cell_type, node_width, edge_index, edge_type, edge_width,
-                     edge_source_port_idx, edge_target_port_idx
-                ASM: asm_node_type, asm_instruction_encoding, asm_edge_index, asm_edge_type
-
-        Returns:
-            ModelOutput: 图级覆盖率预测（基于 RTL 与 ASM）
-        """
-        # 编码阶段（双向 Perceiver 注入：ASM ↔ RTL）
         rtl_node, rtl_edge_attr, rtl_graph, asm_node, asm_graph = self.encoder(
-            # RTL 图
             rtl_edge_index=data.edge_index,
             rtl_node_cell_type=data.node_cell_type,
             rtl_node_width=data.node_width,
@@ -105,7 +94,6 @@ class DualGraphFusionModel(nn.Module):
             rtl_edge_width=getattr(data, "edge_width", None),
             rtl_edge_source_port_idx=getattr(data, "edge_source_port_idx", None),
             rtl_edge_target_port_idx=getattr(data, "edge_target_port_idx", None),
-            # ASM 图
             asm_edge_index=data.asm_edge_index,
             asm_node_type=data.asm_node_type,
             asm_instruction_encoding=data.asm_instruction_encoding,
@@ -113,10 +101,9 @@ class DualGraphFusionModel(nn.Module):
             asm_batch=getattr(data, "asm_node_type_batch", None),
         )
 
-        joint_graph = torch.cat((rtl_graph, asm_graph), dim=-1)
+        joint_graph = self._combine_graph_embeddings(rtl_graph, asm_graph)
         graph_pred = self.graph_regressor(joint_graph)
 
-        # 超矩形输出（条件计算）
         hyper_min, hyper_max = None, None
         if self.config.use_hyperrectangle and hasattr(self, "hyperrectangle_head"):
             hyper_min, hyper_max = self.hyperrectangle_head(joint_graph)
@@ -149,23 +136,65 @@ class DualGraphFusionModel(nn.Module):
         )
 
 
+class DualGraphFusionModel(_DualGraphModelBase):
+    """
+    双图融合模型
+
+    架构设计：
+    - 编码阶段：ASM 和 RTL 通过双向融合相互增强（ASM ↔ RTL）
+    - 预测阶段：拼接 RTL 与 ASM 图级嵌入进行覆盖率回归
+    - ASM CDFG 作为上下文，模拟"测试激励驱动硬件"
+
+    ASM 与 RTL 在每层 GNN 后通过双向 Perceiver cross-attention 交互。
+    """
+
+    enable_cross_fusion = True
+    graph_embedding_multiplier = 2
+
+    def _combine_graph_embeddings(
+        self, rtl_graph: torch.Tensor, asm_graph: torch.Tensor
+    ) -> torch.Tensor:
+        return torch.cat((rtl_graph, asm_graph), dim=-1)
+
+
+class PooledAddBaselineModel(_DualGraphModelBase):
+    """Independent RTL/ASM GNN branches combined only after mean pooling."""
+
+    enable_cross_fusion = False
+    graph_embedding_multiplier = 1
+
+    def _combine_graph_embeddings(
+        self, rtl_graph: torch.Tensor, asm_graph: torch.Tensor
+    ) -> torch.Tensor:
+        if rtl_graph.shape != asm_graph.shape:
+            raise ValueError(
+                "pooled_add requires matching RTL and ASM graph embedding shapes, "
+                f"got {tuple(rtl_graph.shape)} and {tuple(asm_graph.shape)}"
+            )
+        return rtl_graph + asm_graph
+
+
 def create_model(
     config: Optional[ModelConfig] = None, **kwargs
-) -> DualGraphFusionModel:
+) -> DualGraphFusionModel | PooledAddBaselineModel:
     """创建模型"""
     if config is None:
         config = ModelConfig(**kwargs)
-    return DualGraphFusionModel(config)
+    if config.model_architecture == MODEL_ARCHITECTURE_PERCEIVER_FUSION:
+        return DualGraphFusionModel(config)
+    if config.model_architecture == MODEL_ARCHITECTURE_POOLED_ADD:
+        return PooledAddBaselineModel(config)
+    raise ValueError(f"unsupported model_architecture: {config.model_architecture!r}")
 
 
-def create_small_model(**kwargs) -> DualGraphFusionModel:
+def create_small_model(**kwargs) -> DualGraphFusionModel | PooledAddBaselineModel:
     """创建小型模型（调试用）"""
     defaults = {"hidden_dim": 128, "num_gnn_layers": 2}
     defaults.update(kwargs)
     return create_model(**defaults)
 
 
-def create_base_model(**kwargs) -> DualGraphFusionModel:
+def create_base_model(**kwargs) -> DualGraphFusionModel | PooledAddBaselineModel:
     """创建基础模型"""
     defaults = {"hidden_dim": 256, "num_gnn_layers": 4}
     defaults.update(kwargs)
