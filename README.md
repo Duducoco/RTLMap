@@ -25,6 +25,7 @@ RTLMap/
 ├── run_train.sh                    # 普通训练示例脚本
 ├── run_train_queue_no_fusion.sh    # pooled-add 无融合模型排队训练
 ├── run_contrastive.sh              # joint contrastive 训练示例脚本
+├── run_contrastive_queue_no_fusion.sh # pooled-add 对比学习排队训练
 ├── datasets/
 │   ├── data_types.py               # DualGraphData、覆盖率目标定义
 │   ├── datamodule.py               # 普通 manifest 数据集与 Lightning DataModule
@@ -368,6 +369,16 @@ bash run_train_queue_no_fusion.sh
 
 该队列脚本复用 `run_train.sh` 的仅监督配置，默认输出到
 `checkpoints/no_fusion`，实验名为 `<dataset>-4coverage-no-fusion`。
+
+使用相同无融合架构依次运行四个 joint contrastive 实验：
+
+```bash
+bash run_contrastive_queue_no_fusion.sh
+```
+
+该脚本复用 `run_contrastive.sh` 的图回归、Hyperrectangle、volume loss 和 IoU
+loss 配置，默认输出到 `checkpoints/contrastive_no_fusion`。任一数据集训练失败时
+队列会立即停止，不会继续执行后续实验。
 
 注意：`TrainerConfig` 中还存在 `use_bucketing`、`token_budget`、`strategy` 等配置，目前未在 `main.py` CLI 暴露。如需使用，可通过 Python API 构造配置。
 

@@ -16,12 +16,12 @@ def _run_script(
     tmp_path: Path,
     checkpoint: str | None,
     *script_args: str,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
     capture_path = tmp_path / "uv-args.txt"
     fake_uv = tmp_path / "uv"
     fake_uv.write_text(
-        "#!/usr/bin/env bash\n"
-        'printf \'%s\\n\' "$@" > "$CAPTURE_PATH"\n',
+        '#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$CAPTURE_PATH"\n',
         encoding="utf-8",
     )
     fake_uv.chmod(0o755)
@@ -45,6 +45,9 @@ def _run_script(
         env.pop("CKPT_PATH", None)
     else:
         env["CKPT_PATH"] = checkpoint
+    env.pop("MODEL_ARCHITECTURE", None)
+    env.pop("CHECKPOINT_DIR", None)
+    env.update(extra_env or {})
 
     result = subprocess.run(
         ["bash", "run_contrastive.sh", *script_args],
@@ -54,7 +57,11 @@ def _run_script(
         text=True,
         check=False,
     )
-    args = capture_path.read_text(encoding="utf-8").splitlines() if capture_path.exists() else []
+    args = (
+        capture_path.read_text(encoding="utf-8").splitlines()
+        if capture_path.exists()
+        else []
+    )
     return result, args
 
 
@@ -96,6 +103,41 @@ def test_run_contrastive_selects_dataset_and_derived_defaults(tmp_path: Path) ->
     assert _argument_value(args, "--iou-rank-loss-weight") == "0.5"
     assert _argument_value(args, "--iou-rank-margin") == "0.05"
     assert _argument_value(args, "--iou-rank-min-target-gap") == "0.05"
+    assert _argument_value(args, "--model-architecture") == "perceiver_fusion"
+
+
+def test_run_contrastive_supports_pooled_add_architecture(tmp_path: Path) -> None:
+    checkpoint_dir = str(tmp_path / "no-fusion-checkpoints")
+
+    result, args = _run_script(
+        tmp_path,
+        None,
+        "--dataset",
+        "ibex",
+        extra_env={
+            "MODEL_ARCHITECTURE": "pooled_add",
+            "CHECKPOINT_DIR": checkpoint_dir,
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _argument_value(args, "--model-architecture") == "pooled_add"
+    assert _argument_value(args, "--checkpoint-dir") == checkpoint_dir
+    assert _argument_value(args, "--experiment-name").endswith("-no-fusion")
+    assert "--joint-contrastive" in args
+    assert _argument_value(args, "--hyperrectangle-dim-per-type") == "5"
+
+
+def test_run_contrastive_rejects_unknown_model_architecture(tmp_path: Path) -> None:
+    result, args = _run_script(
+        tmp_path,
+        None,
+        extra_env={"MODEL_ARCHITECTURE": "unknown"},
+    )
+
+    assert result.returncode == 2
+    assert "MODEL_ARCHITECTURE 必须是" in result.stderr
+    assert args == []
 
 
 def test_run_contrastive_accepts_dataset_name_as_positional_argument(
@@ -113,7 +155,9 @@ def test_run_contrastive_accepts_dataset_name_as_positional_argument(
     )
 
 
-def test_run_contrastive_accepts_data_root_and_checkpoint_options(tmp_path: Path) -> None:
+def test_run_contrastive_accepts_data_root_and_checkpoint_options(
+    tmp_path: Path,
+) -> None:
     data_root = str(tmp_path / "processed data")
     checkpoint = str(tmp_path / "checkpoints" / "last model.ckpt")
 

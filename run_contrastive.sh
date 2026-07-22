@@ -37,7 +37,8 @@ usage() {
   bash run_contrastive.sh riscv_simple_multicycle
 
 环境变量:
-  DATASET_ROOT, CKPT_PATH, ACCELERATOR, DEVICES
+  DATASET_ROOT, CKPT_PATH, ACCELERATOR, DEVICES, CHECKPOINT_DIR
+  MODEL_ARCHITECTURE  模型架构: perceiver_fusion（默认）或 pooled_add
 EOF
 }
 
@@ -47,11 +48,26 @@ DATA_ROOT=""
 ACCELERATOR="${ACCELERATOR:-gpu}"
 DEVICES="${DEVICES:-2}"
 CKPT_PATH="${CKPT_PATH:-}"
+CHECKPOINT_DIR="${CHECKPOINT_DIR:-checkpoints/contrastive}"
+MODEL_ARCHITECTURE="${MODEL_ARCHITECTURE:-perceiver_fusion}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-4}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-4}"
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
 export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-4}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
+
+case "$MODEL_ARCHITECTURE" in
+    perceiver_fusion)
+        EXPERIMENT_SUFFIX=""
+        ;;
+    pooled_add)
+        EXPERIMENT_SUFFIX="-no-fusion"
+        ;;
+    *)
+        echo "错误: MODEL_ARCHITECTURE 必须是 perceiver_fusion 或 pooled_add" >&2
+        exit 2
+        ;;
+esac
 
 DATASET_SELECTED=false
 while [[ $# -gt 0 ]]; do
@@ -118,7 +134,7 @@ fi
 
 DATASET_DIRS=("$DATASET_DIR")
 DATA_ROOT="${DATA_ROOT:-./data_contrastive_${DATASET_NAME}}"
-EXPERIMENT_NAME="${DATASET_NAME}-4coverage-split-rect-mlp-asm-geometry-rank-batch"
+EXPERIMENT_NAME="${DATASET_NAME}-4coverage-split-rect-mlp-asm-geometry-rank-batch${EXPERIMENT_SUFFIX}"
 
 set --
 if [[ -n "$CKPT_PATH" ]]; then
@@ -128,6 +144,7 @@ fi
 uv run python main.py \
     --dataset-dir "${DATASET_DIRS[@]}" \
     --data-root "$DATA_ROOT" \
+    --model-architecture "$MODEL_ARCHITECTURE" \
     --hidden-dim 256 \
     --num-gnn-layers 4 \
     --dropout 0.1 \
@@ -174,7 +191,7 @@ uv run python main.py \
     --hyper-min-margin 0.01 \
     --experiment-name "$EXPERIMENT_NAME" \
     --logger-type tensorboard \
-    --checkpoint-dir checkpoints/contrastive \
+    --checkpoint-dir "$CHECKPOINT_DIR" \
     --save-top-k 3 \
     --early-stopping-patience 30 \
     --seed 42 \
