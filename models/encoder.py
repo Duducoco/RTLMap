@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-from torch_geometric.nn import MessagePassing, global_mean_pool
+from torch_geometric.nn import GCNConv, MessagePassing, global_mean_pool
 from torch_geometric.utils import softmax as pyg_softmax
 from typing import Optional, Tuple
 from .interaction import PerceiverCrossFusion
@@ -343,6 +343,27 @@ class GNNLayer(MessagePassing):
     ) -> torch.Tensor:
         """边更新函数：源节点 + 目标节点 + 当前边"""
         return self.edge_mlp(torch.cat([x_i, x_j, edge_attr], dim=-1))
+
+
+class RTLGCNLayer(nn.Module):
+    """Standard GCN propagation for RTL nodes, without RTL edge features."""
+
+    uses_edge_features = False
+
+    def __init__(self, hidden_dim: int, drop_path_rate: float = 0.1):
+        super().__init__()
+        self.conv = GCNConv(hidden_dim, hidden_dim)
+        self.norm = nn.LayerNorm(hidden_dim)
+        self.drop_path_rate = drop_path_rate
+
+    def forward(
+        self,
+        x: Tensor,
+        edge_index: Tensor,
+    ) -> Tensor:
+        node_update = F.gelu(self.conv(x, edge_index))
+        node_update = drop_path(node_update, self.drop_path_rate, self.training)
+        return self.norm(x + node_update)
 
 
 class ControlGatedGNNLayer(MessagePassing):
@@ -724,6 +745,7 @@ class DualGraphEncoder(nn.Module):
         perceiver_num_latents: int = 16,
         perceiver_num_heads: int = 4,
         enable_cross_fusion: bool = True,
+        rtl_layer_cls: type[nn.Module] = ControlGatedGNNLayer,
     ):
         super().__init__()
         self.num_layers = num_layers
@@ -732,8 +754,10 @@ class DualGraphEncoder(nn.Module):
 
         # RTL 编码器
         self.rtl_node_encoder = RTLNodeFeatureEncoder(num_cell_types, hidden_dim)
-        self.rtl_edge_encoder = RTLEdgeFeatureEncoder(
-            num_edge_types, hidden_dim, max_ports
+        self.rtl_edge_encoder = (
+            RTLEdgeFeatureEncoder(num_edge_types, hidden_dim, max_ports)
+            if getattr(rtl_layer_cls, "uses_edge_features", True)
+            else None
         )
 
         # ASM 编码器（含可训练 Adapter）
@@ -748,7 +772,7 @@ class DualGraphEncoder(nn.Module):
             for i in range(num_layers)
         ]
         self.rtl_layers = nn.ModuleList(
-            [ControlGatedGNNLayer(hidden_dim, drop_rates[i]) for i in range(num_layers)]
+            [rtl_layer_cls(hidden_dim, drop_rates[i]) for i in range(num_layers)]
         )
         self.asm_layers = nn.ModuleList(
             [GNNLayer(hidden_dim, drop_rates[i]) for i in range(num_layers)]
@@ -824,12 +848,15 @@ class DualGraphEncoder(nn.Module):
         rtl_h = self.rtl_node_encoder(rtl_node_cell_type, rtl_node_width)
         asm_h = self.asm_node_encoder(asm_node_type, asm_instruction_encoding)
 
-        rtl_edge_attr = self.rtl_edge_encoder(
-            rtl_edge_type,
-            rtl_edge_width,
-            rtl_edge_source_port_idx,
-            rtl_edge_target_port_idx,
-        )
+        if self.rtl_edge_encoder is None:
+            rtl_edge_attr = rtl_h.new_zeros((rtl_edge_index.shape[1], self.hidden_dim))
+        else:
+            rtl_edge_attr = self.rtl_edge_encoder(
+                rtl_edge_type,
+                rtl_edge_width,
+                rtl_edge_source_port_idx,
+                rtl_edge_target_port_idx,
+            )
         asm_edge_attr = self.asm_edge_encoder(asm_edge_type)
 
         for i in range(self.num_layers):
@@ -837,14 +864,17 @@ class DualGraphEncoder(nn.Module):
             asm_h, asm_edge_attr = self.asm_layers[i](
                 asm_h, asm_edge_index, asm_edge_attr
             )
-            rtl_h, rtl_edge_attr = self.rtl_layers[i](
-                rtl_h,
-                rtl_edge_index,
-                rtl_edge_attr,
-                rtl_edge_type,
-                rtl_node_type,
-                rtl_edge_target_port_idx,
-            )
+            if self.rtl_edge_encoder is None:
+                rtl_h = self.rtl_layers[i](rtl_h, rtl_edge_index)
+            else:
+                rtl_h, rtl_edge_attr = self.rtl_layers[i](
+                    rtl_h,
+                    rtl_edge_index,
+                    rtl_edge_attr,
+                    rtl_edge_type,
+                    rtl_node_type,
+                    rtl_edge_target_port_idx,
+                )
 
             if self.enable_cross_fusion:
                 # 双向 Perceiver 注入：快照避免链式污染

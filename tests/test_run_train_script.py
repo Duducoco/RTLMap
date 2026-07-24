@@ -2,11 +2,16 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_run_train_passes_selected_model_architecture(tmp_path: Path) -> None:
+@pytest.mark.parametrize("architecture", ["pooled_add", "rtl_gcn"])
+def test_run_train_passes_selected_model_architecture(
+    tmp_path: Path, architecture: str
+) -> None:
     capture_path = tmp_path / "uv-args.txt"
     fake_uv = tmp_path / "uv"
     fake_uv.write_text(
@@ -22,7 +27,7 @@ def test_run_train_passes_selected_model_architecture(tmp_path: Path) -> None:
     env.update(
         CAPTURE_PATH=str(capture_path),
         DATASET_ROOT=str(dataset_root),
-        MODEL_ARCHITECTURE="pooled_add",
+        MODEL_ARCHITECTURE=architecture,
         PATH=f"{tmp_path}:{env['PATH']}",
     )
 
@@ -38,4 +43,4 @@ def test_run_train_passes_selected_model_architecture(tmp_path: Path) -> None:
     assert result.returncode == 0, result.stderr
     args = capture_path.read_text(encoding="utf-8").splitlines()
     architecture_index = args.index("--model-architecture")
-    assert args[architecture_index + 1] == "pooled_add"
+    assert args[architecture_index + 1] == architecture

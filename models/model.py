@@ -20,10 +20,11 @@ from datasets import DualGraphData
 from .data_types import (
     MODEL_ARCHITECTURE_PERCEIVER_FUSION,
     MODEL_ARCHITECTURE_POOLED_ADD,
+    MODEL_ARCHITECTURE_RTL_GCN,
     ModelConfig,
     ModelOutput,
 )
-from .encoder import DualGraphEncoder
+from .encoder import ControlGatedGNNLayer, DualGraphEncoder, RTLGCNLayer
 from .heads import GraphRegressor
 from .hyperrectangle import HyperrectangleHead
 from .losses import (
@@ -38,6 +39,7 @@ class _DualGraphModelBase(nn.Module):
 
     enable_cross_fusion: bool
     graph_embedding_multiplier: int
+    rtl_layer_cls: type[nn.Module] = ControlGatedGNNLayer
 
     def __init__(self, config: ModelConfig):
         super().__init__()
@@ -59,6 +61,7 @@ class _DualGraphModelBase(nn.Module):
             perceiver_num_latents=config.perceiver_num_latents,
             perceiver_num_heads=config.perceiver_num_heads,
             enable_cross_fusion=self.enable_cross_fusion,
+            rtl_layer_cls=self.rtl_layer_cls,
         )
 
         self.graph_regressor = GraphRegressor(
@@ -174,9 +177,15 @@ class PooledAddBaselineModel(_DualGraphModelBase):
         return rtl_graph + asm_graph
 
 
+class GCNFusionBaselineModel(DualGraphFusionModel):
+    """Fusion model with standard GCN propagation on the RTL branch."""
+
+    rtl_layer_cls = RTLGCNLayer
+
+
 def create_model(
     config: Optional[ModelConfig] = None, **kwargs
-) -> DualGraphFusionModel | PooledAddBaselineModel:
+) -> DualGraphFusionModel | PooledAddBaselineModel | GCNFusionBaselineModel:
     """创建模型"""
     if config is None:
         config = ModelConfig(**kwargs)
@@ -184,17 +193,23 @@ def create_model(
         return DualGraphFusionModel(config)
     if config.model_architecture == MODEL_ARCHITECTURE_POOLED_ADD:
         return PooledAddBaselineModel(config)
+    if config.model_architecture == MODEL_ARCHITECTURE_RTL_GCN:
+        return GCNFusionBaselineModel(config)
     raise ValueError(f"unsupported model_architecture: {config.model_architecture!r}")
 
 
-def create_small_model(**kwargs) -> DualGraphFusionModel | PooledAddBaselineModel:
+def create_small_model(
+    **kwargs,
+) -> DualGraphFusionModel | PooledAddBaselineModel | GCNFusionBaselineModel:
     """创建小型模型（调试用）"""
     defaults = {"hidden_dim": 128, "num_gnn_layers": 2}
     defaults.update(kwargs)
     return create_model(**defaults)
 
 
-def create_base_model(**kwargs) -> DualGraphFusionModel | PooledAddBaselineModel:
+def create_base_model(
+    **kwargs,
+) -> DualGraphFusionModel | PooledAddBaselineModel | GCNFusionBaselineModel:
     """创建基础模型"""
     defaults = {"hidden_dim": 256, "num_gnn_layers": 4}
     defaults.update(kwargs)

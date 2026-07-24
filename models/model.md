@@ -27,11 +27,18 @@ pooled_add:
 RTL CDFG ── RTL GNN ── mean_pool ─┐      ┌── GraphRegressor ── graph_pred
                                   ├─ add ┤
 ASM CDFG ── ASM GNN ── mean_pool ─┘      └── HyperrectangleHead ── hyper_min / hyper_max
+
+rtl_gcn:
+RTL CDFG ── standard GCN ─┐              ┌── GraphRegressor ── graph_pred
+                          ├─ Perceiver ─ concat
+ASM CDFG ── current GNN ──┘              └── HyperrectangleHead ── hyper_min / hyper_max
 ```
 
 RTL CDFG 提供节点、边、位宽、端口位置等结构信息。ASM CDFG 提供测试激励上下文。
 `model_architecture=perceiver_fusion` 在编码阶段使用双图融合；
 `model_architecture=pooled_add` 不创建跨图融合模块，只在两路独立池化后相加。
+`model_architecture=rtl_gcn` 保留双向融合和图级拼接，仅把 RTL 消息传递替换为
+标准 `GCNConv`。
 
 ## 3. RTL 消息传递
 
@@ -43,6 +50,7 @@ RTL 编码器仍然使用边结构特征，包括：
 - target port index
 
 这些特征用于构造更准确的 RTL 表示，但不再作为边分类预测目标。
+`rtl_gcn` 是例外：标准 GCN 只使用 `edge_index`，不读取上述 RTL 边属性。
 
 ## 4. ASM ↔ RTL 融合
 

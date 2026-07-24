@@ -38,7 +38,7 @@ usage() {
 
 环境变量:
   DATASET_ROOT, CKPT_PATH, ACCELERATOR, DEVICES, CHECKPOINT_DIR
-  MODEL_ARCHITECTURE  模型架构: perceiver_fusion（默认）或 pooled_add
+  MODEL_ARCHITECTURE  模型架构: perceiver_fusion（默认）、pooled_add 或 rtl_gcn
 EOF
 }
 
@@ -63,8 +63,11 @@ case "$MODEL_ARCHITECTURE" in
     pooled_add)
         EXPERIMENT_SUFFIX="-no-fusion"
         ;;
+    rtl_gcn)
+        EXPERIMENT_SUFFIX="-rtl-gcn"
+        ;;
     *)
-        echo "错误: MODEL_ARCHITECTURE 必须是 perceiver_fusion 或 pooled_add" >&2
+        echo "错误: MODEL_ARCHITECTURE 必须是 perceiver_fusion、pooled_add 或 rtl_gcn" >&2
         exit 2
         ;;
 esac

@@ -28,7 +28,7 @@ usage() {
 
 环境变量:
   DATASET_ROOT, ACCELERATOR, DEVICES, CHECKPOINT_DIR, EXPERIMENT_NAME
-  MODEL_ARCHITECTURE  模型架构: perceiver_fusion（默认）或 pooled_add
+  MODEL_ARCHITECTURE  模型架构: perceiver_fusion（默认）、pooled_add 或 rtl_gcn
 EOF
 }
 
@@ -43,10 +43,14 @@ export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-4}"
 export NUMEXPR_NUM_THREADS="${NUMEXPR_NUM_THREADS:-4}"
 export TOKENIZERS_PARALLELISM="${TOKENIZERS_PARALLELISM:-false}"
 
-if [[ "$MODEL_ARCHITECTURE" != "perceiver_fusion" && "$MODEL_ARCHITECTURE" != "pooled_add" ]]; then
-    echo "错误: MODEL_ARCHITECTURE 必须是 perceiver_fusion 或 pooled_add" >&2
-    exit 2
-fi
+case "$MODEL_ARCHITECTURE" in
+    perceiver_fusion|pooled_add|rtl_gcn)
+        ;;
+    *)
+        echo "错误: MODEL_ARCHITECTURE 必须是 perceiver_fusion、pooled_add 或 rtl_gcn" >&2
+        exit 2
+        ;;
+esac
 
 DATASET_NAME=""
 DATA_ROOT=""

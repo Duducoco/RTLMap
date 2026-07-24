@@ -128,6 +128,22 @@ def test_run_contrastive_supports_pooled_add_architecture(tmp_path: Path) -> Non
     assert _argument_value(args, "--hyperrectangle-dim-per-type") == "5"
 
 
+def test_run_contrastive_supports_rtl_gcn_architecture(tmp_path: Path) -> None:
+    result, args = _run_script(
+        tmp_path,
+        None,
+        "--dataset",
+        "ibex",
+        extra_env={"MODEL_ARCHITECTURE": "rtl_gcn"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _argument_value(args, "--model-architecture") == "rtl_gcn"
+    assert _argument_value(args, "--experiment-name").endswith("-rtl-gcn")
+    assert "--joint-contrastive" in args
+    assert _argument_value(args, "--hyperrectangle-dim-per-type") == "5"
+
+
 def test_run_contrastive_rejects_unknown_model_architecture(tmp_path: Path) -> None:
     result, args = _run_script(
         tmp_path,

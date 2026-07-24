@@ -24,6 +24,7 @@ RTLMap/
 ├── pyproject.toml                  # Python 版本、依赖和 uv 配置
 ├── run_train.sh                    # 普通训练示例脚本
 ├── run_train_queue_no_fusion.sh    # pooled-add 无融合模型排队训练
+├── run_train_gcn_queue.sh          # RTL GCN baseline 排队训练
 ├── run_contrastive.sh              # joint contrastive 训练示例脚本
 ├── run_contrastive_queue_no_fusion.sh # pooled-add 对比学习排队训练
 ├── datasets/
@@ -331,7 +332,7 @@ uv run python main.py \
 |------|--------|------|
 | `--dataset-dir` | 必需 | 一个或多个 manifest 数据集目录 |
 | `--data-root` | 必需 | 预处理缓存根目录 |
-| `--model-architecture` | `perceiver_fusion` | `perceiver_fusion` 或无融合的 `pooled_add` |
+| `--model-architecture` | `perceiver_fusion` | `perceiver_fusion`、`pooled_add` 或 `rtl_gcn` |
 | `--hidden-dim` | `256` | 模型隐藏维度 |
 | `--num-gnn-layers` | `6` | GNN 层数 |
 | `--dropout` | `0.1` | dropout |
@@ -379,6 +380,25 @@ bash run_contrastive_queue_no_fusion.sh
 该脚本复用 `run_contrastive.sh` 的图回归、Hyperrectangle、volume loss 和 IoU
 loss 配置，默认输出到 `checkpoints/contrastive_no_fusion`。任一数据集训练失败时
 队列会立即停止，不会继续执行后续实验。
+
+### RTL GCN baseline
+
+`rtl_gcn` 仅将 RTL 分支的控制门控消息传递替换为 PyG `GCNConv`。标准 GCN
+不读取 RTL edge feature、edge type、node type 或 port index；ASM GNN、逐层双向
+Perceiver、mean pooling、图级 concat、回归 head 和 Hyperrectangle head 均保持不变。
+
+依次运行四个仅监督实验：
+
+```bash
+bash run_train_gcn_queue.sh
+```
+
+checkpoint 默认输出到 `checkpoints/rtl_gcn/<dataset>-4coverage-rtl-gcn/`。
+单个数据集使用 Hyperrectangle 和 contrastive loss：
+
+```bash
+MODEL_ARCHITECTURE=rtl_gcn bash run_contrastive.sh ibex
+```
 
 注意：`TrainerConfig` 中还存在 `use_bucketing`、`token_budget`、`strategy` 等配置，目前未在 `main.py` CLI 暴露。如需使用，可通过 Python API 构造配置。
 
