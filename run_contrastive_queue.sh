@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATASET_NAMES=(archgen_single picorv32 riscv_simple_multicycle)
+DATASET_NAMES=(archgen_single riscv_simple_multicycle ibex)
 
 print_dataset_order() {
     local dataset_name
