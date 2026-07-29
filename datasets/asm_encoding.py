@@ -29,7 +29,9 @@ def compute_asm_cache_key(asm_path: str, config_fingerprint: str) -> str:
 
 def _save_tensor_atomic(tensor: torch.Tensor, path: Path) -> None:
     tmp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    torch.save(tensor, tmp_path)
+    # Slices yielded from a multi-file encoding chunk share the chunk's storage.
+    # Saving the view directly would serialize that entire backing storage.
+    torch.save(tensor.clone(), tmp_path)
     os.replace(tmp_path, path)
 
 
