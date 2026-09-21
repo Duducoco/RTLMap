@@ -2,17 +2,17 @@
 
 ## RSA-GNN
 
-VeriPCP 将处理器 RTL 转换为控制数据流图（Control/Data-Flow Graph, CDFG），并使用控制感知图神经网络编码其结构与语义。给定 RTL 图
+RTLMap converts processor RTL into a control/data-flow graph (CDFG) and uses a control-aware graph neural network to encode its structural and semantic information. Given an RTL graph
 
 $$
 \mathcal{G}_{\mathrm{RTL}}=(\mathcal{V},\mathcal{E}),
 $$
 
-其中节点 $v_i\in\mathcal{V}$ 表示 RTL cell，有向边 $e_{ji}=(v_j,v_i)\in\mathcal{E}$ 表示从源节点 $v_j$ 到目标节点 $v_i$ 的信号依赖。编码器输出节点表示、边表示和图级 RTL 表示，用于后续覆盖率预测与 stimulus prioritization。
+each node $v_i\in\mathcal{V}$ represents an RTL cell, and each directed edge $e_{ji}=(v_j,v_i)\in\mathcal{E}$ represents a signal dependency from source node $v_j$ to target node $v_i$. The encoder produces node representations, edge representations, and a graph-level RTL representation for coverage prediction and stimulus prioritization.
 
 ### 1. Input Feature Encoding
 
-节点 $v_i$ 包含 cell 类型 $c_i$ 和信号位宽 $w_i$。其初始表示为
+Each node $v_i$ contains a cell type $c_i$ and signal width $w_i$. Its initial representation is
 
 $$
 \mathbf{h}_i^{(0)}=
@@ -22,9 +22,9 @@ $$
 \right),
 $$
 
-其中 $\operatorname{Emb}_{\mathrm{cell}}$ 是可学习的 cell-type embedding，$\operatorname{LN}$ 表示 Layer Normalization。对位宽取对数可以压缩 RTL 中跨度较大的数值范围。
+where $\operatorname{Emb}_{\mathrm{cell}}$ is a learnable cell-type embedding and $\operatorname{LN}$ denotes LayerNorm. The logarithmic width transform compresses the wide numerical range of RTL signal widths.
 
-每条边 $e_{ji}$ 包含边类型 $r_{ji}$、信号位宽 $w_{ji}$、源端口位置 $p_{ji}^{s}$ 和目标端口位置 $p_{ji}^{t}$。边类型包括 `DATA`、`DATA_TRUE`、`DATA_FALSE`、`CONTROL`、`CLOCK`、`RESET` 和 `ENABLE`。边的初始表示为
+Each edge $e_{ji}$ contains an edge type $r_{ji}$, signal width $w_{ji}$, source-port position $p_{ji}^{s}$, and target-port position $p_{ji}^{t}$. The initial edge representation is
 
 $$
 \mathbf{e}_{ji}^{(0)}=
@@ -36,11 +36,13 @@ $$
 \right],
 $$
 
-其中 $\Vert$ 表示向量拼接。端口位置使模型能够区分不同的操作数角色，例如减法器的输入 A 与输入 B。
+where $\Vert$ denotes concatenation. Port positions allow the model to distinguish operand roles, such as input A and input B of a subtractor.
+
+The RTL edge types are `DATA`, `DATA_TRUE`, `DATA_FALSE`, `CONTROL`, `CLOCK`, `RESET`, and `ENABLE`.
 
 ### 2. Edge Message Construction
 
-第 $\ell$ 层将源节点状态与边状态拼接。控制边和其他边分别使用独立的消息函数：
+At layer $\ell$, the source-node state and edge state are concatenated. Control edges and other edges use separate message functions:
 
 $$
 \mathbf{m}_{ji}^{(\ell)}=
@@ -50,11 +52,11 @@ $$
 & r_{ji}=\mathrm{CONTROL},\\[4pt]
 \phi_{\mathrm{data}}^{(\ell)}
 \left([\mathbf{h}_{j}^{(\ell)}\Vert\mathbf{e}_{ji}^{(\ell)}]\right),
-& \text{otherwise},
+& \text{otherwise}.
 \end{cases}
 $$
 
-其中 $\phi_{\mathrm{ctrl}}$ 和 $\phi_{\mathrm{data}}$ 均为带 GELU 激活函数的两层 MLP。编码器还为每条入边计算注意力权重：
+Both $\phi_{\mathrm{ctrl}}$ and $\phi_{\mathrm{data}}$ are two-layer MLPs with GELU activations. The encoder also computes an attention weight for each incoming edge:
 
 $$
 a_{ji}^{(\ell)}=
@@ -70,11 +72,11 @@ $$
 
 ### 3. Control-Aware Aggregation
 
-RTL 节点具有不同的电路语义，因此 VeriPCP 根据目标节点类型选择聚合路径，而不是对所有节点使用同一种聚合函数。
+RTL nodes have different circuit semantics. RSA-GNN therefore selects the aggregation path according to the target node type instead of applying one universal aggregation function.
 
-#### Multiplexer
+#### Multiplexer Nodes
 
-对包含控制边的 MUX 节点，首先聚合控制消息并生成 true/false 两个互斥门：
+For a MUX node with control edges, control messages are aggregated to produce two mutually exclusive gates:
 
 $$
 [g_i^{T},g_i^{F}]
@@ -85,7 +87,7 @@ f_{\mathrm{gate}}\left(
 \right).
 $$
 
-随后按门控权重组合 true 和 false 数据分支：
+The true and false data branches are then combined using the gate weights:
 
 $$
 \mathbf{a}_{i}^{\mathrm{mux}}
@@ -94,11 +96,11 @@ $$
 +\sum_{j\in\mathcal{N}_{\mathrm{other}}(i)}\mathbf{m}_{ji}.
 $$
 
-该机制显式建模 MUX 的互斥选择关系，而不是将两个数据分支无差别相加。
+This explicitly models the mutually exclusive selection behavior of a MUX rather than adding both data branches indiscriminately.
 
 #### Sequential Cells
 
-对寄存器和其他时序节点，编码器使用 reset 和 enable 的嵌套门控：
+For registers and other sequential cells, the encoder uses nested reset and enable gates:
 
 $$
 \mathbf{g}_{i}^{r}=\sigma(f_r(\mathbf{a}_{i}^{\mathrm{reset}})),
@@ -116,11 +118,11 @@ $$
 \right].
 $$
 
-其中 $\odot$ 表示逐元素乘法。该结构表达 reset、enable 和普通数据路径之间的层级关系。
+Here $\odot$ denotes element-wise multiplication. This represents the priority relationship among reset, enable, and ordinary data paths.
 
 #### Memory Cells
 
-Memory 节点根据目标端口位置学习逐维缩放向量：
+Memory nodes learn a per-dimension scaling vector for each target-port position:
 
 $$
 \mathbf{a}_{i}^{\mathrm{mem}}
@@ -129,11 +131,11 @@ $$
 \odot\mathbf{m}_{ji}.
 $$
 
-这使不同 memory 端口能够拥有不同的消息贡献。
+This allows different memory ports to contribute different messages.
 
 #### Arithmetic, Comparison, and Shift Cells
 
-对于操作数顺序敏感的节点，分别聚合端口 A 和端口 B：
+For cells whose semantics are sensitive to operand order, port A and port B are aggregated separately:
 
 $$
 \mathbf{a}_{i}^{A}=\sum_{j:p_{ji}^{t}=0}\mathbf{m}_{ji},
@@ -150,11 +152,11 @@ $$
 \right),
 $$
 
-其中 $t_i$ 区分 arithmetic、comparison 和 shift 三类操作。
+where $t_i$ distinguishes arithmetic, comparison, and shift semantics.
 
 #### Other Cells
 
-对于 logic、combinational 及其他节点，模型在注意力加权求和、均值和最大值之间学习类型相关的软选择：
+For logic, combinational, and other cells, the model learns a type-dependent soft mixture of attention-weighted sum, mean, and max aggregation:
 
 $$
 \mathbf{s}_{i}=\sum_{j\in\mathcal{N}(i)}
@@ -178,11 +180,11 @@ $$
 +\beta_i^q\mathbf{q}_{i}.
 $$
 
-最终聚合结果 $\mathbf{a}_{i}^{(\ell)}$ 由目标节点的 RTL 类型选择上述分支；当节点存在控制输入时，MUX 聚合具有最高优先级。
+The final aggregation result $\mathbf{a}_{i}^{(\ell)}$ is selected according to the RTL type of the target node. When a node has control inputs, the MUX aggregation path has the highest priority.
 
 ### 4. Node and Edge Updates
 
-节点状态通过残差连接、stochastic depth 和 LayerNorm 更新：
+Node states are updated with a residual connection, stochastic depth, and LayerNorm:
 
 $$
 \widetilde{\mathbf{h}}_{i}^{(\ell+1)}
@@ -198,7 +200,7 @@ $$
 \right).
 $$
 
-边状态只使用更新后的源节点状态和当前边状态：
+Edge states use the updated source-node state and the current edge state:
 
 $$
 \widetilde{\mathbf{e}}_{ji}^{(\ell+1)}
@@ -214,17 +216,17 @@ $$
 \right).
 $$
 
-仅依赖源节点更新边状态，保持了 RTL 信号沿有向连接传播的语义。网络共堆叠 $L$ 个控制感知 GNN 层，且 DropPath 比例随深度线性增加。
+Updating edges from the source-node state preserves the directionality of RTL signal propagation. The encoder stacks $L$ control-aware GNN layers, with a linearly increasing DropPath rate over depth.
 
 ### 5. Graph-Level RTL Representation
 
-经过 $L$ 层传播后，节点状态先经过输出投影：
+After $L$ propagation layers, node states are projected as
 
 $$
 \mathbf{z}_{i}=\mathbf{W}_{o}\mathbf{h}_{i}^{(L)}+\mathbf{b}_{o}.
 $$
 
-对属于同一个 RTL 图的全部节点执行全局均值池化，得到图级表示：
+Global mean pooling over all nodes in an RTL graph produces the graph-level representation:
 
 $$
 \mathbf{z}_{\mathrm{RTL}}
@@ -232,23 +234,23 @@ $$
 \sum_{v_i\in\mathcal{V}}\mathbf{z}_{i}.
 $$
 
-$\mathbf{z}_{\mathrm{RTL}}$ 汇总了 cell 类型、信号位宽、边类型、端口角色和控制流语义，是 VeriPCP 进行预仿真覆盖率建模和测试激励排序的 RTL 表征。
+$\mathbf{z}_{\mathrm{RTL}}$ summarizes cell types, signal widths, edge types, port roles, and control-flow semantics. It is the RTL representation used by RTLMap for pre-simulation coverage modeling and stimulus ranking.
 
 ### 6. Default Configuration
 
 | Parameter | Default | Description |
 | --- | ---: | --- |
-| Hidden dimension $D$ | 256 | 节点与边隐状态维度 |
-| GNN layers $L$ | 4 | 控制感知消息传递层数 |
-| Cell types | 74 | RTL cell-type vocabulary 大小 |
-| Edge types | 7 | RTL 依赖边类型数量 |
-| Maximum port positions | 8 | 端口位置 embedding 范围 |
-| Maximum DropPath rate | 0.1 | 最深 GNN 层的 stochastic-depth 比例 |
+| Hidden dimension $D$ | 256 | Dimension of node and edge hidden states |
+| GNN layers $L$ | 4 | Number of control-aware message-passing layers |
+| Cell types | 74 | Size of the RTL cell-type vocabulary |
+| Edge types | 7 | Number of RTL dependency edge types |
+| Maximum port positions | 8 | Range of port-position embeddings |
+| Maximum DropPath rate | 0.1 | Stochastic-depth rate at the deepest GNN layer |
 
 ### 7. Implementation
 
-RTL encoder 的主要实现位于：
+The main RTL encoder implementation is located in:
 
-- `models/encoder.py`: `RTLNodeFeatureEncoder`、`RTLEdgeFeatureEncoder` 和 `ControlGatedGNNLayer`；
-- `cdfg_rtl/data_types.py`: RTL cell、node 和 edge 类型定义；
-- `models/model.py`: RTL encoder 与覆盖率预测模型的集成。
+- `models/encoder.py`: `RTLNodeFeatureEncoder`, `RTLEdgeFeatureEncoder`, and `ControlGatedGNNLayer`;
+- `cdfg_rtl/data_types.py`: RTL cell, node, and edge type definitions;
+- `models/model.py`: integration of the RTL encoder with the coverage prediction model.
